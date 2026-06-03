@@ -31,8 +31,7 @@ from telegram.ext import (
 from flask import Flask, request, jsonify
 import threading
 
-BOT_TOKEN = "PASTE_YOUR_BOT_TOKEN_HERE"
-ALERT_CHAT_ID = 0
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -876,8 +875,6 @@ async def post_init(app: Application):
     logger.info("=" * 60)
 
 
-import os
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
 
 def main():
     if BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE")
