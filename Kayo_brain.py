@@ -53,7 +53,9 @@ def health():
 @flask_app.route('/health')
 def health_check():
     return "OK", 200
-
+@flask_app.route('/ping')
+def ping():
+    return "OK", 200
 def run_webserver():
     flask_app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False)
 
