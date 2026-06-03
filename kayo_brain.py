@@ -877,7 +877,7 @@ async def post_init(app: Application):
 
 
 def main():
-    if BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE")
+    if BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
         print("\n" + "=" * 60)
         print("⚠️  PLEASE SET YOUR BOT TOKEN!")
         print("=" * 60)
