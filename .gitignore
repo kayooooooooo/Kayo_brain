@@ -1,0 +1,8 @@
+*.pyc
+__pycache__/
+*.log
+kayo_memory.json
+kayo_strategies.json
+kayo_images/
+.env
+.DS_Store
