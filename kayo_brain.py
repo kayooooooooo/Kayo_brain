@@ -877,12 +877,12 @@ async def post_init(app: Application):
 
 
 def main():
-    if BOT_TOKEN == "8819659090:AAHeGHZuiG7_1tyQJtq5ZqyQ5Lr_rS4n7VE":
+    if BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
         print("\n" + "=" * 60)
         print("⚠️  PLEASE SET YOUR BOT TOKEN!")
         print("=" * 60)
         print("\nOpen kayo_brain.py and change:")
-        print('BOT_TOKEN = "8819659090:AAHeGHZuiG7_1tyQJtq5ZqyQ5Lr_rS4n7VE"')
+        print('BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE"')
         print("\nto:")
         print('BOT_TOKEN = "YOUR_ACTUAL_BOT_TOKEN"')
         print("\nGet a token from @BotFather on Telegram")
