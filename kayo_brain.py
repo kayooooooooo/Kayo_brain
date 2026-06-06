@@ -20,6 +20,7 @@ from typing import Optional, List, Dict
 from urllib.parse import quote_plus
 
 import aiohttp
+import redis
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     BotCommand, MenuButtonCommands, WebAppInfo,
@@ -57,6 +58,21 @@ threading.Thread(
 ).start()
 logger.info("🌐 Web server started on port 8080")
 
+
+# ── Redis (for persistent state on Render) ────────────────────
+REDIS_URL = os.environ.get("REDIS_URL", "")
+_redis = None
+if REDIS_URL:
+    try:
+        _redis = redis.from_url(REDIS_URL, decode_responses=True)
+        _redis.ping()
+        logger.info("✅ Redis connected — state will persist across restarts")
+    except Exception as e:
+        logger.warning(f"⚠️  Redis connection failed: {e} — falling back to local JSON")
+        _redis = None
+else:
+    logger.info("ℹ️  No REDIS_URL set — using local JSON for state (will reset on redeploy)")
+
 # ── Global state ──────────────────────────────────────────────
 settings:         Dict[int, Dict]  = {}
 active_calls:     Dict[int, Dict]  = {}
@@ -75,51 +91,68 @@ strategy_weights: Dict[str, float] = {
 reminders: List[Dict] = []
 
 # ── Persistence helpers ───────────────────────────────────────
-STATE_FILE = "kayo_state.json"
+STATE_FILE  = "kayo_state.json"
+REDIS_KEY   = "kayo_brain_state"
+
+def _state_dict():
+    return {
+        "settings":         {str(k): v for k, v in settings.items()},
+        "active_calls":     {str(k): v for k, v in active_calls.items()},
+        "closed_calls":     {str(k): v for k, v in closed_calls.items()},
+        "user_xp":          {str(k): v for k, v in user_xp.items()},
+        "tracked_wallets":  tracked_wallets,
+        "my_wallets":       {str(k): v for k, v in my_wallets.items()},
+        "kayo_knowledge":   kayo_knowledge,
+        "strategy_records": strategy_records,
+        "strategy_weights": strategy_weights,
+        "reminders":        reminders,
+        "watchlist":        watchlist,
+    }
+
+def _apply_state(data: dict):
+    global settings, active_calls, closed_calls, user_xp
+    global tracked_wallets, my_wallets, kayo_knowledge
+    global strategy_records, reminders, watchlist
+    settings         = {int(k): v for k, v in data.get("settings", {}).items()}
+    active_calls     = {int(k): v for k, v in data.get("active_calls", {}).items()}
+    closed_calls     = {int(k): v for k, v in data.get("closed_calls", {}).items()}
+    user_xp          = {int(k): v for k, v in data.get("user_xp", {}).items()}
+    tracked_wallets  = data.get("tracked_wallets", {})
+    my_wallets       = {int(k): v for k, v in data.get("my_wallets", {}).items()}
+    kayo_knowledge   = data.get("kayo_knowledge", [])
+    strategy_records = data.get("strategy_records", [])
+    strategy_weights.update(data.get("strategy_weights", {}))
+    reminders        = data.get("reminders", [])
+    watchlist        = data.get("watchlist", {})
 
 def save_state():
-    """Save in-memory state to disk so it survives restarts."""
+    """Save state to Redis (primary) or local JSON (fallback)."""
     try:
-        data = {
-            "settings":         {str(k): v for k, v in settings.items()},
-            "active_calls":     {str(k): v for k, v in active_calls.items()},
-            "closed_calls":     {str(k): v for k, v in closed_calls.items()},
-            "user_xp":          {str(k): v for k, v in user_xp.items()},
-            "tracked_wallets":  tracked_wallets,
-            "my_wallets":       {str(k): v for k, v in my_wallets.items()},
-            "kayo_knowledge":   kayo_knowledge,
-            "strategy_records": strategy_records,
-            "strategy_weights": strategy_weights,
-            "reminders":        reminders,
-            "watchlist":        watchlist,
-        }
-        with open(STATE_FILE, "w") as f:
-            json.dump(data, f)
+        data = json.dumps(_state_dict())
+        if _redis:
+            _redis.set(REDIS_KEY, data)
+        else:
+            with open(STATE_FILE, "w") as f:
+                f.write(data)
     except Exception as e:
         logger.warning(f"save_state error: {e}")
 
 def load_state():
-    """Load persisted state from disk on startup."""
-    global settings, active_calls, closed_calls, user_xp
-    global tracked_wallets, my_wallets, kayo_knowledge
-    global strategy_records, reminders, watchlist
+    """Load state from Redis (primary) or local JSON (fallback)."""
     try:
-        if not os.path.exists(STATE_FILE):
-            return
-        with open(STATE_FILE) as f:
-            data = json.load(f)
-        settings         = {int(k): v for k, v in data.get("settings", {}).items()}
-        active_calls     = {int(k): v for k, v in data.get("active_calls", {}).items()}
-        closed_calls     = {int(k): v for k, v in data.get("closed_calls", {}).items()}
-        user_xp          = {int(k): v for k, v in data.get("user_xp", {}).items()}
-        tracked_wallets  = data.get("tracked_wallets", {})
-        my_wallets       = {int(k): v for k, v in data.get("my_wallets", {}).items()}
-        kayo_knowledge   = data.get("kayo_knowledge", [])
-        strategy_records = data.get("strategy_records", [])
-        strategy_weights.update(data.get("strategy_weights", {}))
-        reminders        = data.get("reminders", [])
-        watchlist        = data.get("watchlist", {})
-        logger.info(f"✅ State loaded: {len(watchlist)} watched, {len(user_xp)} users, {len(kayo_knowledge)} knowledge items")
+        if _redis:
+            raw = _redis.get(REDIS_KEY)
+            if raw:
+                data = json.loads(raw)
+                _apply_state(data)
+                logger.info(f"✅ State loaded from Redis: {len(watchlist)} watched, {len(user_xp)} users, {len(kayo_knowledge)} knowledge items")
+                return
+        # Fallback to local JSON
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE) as f:
+                data = json.load(f)
+            _apply_state(data)
+            logger.info(f"✅ State loaded from JSON: {len(watchlist)} watched, {len(user_xp)} users")
     except Exception as e:
         logger.warning(f"load_state error: {e}")
 
