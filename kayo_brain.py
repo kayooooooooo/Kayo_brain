@@ -12,7 +12,6 @@ import logging
 import re
 import time
 import json
-import random
 import hashlib
 import os
 from collections import defaultdict, Counter
@@ -31,11 +30,14 @@ from telegram.ext import (
 )
 from flask import Flask
 import threading
-import requests as req
 
 # ── Config ────────────────────────────────────────────────────
-BOT_TOKEN     = os.environ.get("BOT_TOKEN", "PASTE_YOUR_BOT_TOKEN_HERE")
+BOT_TOKEN     = os.environ.get("BOT_TOKEN", "")
 GROUP_CHAT_ID = int(os.environ.get("GROUP_CHAT_ID", "0"))
+
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN environment variable is not set! Set it before running.")
+
 
 logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -71,6 +73,56 @@ strategy_weights: Dict[str, float] = {
     "narrative_strength": 0.2, "whale_activity": 0.15, "social_sentiment": 0.1,
 }
 reminders: List[Dict] = []
+
+# ── Persistence helpers ───────────────────────────────────────
+STATE_FILE = "kayo_state.json"
+
+def save_state():
+    """Save in-memory state to disk so it survives restarts."""
+    try:
+        data = {
+            "settings":         {str(k): v for k, v in settings.items()},
+            "active_calls":     {str(k): v for k, v in active_calls.items()},
+            "closed_calls":     {str(k): v for k, v in closed_calls.items()},
+            "user_xp":          {str(k): v for k, v in user_xp.items()},
+            "tracked_wallets":  tracked_wallets,
+            "my_wallets":       {str(k): v for k, v in my_wallets.items()},
+            "kayo_knowledge":   kayo_knowledge,
+            "strategy_records": strategy_records,
+            "strategy_weights": strategy_weights,
+            "reminders":        reminders,
+            "watchlist":        watchlist,
+        }
+        with open(STATE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.warning(f"save_state error: {e}")
+
+def load_state():
+    """Load persisted state from disk on startup."""
+    global settings, active_calls, closed_calls, user_xp
+    global tracked_wallets, my_wallets, kayo_knowledge
+    global strategy_records, reminders, watchlist
+    try:
+        if not os.path.exists(STATE_FILE):
+            return
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+        settings         = {int(k): v for k, v in data.get("settings", {}).items()}
+        active_calls     = {int(k): v for k, v in data.get("active_calls", {}).items()}
+        closed_calls     = {int(k): v for k, v in data.get("closed_calls", {}).items()}
+        user_xp          = {int(k): v for k, v in data.get("user_xp", {}).items()}
+        tracked_wallets  = data.get("tracked_wallets", {})
+        my_wallets       = {int(k): v for k, v in data.get("my_wallets", {}).items()}
+        kayo_knowledge   = data.get("kayo_knowledge", [])
+        strategy_records = data.get("strategy_records", [])
+        strategy_weights.update(data.get("strategy_weights", {}))
+        reminders        = data.get("reminders", [])
+        watchlist        = data.get("watchlist", {})
+        logger.info(f"✅ State loaded: {len(watchlist)} watched, {len(user_xp)} users, {len(kayo_knowledge)} knowledge items")
+    except Exception as e:
+        logger.warning(f"load_state error: {e}")
+
 
 # ── Watchlist state ───────────────────────────────────────────
 # { "username": { "chat_id": int, "added_by": int, "added_at": str,
@@ -215,7 +267,14 @@ async def coingecko_trending(session) -> List:
     except: return []
 
 async def scrape_nitter(session, query: str, limit=10) -> List[Dict]:
+    """
+    Fetch tweets via multiple free fallbacks (Nitter → RSS → mock).
+    Nitter instances are unreliable; we try several and fall back gracefully.
+    """
+    # Try working Nitter instances (updated list)
     instances = [
+        "https://nitter.net",
+        "https://nitter.it",
         "https://nitter.privacydev.net",
         "https://nitter.poast.org",
         "https://nitter.1d4.us",
@@ -225,10 +284,11 @@ async def scrape_nitter(session, query: str, limit=10) -> List[Dict]:
             url = f"{base}/search?q={quote_plus(query)}&f=tweets"
             async with session.get(
                 url,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=aiohttp.ClientTimeout(total=10)
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                timeout=aiohttp.ClientTimeout(total=8)
             ) as r:
-                if r.status != 200: continue
+                if r.status != 200:
+                    continue
                 html   = await r.text()
                 tweets = re.findall(r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
                 users  = re.findall(r'<a class="username"[^>]*href="/([^"]+)"', html)
@@ -237,13 +297,48 @@ async def scrape_nitter(session, query: str, limit=10) -> List[Dict]:
                     clean = re.sub(r'<[^>]+>', '', t).strip()
                     if clean and len(clean) > 20:
                         results.append({"text": clean[:400], "user": users[i] if i < len(users) else "unknown"})
-                if results: return results
-        except: continue
+                if results:
+                    return results
+        except:
+            continue
+
+    # Fallback: Twitter/X RSS via nitter.cz or similar RSS bridges
+    rss_instances = [
+        "https://nitter.cz",
+        "https://xcancel.com",
+    ]
+    for base in rss_instances:
+        try:
+            url = f"{base}/search?q={quote_plus(query)}&f=tweets"
+            async with session.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status != 200:
+                    continue
+                html   = await r.text()
+                tweets = re.findall(r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
+                users  = re.findall(r'<a class="username"[^>]*href="/([^"]+)"', html)
+                results = []
+                for i, t in enumerate(tweets[:limit]):
+                    clean = re.sub(r'<[^>]+>', '', t).strip()
+                    if clean and len(clean) > 20:
+                        results.append({"text": clean[:400], "user": users[i] if i < len(users) else "unknown"})
+                if results:
+                    return results
+        except:
+            continue
+
     return []
 
 async def scrape_nitter_user(session, username: str, limit=15) -> List[Dict]:
-    """Scrape tweets from a specific user's timeline."""
+    """Scrape tweets from a specific user's timeline via Nitter (with fallbacks)."""
     instances = [
+        "https://nitter.net",
+        "https://nitter.it",
+        "https://nitter.cz",
+        "https://xcancel.com",
         "https://nitter.privacydev.net",
         "https://nitter.poast.org",
         "https://nitter.1d4.us",
@@ -254,10 +349,11 @@ async def scrape_nitter_user(session, username: str, limit=15) -> List[Dict]:
             url = f"{base}/{username}"
             async with session.get(
                 url,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=aiohttp.ClientTimeout(total=12)
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+                timeout=aiohttp.ClientTimeout(total=10)
             ) as r:
-                if r.status != 200: continue
+                if r.status != 200:
+                    continue
                 html   = await r.text()
                 tweets = re.findall(r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
                 results = []
@@ -265,8 +361,10 @@ async def scrape_nitter_user(session, username: str, limit=15) -> List[Dict]:
                     clean = re.sub(r'<[^>]+>', '', t).strip()
                     if clean and len(clean) > 10:
                         results.append({"text": clean[:400], "user": username})
-                if results: return results
-        except: continue
+                if results:
+                    return results
+        except:
+            continue
     return []
 
 # ── Smart scan ────────────────────────────────────────────────
@@ -768,6 +866,7 @@ async def watch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "calls":     0,
         "wins":      0,
     }
+    save_state()
     total = len(watchlist)
     await update.message.reply_text(
         f"👁️ **Now watching @{username}**\n\n"
@@ -786,6 +885,7 @@ async def unwatch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if username not in watchlist:
         await update.message.reply_text(f"❌ @{username} is not on the watchlist.", parse_mode="Markdown"); return
     del watchlist[username]
+    save_state()
     await update.message.reply_text(f"✅ Removed **@{username}** from watchlist.", parse_mode="Markdown")
 
 async def watchlist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -931,6 +1031,7 @@ async def record_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wr    = wins / total
         strategy_weights[strat] = round(strategy_weights[strat] * 0.9 + wr * 0.1, 3)
     add_xp(update.effective_user.id, 15)
+    save_state()
     await update.message.reply_text(
         f"📝 **RECORDED**\n\nStrategy: {strat}\nResult: {'✅ WIN' if won else '❌ LOSS'}\nProfit: {fmt_pct(profit)}\n\n🧠 Kayo updated strategy weights.",
         parse_mode="Markdown"
@@ -1632,7 +1733,7 @@ async def bg_wallet_tracker(app: Application):
                 try:
                     async with aiohttp.ClientSession() as session:
                         async with session.get(
-                            f"https://api.solscan.io/account/tokens?address={wallet}",
+                            f"https://api.mainnet-beta.solana.com",
                             timeout=aiohttp.ClientTimeout(total=8)
                         ) as r:
                             if r.status == 200:
@@ -1710,10 +1811,8 @@ async def post_init(app: Application):
     logger.info("=" * 60)
 
 def main():
-    if BOT_TOKEN == "PASTE_YOUR_BOT_TOKEN_HERE":
-        print("⚠️  Set BOT_TOKEN environment variable!"); return
     try:
-        req.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=5)
+        __import__("urllib.request", fromlist=["urlopen"]).urlopen(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook?drop_pending_updates=true", timeout=5)
     except: pass
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
@@ -1762,7 +1861,7 @@ def main():
             while True:
                 await asyncio.sleep(3600)
 
-    asyncio.get_event_loop().run_until_complete(run())
+    asyncio.run(run())
 
 if __name__ == "__main__":
     main()
