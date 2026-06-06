@@ -1,1 +1,1 @@
-worker: python kayo_brain.py
+web: python kayo_brain.py
