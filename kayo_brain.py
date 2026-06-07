@@ -55,10 +55,10 @@ def health(): return "🦅 Kayo Brain v13 alive!", 200
 @flask_app.route('/health')
 def hc(): return "OK", 200
 threading.Thread(
-    target=lambda: flask_app.run(host='0.0.0.0', port=8080, debug=False, use_reloader=False),
+    target=lambda: flask_app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 8080)), debug=False, use_reloader=False),
     daemon=True
 ).start()
-logger.info("🌐 Web server started on port 8080")
+logger.info(f"🌐 Web server started on port {os.environ.get('PORT', 8080)}")
 
 
 # ── Redis (for persistent state on Render) ────────────────────
@@ -147,6 +147,9 @@ def _state_dict():
         "strategy_weights": strategy_weights,
         "reminders":        reminders,
         "watchlist":        watchlist,
+        "price_alerts":     {str(k): v for k, v in price_alerts.items()},
+        "portfolio":        {str(k): v for k, v in portfolio.items()},
+        "blacklist":        list(blacklist),
     }
 
 def _apply_state(data: dict):
@@ -412,7 +415,7 @@ async def dex_trending_solana(session) -> List[Dict]:
     """Get trending Solana pairs from DexScreener with full data."""
     try:
         async with session.get(
-            "https://api.dexscreener.com/latest/dex/search?q=solana",
+            "https://api.dexscreener.com/latest/dex/search?q=solana&chainIds=solana",
             timeout=aiohttp.ClientTimeout(total=12)
         ) as r:
             if r.status != 200:
@@ -1951,7 +1954,8 @@ async def gems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not top:
         await wait.edit_text("💎 No gems found right now — market may be slow. Try again in 5 min."); return
 
-    if _gemini:
+    if _gemini and top:
+        # Send all gems in ONE Gemini call (not per-token) to stay within rate limit
         token_summary = "\n".join([
             f"${c['symbol']}: MCap {fmt_usd(c['fdv'])}, Liq {fmt_usd(c['liq'])}, 1h {fmt_pct(c['ch_1h'])}, buy pressure {c['buy_pressure']:.1f}x"
             for c in top
@@ -2217,6 +2221,7 @@ async def bg_dex_fast_scanner(app: Application):
                     gem_alerts_sent.add(alert_key)
                     ai_take = ""
                     if _gemini and alert_type in ("pump", "gem", "whale"):
+                        await asyncio.sleep(2)  # Gemini rate limit buffer (15 req/min)
                         ai_take = await gemini_ask(
                             f"One sentence: is this {alert_type} on ${symbol} (MCap {fmt_usd(fdv)}, 5m {fmt_pct(ch_5m)}) worth acting on? Be direct.",
                             fallback=""
@@ -2357,7 +2362,8 @@ async def bg_news_scanner(app: Application):
                 # If there are genuinely new articles, post a summary
                 if new_articles and GROUP_CHAT_ID != 0:
                     headlines = "\n".join([f"• {a['title']}" for a in new_articles[:5]])
-                    if _gemini:
+                    # Only call Gemini for news if 3+ new articles (avoid wasting rate limit on 1 headline)
+                    if _gemini and len(new_articles) >= 3:
                         summary = await gemini_ask(
                             f"Summarize these crypto news headlines in 2 sentences. Flag anything urgent (hacks, regulations, big moves). Be punchy.\n\n{headlines}",
                             fallback=""
