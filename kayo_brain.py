@@ -21,6 +21,8 @@ from urllib.parse import quote_plus
 
 import aiohttp
 import redis
+import xml.etree.ElementTree as ET
+import google.generativeai as genai
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     BotCommand, MenuButtonCommands, WebAppInfo,
@@ -73,6 +75,32 @@ if REDIS_URL:
 else:
     logger.info("ℹ️  No REDIS_URL set — using local JSON for state (will reset on redeploy)")
 
+
+# ── Gemini AI ─────────────────────────────────────────────────
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+_gemini = None
+if GEMINI_API_KEY:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        _gemini = genai.GenerativeModel("gemini-1.5-flash")
+        logger.info("✅ Gemini AI connected")
+    except Exception as e:
+        logger.warning(f"⚠️  Gemini init failed: {e}")
+else:
+    logger.info("ℹ️  No GEMINI_API_KEY — AI features disabled")
+
+async def gemini_ask(prompt: str, fallback: str = "") -> str:
+    """Ask Gemini a question. Returns fallback string on failure."""
+    if not _gemini:
+        return fallback
+    try:
+        loop = asyncio.get_event_loop()
+        resp = await loop.run_in_executor(None, lambda: _gemini.generate_content(prompt))
+        return resp.text.strip()[:1000]
+    except Exception as e:
+        logger.warning(f"Gemini error: {e}")
+        return fallback
+
 # ── Global state ──────────────────────────────────────────────
 settings:         Dict[int, Dict]  = {}
 active_calls:     Dict[int, Dict]  = {}
@@ -89,6 +117,18 @@ strategy_weights: Dict[str, float] = {
     "narrative_strength": 0.2, "whale_activity": 0.15, "social_sentiment": 0.1,
 }
 reminders: List[Dict] = []
+
+# ── Enhanced tracking state ───────────────────────────────────
+pump_seen:         set  = set()          # pumpfun tokens already alerted
+dex_baseline:      Dict = {}             # address -> {price, vol, buys} for movement detection
+gem_alerts_sent:   set  = set()          # avoid duplicate gem alerts
+news_cache:        List = []             # last CryptoPanic headlines
+last_news_fetch:   float = 0.0          # timestamp of last news fetch
+price_alerts:      Dict = {}            # uid -> [{address, symbol, target, direction}]
+portfolio:         Dict = {}            # uid -> [{address, symbol, amount, buy_price}]
+blacklist:         set  = set()         # addresses user flagged as rugs
+top_callers:       Dict = {}            # uid -> {calls, wins, total_profit}
+group_messages:    List = []            # rolling last 50 group messages for summary
 
 # ── Persistence helpers ───────────────────────────────────────
 STATE_FILE  = "kayo_state.json"
@@ -194,6 +234,7 @@ def add_xp(uid: int, amount: int = 5):
     user_xp[uid] = user_xp.get(uid, 0) + amount
 
 def kayo_opinion(momentum: float, rug: float, vol_ratio: float) -> str:
+    """Basic synchronous opinion (used as fallback when Gemini unavailable)."""
     w_mom = strategy_weights.get("momentum", 0.3)
     w_vol = strategy_weights.get("volume_spike", 0.25)
     score = momentum * w_mom + min(100, vol_ratio * 20) * w_vol + rug * 0.2
@@ -208,6 +249,45 @@ def kayo_opinion(momentum: float, rug: float, vol_ratio: float) -> str:
         return f"🟠 **KAYO SAYS: DEAD** — No momentum. Find a better coin.{learned}"
     else:
         return f"🟠 **KAYO SAYS: CAUTION** — Mixed signals. Small size only.{learned}"
+
+async def kayo_opinion_ai(token_data: dict) -> str:
+    """Gemini-powered deep analysis of a token."""
+    if not _gemini:
+        return kayo_opinion(
+            token_data.get("momentum_score", 0),
+            token_data.get("rug_score", 100),
+            token_data.get("vol_ratio", 1)
+        )
+    news_ctx = ""
+    if news_cache:
+        headlines = [n["title"] for n in news_cache[:5]]
+        news_ctx = "Recent crypto news: " + " | ".join(headlines)
+
+    prompt = f"""You are Kayo, a sharp Web3 alpha analyst. Analyze this Solana token and give a short, punchy verdict (max 3 sentences). Be direct — ape, watch, or avoid. Use emojis.
+
+Token: ${token_data.get('symbol','?')} ({token_data.get('name','?')})
+Price: {fmt_price(token_data.get('price',0))}
+Market Cap: {fmt_usd(token_data.get('fdv',0))}
+Liquidity: {fmt_usd(token_data.get('liq',0))}
+1h change: {fmt_pct(token_data.get('ch_1h',0))}
+5m change: {fmt_pct(token_data.get('ch_5m',0))}
+24h change: {fmt_pct(token_data.get('ch_24h',0))}
+Momentum score: {token_data.get('momentum_score',0)}/100
+Safety/Rug score: {token_data.get('rug_score',0)}/100
+Volume spike: {token_data.get('vol_ratio',1):.1f}x
+Buys (1h): {token_data.get('buys_1h',0)} | Sells (1h): {token_data.get('sells_1h',0)}
+Narrative: {token_data.get('narrative','unknown')}
+Liq/MCap ratio: {token_data.get('liq_ratio',0)*100:.1f}%
+{news_ctx}
+
+Give your verdict starting with 🟢 APE / 🟡 WATCH / 🟠 CAUTION / 🔴 AVOID:"""
+
+    result = await gemini_ask(prompt, fallback=kayo_opinion(
+        token_data.get("momentum_score", 0),
+        token_data.get("rug_score", 100),
+        token_data.get("vol_ratio", 1)
+    ))
+    return f"🧠 **KAYO AI:** {result}"
 
 # ── API helpers ───────────────────────────────────────────────
 async def dex_token(session, address: str) -> Optional[Dict]:
@@ -258,6 +338,106 @@ async def goplus_sec(session, address: str) -> Dict:
             result = data.get("result", {})
             return result.get(address.lower(), result.get(address, {}))
     except: return {}
+
+
+# ── CryptoPanic RSS ───────────────────────────────────────────
+async def fetch_cryptopanic(session, filter_type="rising") -> List[Dict]:
+    """Fetch latest crypto news from CryptoPanic RSS (no key needed)."""
+    urls = [
+        "https://cryptopanic.com/news/rss/",
+        f"https://cryptopanic.com/news/{filter_type}/rss/",
+    ]
+    results = []
+    for url in urls:
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10),
+                                   headers={"User-Agent": "Mozilla/5.0"}) as r:
+                if r.status != 200:
+                    continue
+                text = await r.text()
+                root = ET.fromstring(text)
+                for item in root.findall('.//item')[:15]:
+                    title = item.findtext('title','').strip()
+                    link  = item.findtext('link','').strip()
+                    pub   = item.findtext('pubDate','').strip()
+                    desc  = item.findtext('description','').strip()
+                    if title:
+                        results.append({"title": title, "link": link, "pub": pub, "desc": desc})
+                if results:
+                    return results
+        except Exception as e:
+            logger.debug(f"CryptoPanic RSS error: {e}")
+            continue
+    return results
+
+# ── PumpFun API ───────────────────────────────────────────────
+async def pumpfun_new_tokens(session, limit=20) -> List[Dict]:
+    """Fetch newest tokens from pump.fun."""
+    try:
+        async with session.get(
+            "https://frontend-api.pump.fun/coins?offset=0&limit=20&sort=created_timestamp&order=DESC&includeNsfw=false",
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            if r.status != 200:
+                return []
+            data = await r.json()
+            if isinstance(data, list):
+                return data[:limit]
+            return []
+    except Exception as e:
+        logger.debug(f"PumpFun API error: {e}")
+        return []
+
+async def pumpfun_graduating(session) -> List[Dict]:
+    """Fetch tokens close to graduating from pump.fun (near bonding curve completion)."""
+    try:
+        async with session.get(
+            "https://frontend-api.pump.fun/coins?offset=0&limit=20&sort=market_cap&order=DESC&includeNsfw=false",
+            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            if r.status != 200:
+                return []
+            data = await r.json()
+            if isinstance(data, list):
+                # Filter near graduation (market cap > 50k = close to 69k bonding curve)
+                return [t for t in data if t.get("market_cap", 0) > 50000][:10]
+            return []
+    except Exception as e:
+        logger.debug(f"PumpFun graduating error: {e}")
+        return []
+
+async def dex_trending_solana(session) -> List[Dict]:
+    """Get trending Solana pairs from DexScreener with full data."""
+    try:
+        async with session.get(
+            "https://api.dexscreener.com/latest/dex/search?q=solana",
+            timeout=aiohttp.ClientTimeout(total=12)
+        ) as r:
+            if r.status != 200:
+                return []
+            data = await r.json()
+            pairs = [p for p in data.get("pairs", []) if p.get("chainId") == "solana"]
+            return sorted(pairs, key=lambda x: float(x.get("volume",{}).get("h24",0) or 0), reverse=True)
+    except:
+        return []
+
+async def dex_new_pairs(session) -> List[Dict]:
+    """Get newest Solana pairs from DexScreener."""
+    try:
+        async with session.get(
+            "https://api.dexscreener.com/token-profiles/latest/v1",
+            timeout=aiohttp.ClientTimeout(total=10)
+        ) as r:
+            if r.status != 200:
+                return []
+            data = await r.json()
+            if isinstance(data, list):
+                return [t for t in data if t.get("chainId") == "solana"][:20]
+            return []
+    except:
+        return []
 
 async def coingecko_coin(session, coin_id: str) -> Optional[Dict]:
     try:
@@ -560,6 +740,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• `/status` — Bot status\n"
         "• `/buttons` — Toggle chart buttons\n"
         "• `/autoresponder` — Toggle CA auto-scan\n\n"
+        "**🤖 AI Features (Gemini):**\n"
+        "• `/ask <question>` — Ask Kayo AI anything\n"
+        "• `/sentiment` — AI market analysis\n"
+        "• `/gems` — AI gem finder\n"
+        "• `/gsum` — AI group chat summary\n"
+        "• `/cryptonews` — AI-summarized crypto news\n\n"
+        "**🎰 PumpFun:**\n"
+        "• `/pump` — Newest launches\n"
+        "• `/graduating` — About to hit DEX\n\n"
+        "**🔔 Alerts & Portfolio:**\n"
+        "• `/alert <ca> <above|below> <price>` — Price alert\n"
+        "• `/myalerts` — Your alerts\n"
+        "• `/delalert <n>` — Remove alert\n"
+        "• `/addport <ca> <amount> <price>` — Add to portfolio\n"
+        "• `/portfolio` — Live P&L\n"
+        "• `/blacklist <ca>` — Flag a rug\n\n"
         "Drop any CA in chat for instant scan 🦅",
         parse_mode="Markdown"
     )
@@ -569,13 +765,17 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         await update.message.reply_text("Usage: `/scan <token_address>`", parse_mode="Markdown"); return
     address = context.args[0].strip()
-    wait    = await update.message.reply_text("🔍 Scanning...")
+    wait    = await update.message.reply_text("🔍 Scanning" + (" + asking Kayo AI..." if _gemini else "..."))
     a       = await smart_scan(address)
     if a.get("error"):
         await wait.edit_text(f"❌ {a['error']}"); return
     add_xp(update.effective_user.id, 5)
+    # Use Gemini AI opinion if available
+    if _gemini:
+        a["opinion"] = await kayo_opinion_ai(a)
+    card = build_scan_card(a)
     await wait.edit_text(
-        build_scan_card(a),
+        card,
         reply_markup=get_chart_buttons(address, a['symbol']),
         parse_mode="Markdown", disable_web_page_preview=True
     )
@@ -1488,6 +1688,307 @@ async def autoresponder_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
+
+# ── Gemini AI Chat ────────────────────────────────────────────
+async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Ask Kayo AI anything about crypto."""
+    if not context.args:
+        await update.message.reply_text("Usage: `/ask <question>`\nExample: `/ask Is now a good time to ape into meme coins?`", parse_mode="Markdown"); return
+    question = " ".join(context.args)
+    wait = await update.message.reply_text("🧠 Thinking...")
+    news_ctx = ""
+    if news_cache:
+        headlines = [n["title"] for n in news_cache[:5]]
+        news_ctx = "\nRecent news: " + " | ".join(headlines)
+    prompt = f"""You are Kayo, a sharp Web3/crypto alpha analyst with deep knowledge of Solana, DeFi, meme coins, and on-chain analysis. Answer concisely and directly. Use emojis. Max 4 sentences.{news_ctx}
+
+Question: {question}"""
+    answer = await gemini_ask(prompt, fallback="🧠 Gemini unavailable right now. Try again shortly.")
+    await wait.edit_text(f"🧠 **KAYO AI**\n\n{answer}", parse_mode="Markdown")
+    add_xp(update.effective_user.id, 3)
+
+# ── CryptoPanic News ──────────────────────────────────────────
+async def cryptonews_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetch and AI-summarize latest crypto news from CryptoPanic."""
+    global news_cache, last_news_fetch
+    wait = await update.message.reply_text("📰 Fetching crypto news...")
+    async with aiohttp.ClientSession() as session:
+        articles = await fetch_cryptopanic(session)
+    if not articles:
+        await wait.edit_text("❌ CryptoPanic unavailable right now. Try `/news` for Twitter intel."); return
+    news_cache = articles
+    last_news_fetch = __import__("time").time()
+    headlines = "\n".join([f"• {a['title']}" for a in articles[:10]])
+    if _gemini:
+        prompt = f"""You are Kayo, a crypto analyst. Summarize these crypto news headlines into a sharp 4-line alpha briefing. Mention what's bullish, what's bearish, and what narrative is trending. Use emojis.
+
+Headlines:
+{headlines}"""
+        summary = await gemini_ask(prompt, fallback="")
+        msg = f"📰 **CRYPTO NEWS — AI SUMMARY**\n{'═'*35}\n\n{summary}\n\n**Raw Headlines:**\n{headlines}"
+    else:
+        msg = f"📰 **LATEST CRYPTO NEWS**\n{'═'*35}\n\n{headlines}"
+    await wait.edit_text(msg[:4000], parse_mode="Markdown", disable_web_page_preview=True)
+
+# ── PumpFun Commands ──────────────────────────────────────────
+async def pump_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show newest pump.fun launches."""
+    wait = await update.message.reply_text("🎰 Fetching new pump.fun launches...")
+    async with aiohttp.ClientSession() as session:
+        tokens = await pumpfun_new_tokens(session, limit=15)
+    if not tokens:
+        await wait.edit_text("❌ PumpFun API unavailable right now."); return
+    lines = ["🎰 **NEW PUMP.FUN LAUNCHES**\n" + "═"*35 + "\n"]
+    for i, t in enumerate(tokens[:10], 1):
+        sym   = t.get("symbol","???")
+        name  = t.get("name","?")
+        mcap  = t.get("market_cap", 0)
+        addr  = t.get("mint","")
+        king  = "👑" if t.get("king_of_the_hill_timestamp") else ""
+        reply = t.get("reply_count",0)
+        lines.append(f"{i}. {king}**${sym}** ({name})\n   MCap: {fmt_usd(mcap)} | 💬 {reply} replies\n   `/scan {addr}`\n")
+    await wait.edit_text("\n".join(lines)[:4000], parse_mode="Markdown")
+
+async def graduating_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show pump.fun tokens near graduation (bonding curve ~complete)."""
+    wait = await update.message.reply_text("🎓 Finding tokens about to graduate...")
+    async with aiohttp.ClientSession() as session:
+        tokens = await pumpfun_graduating(session)
+    if not tokens:
+        await wait.edit_text("❌ No graduating tokens found right now."); return
+    lines = ["🎓 **GRADUATING SOON (PumpFun)**\n" + "═"*35 + "\n",
+             "_These tokens are near 69k bonding curve — about to hit DEX_\n"]
+    for i, t in enumerate(tokens[:8], 1):
+        sym  = t.get("symbol","???")
+        mcap = t.get("market_cap",0)
+        addr = t.get("mint","")
+        pct  = min(100, mcap / 69000 * 100)
+        bar  = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
+        lines.append(f"{i}. **${sym}** — {pct:.0f}% to grad\n   [{bar}]\n   MCap: {fmt_usd(mcap)} | `/scan {addr}`\n")
+    await wait.edit_text("\n".join(lines)[:4000], parse_mode="Markdown")
+
+# ── Price Alerts ──────────────────────────────────────────────
+async def alert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Set a price alert: /alert <ca> <above|below> <price>"""
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage: `/alert <ca> <above|below> <price>`\n"
+            "Example: `/alert EPjFW... above 0.005`\n\n"
+            "You\'ll get a DM when the price hits your target.",
+            parse_mode="Markdown"); return
+    addr      = context.args[0].strip()
+    direction = context.args[1].lower()
+    try:    target = float(context.args[2])
+    except: await update.message.reply_text("❌ Price must be a number."); return
+    if direction not in ("above","below"):
+        await update.message.reply_text("❌ Use `above` or `below`.", parse_mode="Markdown"); return
+    uid = update.effective_user.id
+    price_alerts.setdefault(uid, [])
+    async with aiohttp.ClientSession() as session:
+        pair = await dex_token(session, addr)
+    sym = pair.get("baseToken",{}).get("symbol","?") if pair else "?"
+    price_alerts[uid].append({"address": addr, "symbol": sym, "target": target,
+                               "direction": direction, "chat_id": update.effective_chat.id})
+    save_state()
+    await update.message.reply_text(
+        f"🔔 **ALERT SET**\n\n${sym} — notify when price goes **{direction}** {fmt_price(target)}\n\nUse `/myalerts` to see all alerts.",
+        parse_mode="Markdown"
+    )
+
+async def myalerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid    = update.effective_user.id
+    alerts = price_alerts.get(uid, [])
+    if not alerts:
+        await update.message.reply_text("No alerts set.\n\nUse `/alert <ca> <above|below> <price>` to set one.", parse_mode="Markdown"); return
+    lines = ["🔔 **YOUR PRICE ALERTS**\n"]
+    for i, a in enumerate(alerts, 1):
+        lines.append(f"{i}. **${a['symbol']}** — {a['direction']} {fmt_price(a['target'])}")
+    lines.append("\nUse `/delalert <number>` to remove an alert.")
+    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def delalert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if not context.args:
+        await update.message.reply_text("Usage: `/delalert <number>`\nSee your alerts: `/myalerts`", parse_mode="Markdown"); return
+    try:    idx = int(context.args[0]) - 1
+    except: await update.message.reply_text("❌ Invalid number."); return
+    alerts = price_alerts.get(uid, [])
+    if idx < 0 or idx >= len(alerts):
+        await update.message.reply_text("❌ Alert not found. Use `/myalerts` to see your list.", parse_mode="Markdown"); return
+    removed = alerts.pop(idx)
+    save_state()
+    await update.message.reply_text(f"✅ Removed alert for **${removed['symbol']}**.", parse_mode="Markdown")
+
+# ── Portfolio Tracker ─────────────────────────────────────────
+async def addport_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Add token to personal portfolio: /addport <ca> <amount> <buy_price>"""
+    if len(context.args) < 3:
+        await update.message.reply_text(
+            "Usage: `/addport <ca> <amount_usd> <buy_price>`\n"
+            "Example: `/addport EPjFW... 100 0.00042`",
+            parse_mode="Markdown"); return
+    addr = context.args[0].strip()
+    try:
+        amount    = float(context.args[1])
+        buy_price = float(context.args[2])
+    except:
+        await update.message.reply_text("❌ Amount and price must be numbers."); return
+    uid = update.effective_user.id
+    async with aiohttp.ClientSession() as session:
+        pair = await dex_token(session, addr)
+    sym = pair.get("baseToken",{}).get("symbol","?") if pair else "?"
+    portfolio.setdefault(uid, [])
+    portfolio[uid].append({"address": addr, "symbol": sym, "amount": amount,
+                           "buy_price": buy_price, "added": __import__("datetime").datetime.utcnow().isoformat()})
+    save_state()
+    await update.message.reply_text(
+        f"💼 **Added to portfolio**\n\n${sym} — ${amount:.2f} @ {fmt_price(buy_price)}",
+        parse_mode="Markdown"
+    )
+
+async def portfolio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show portfolio with live P&L."""
+    uid   = update.effective_user.id
+    holds = portfolio.get(uid, [])
+    if not holds:
+        await update.message.reply_text("No portfolio yet.\n\nAdd tokens: `/addport <ca> <amount_usd> <buy_price>`", parse_mode="Markdown"); return
+    wait  = await update.message.reply_text("💼 Loading portfolio...")
+    lines = ["💼 **YOUR PORTFOLIO**\n" + "═"*35 + "\n"]
+    total_invested = total_now = 0
+    async with aiohttp.ClientSession() as session:
+        for h in holds:
+            pair     = await dex_token(session, h["address"])
+            cur_price= float(pair.get("priceUsd",0) or 0) if pair else 0
+            tokens   = h["amount"] / h["buy_price"] if h["buy_price"] > 0 else 0
+            cur_val  = tokens * cur_price
+            pnl      = ((cur_price - h["buy_price"]) / h["buy_price"] * 100) if h["buy_price"] > 0 else 0
+            total_invested += h["amount"]
+            total_now      += cur_val
+            e = "🟢" if pnl > 0 else "🔴"
+            lines.append(f"{e} **${h['symbol']}**\n   In: ${h['amount']:.2f} → Now: {fmt_usd(cur_val)} ({fmt_pct(pnl)})\n")
+    total_pnl = ((total_now - total_invested) / total_invested * 100) if total_invested > 0 else 0
+    e = "🟢" if total_pnl > 0 else "🔴"
+    lines.append(f"\n{e} **TOTAL:** ${total_invested:.2f} → {fmt_usd(total_now)} ({fmt_pct(total_pnl)})")
+    await wait.edit_text("\n".join(lines)[:4000], parse_mode="Markdown")
+
+# ── Blacklist / Rug Flag ──────────────────────────────────────
+async def blacklist_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        if blacklist:
+            lines = ["🚫 **BLACKLISTED TOKENS**\n"] + [f"• `{a}`" for a in list(blacklist)[:10]]
+            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        else:
+            await update.message.reply_text("No tokens blacklisted yet.\n\nUse `/blacklist <ca>` to flag a rug.", parse_mode="Markdown")
+        return
+    addr = context.args[0].strip()
+    blacklist.add(addr)
+    save_state()
+    await update.message.reply_text(f"🚫 Token blacklisted: `{addr[:12]}...`\n\nBot will warn your group if anyone pastes this.", parse_mode="Markdown")
+
+# ── Market Sentiment (Gemini) ─────────────────────────────────
+async def sentiment_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    wait = await update.message.reply_text("🧠 Analyzing market sentiment...")
+    async with aiohttp.ClientSession() as session:
+        global_data, trending, articles = await asyncio.gather(
+            coingecko_global(session),
+            coingecko_trending(session),
+            fetch_cryptopanic(session)
+        )
+    mcap_ch  = global_data.get("market_cap_change_percentage_24h_usd", 0)
+    btc_dom  = global_data.get("market_cap_percentage",{}).get("btc",0)
+    trend_names = [c.get("item",{}).get("name","") for c in trending[:5]]
+    headlines   = [a["title"] for a in articles[:8]]
+
+    if _gemini:
+        prompt = f"""You are Kayo, a sharp crypto analyst. Give an overall market sentiment analysis in 5 bullet points. Be direct and actionable.
+
+Data:
+- Total market 24h change: {fmt_pct(mcap_ch)}
+- BTC dominance: {btc_dom:.1f}%
+- Trending coins: {', '.join(trend_names)}
+- Latest news: {' | '.join(headlines[:5])}
+
+Format: use 🟢 bullish / 🔴 bearish / 🟡 neutral emojis. End with a 1-line action recommendation."""
+        analysis = await gemini_ask(prompt, fallback="")
+        msg = f"🧠 **KAYO AI MARKET SENTIMENT**\n{'═'*35}\n\n{analysis}"
+    else:
+        mood = "🟢 BULLISH" if mcap_ch > 2 else "🔴 BEARISH" if mcap_ch < -3 else "🟡 NEUTRAL"
+        msg  = f"📊 **MARKET SENTIMENT**\n\nMood: {mood}\n24h MCap change: {fmt_pct(mcap_ch)}\nBTC Dom: {btc_dom:.1f}%\nTrending: {', '.join(trend_names)}"
+    await wait.edit_text(msg[:4000], parse_mode="Markdown")
+
+# ── Gem Finder (AI-powered) ───────────────────────────────────
+async def gems_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """AI-powered hidden gem finder across DexScreener + PumpFun."""
+    wait = await update.message.reply_text("💎 Hunting for gems...")
+    async with aiohttp.ClientSession() as session:
+        pairs, pump_tokens = await asyncio.gather(
+            dex_search(session, "solana"),
+            pumpfun_new_tokens(session, 20)
+        )
+    candidates = []
+    for p in pairs[:150]:
+        base  = p.get("baseToken",{})
+        fdv   = float(p.get("fdv",0) or 0)
+        liq   = float(p.get("liquidity",{}).get("usd",0) or 0)
+        ch_1h = float(p.get("priceChange",{}).get("h1",0) or 0)
+        ch_5m = float(p.get("priceChange",{}).get("m5",0) or 0)
+        buys  = int(p.get("txns",{}).get("h1",{}).get("buys",0) or 0)
+        sells = int(p.get("txns",{}).get("h1",{}).get("sells",0) or 0)
+        if fdv < 5000 or fdv > 5_000_000: continue
+        if liq < 2000: continue
+        if ch_1h < 5: continue
+        buy_pressure = buys / max(sells, 1)
+        gem_score = (ch_1h * 0.3) + (ch_5m * 0.2) + (buy_pressure * 10) + (liq / fdv * 100)
+        if gem_score > 15:
+            candidates.append({
+                "symbol": base.get("symbol","???"),
+                "address": base.get("address",""),
+                "fdv": fdv, "liq": liq, "ch_1h": ch_1h, "ch_5m": ch_5m,
+                "buy_pressure": buy_pressure, "gem_score": gem_score
+            })
+    candidates.sort(key=lambda x: x["gem_score"], reverse=True)
+    top = candidates[:5]
+    if not top:
+        await wait.edit_text("💎 No gems found right now — market may be slow. Try again in 5 min."); return
+
+    if _gemini:
+        token_summary = "\n".join([
+            f"${c['symbol']}: MCap {fmt_usd(c['fdv'])}, Liq {fmt_usd(c['liq'])}, 1h {fmt_pct(c['ch_1h'])}, buy pressure {c['buy_pressure']:.1f}x"
+            for c in top
+        ])
+        prompt = f"""You are Kayo, a Solana gem hunter. Rank and briefly comment on these potential gems (1 sentence each). Be honest — mention any red flags.
+
+{token_summary}
+
+Format each as: 💎 $SYMBOL — your comment"""
+        ai_take = await gemini_ask(prompt, fallback="")
+    else:
+        ai_take = ""
+
+    lines = ["💎 **KAYO GEM FINDER**\n" + "═"*35 + "\n"]
+    for i, c in enumerate(top, 1):
+        lines.append(f"{i}. **${c['symbol']}** — Score: {c['gem_score']:.0f}\n   MCap: {fmt_usd(c['fdv'])} | Liq: {fmt_usd(c['liq'])} | 1h: {fmt_pct(c['ch_1h'])}\n   Buy pressure: {c['buy_pressure']:.1f}x\n   `/scan {c['address']}`\n")
+    if ai_take:
+        lines.append(f"\n🧠 **Kayo AI Take:**\n{ai_take}")
+    await wait.edit_text("\n".join(lines)[:4000], parse_mode="Markdown")
+
+# ── Summarize Group Chat ──────────────────────────────────────
+async def gsum_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """AI summary of what's been happening in the group."""
+    if not group_messages:
+        await update.message.reply_text("Not enough group activity to summarize yet."); return
+    if not _gemini:
+        await update.message.reply_text("🧠 Gemini not configured — can\'t summarize.", parse_mode="Markdown"); return
+    wait = await update.message.reply_text("🧠 Summarizing group activity...")
+    recent = group_messages[-30:]
+    convo  = "\n".join([f"@{m['user']}: {m['text'][:100]}" for m in recent])
+    prompt = f"""Summarize this crypto Telegram group conversation in 5 bullet points. Focus on: which tokens were discussed, what calls were made, general sentiment, any alpha dropped. Be concise.
+
+Conversation:
+{convo}"""
+    summary = await gemini_ask(prompt, fallback="Could not summarize.")
+    await wait.edit_text(f"🧠 **GROUP SUMMARY**\n{'═'*30}\n\n{summary}", parse_mode="Markdown")
+
 # ── Callback handler ──────────────────────────────────────────
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1530,8 +2031,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     if not settings.get(chat_id, {}).get("autoresponder", True): return
     addresses = re.findall(r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b', text)
+    # Track group messages for AI summary
+    try:
+        user = update.effective_user
+        uname = user.username or user.first_name or "user"
+        group_messages.append({"user": uname, "text": text})
+        if len(group_messages) > 50:
+            group_messages.pop(0)
+    except:
+        pass
+
     if not addresses: return
     address = addresses[0]
+    # Warn if blacklisted
+    if address in blacklist:
+        await update.message.reply_text("🚫 **BLACKLISTED TOKEN** — this address has been flagged as a rug by the community.", parse_mode="Markdown")
+        return
     wait    = await update.message.reply_text("🔍 CA detected — scanning...")
     a = await smart_scan(address)
     if not a.get("error"):
@@ -1631,6 +2146,284 @@ async def bg_watchlist_scanner(app: Application):
             except Exception as e:
                 logger.error(f"Watchlist scanner error for @{username}: {e}")
         await asyncio.sleep(60)  # full cycle every 60s
+
+
+# ── Background: Fast DexScreener Scanner (every 30s) ─────────
+async def bg_dex_fast_scanner(app: Application):
+    """Scan DexScreener every 30s for new gems and unusual movement."""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                pairs = await dex_trending_solana(session)
+            for p in pairs[:120]:
+                base    = p.get("baseToken", {})
+                address = base.get("address", "")
+                symbol  = base.get("symbol", "???")
+                if not address or address in blacklist:
+                    continue
+                fdv   = float(p.get("fdv", 0) or 0)
+                liq   = float(p.get("liquidity", {}).get("usd", 0) or 0)
+                ch_5m = float(p.get("priceChange", {}).get("m5", 0) or 0)
+                ch_1h = float(p.get("priceChange", {}).get("h1", 0) or 0)
+                vol_5m= float(p.get("volume", {}).get("m5", 0) or 0)
+                vol_1h= float(p.get("volume", {}).get("h1", 0) or 0)
+                buys  = int(p.get("txns", {}).get("m5", {}).get("buys", 0) or 0)
+                sells = int(p.get("txns", {}).get("m5", {}).get("sells", 0) or 0)
+                if liq < 2000 or fdv < 5000 or fdv > 20_000_000:
+                    continue
+                vol_ratio = vol_5m / max(vol_1h / 12, 1) if vol_1h > 0 else 1
+                dex_baseline[address] = {"ch_5m": ch_5m, "vol_ratio": vol_ratio, "buys": buys}
+
+                alert_key = f"{address}_{int(__import__('time').time() // 300)}"
+                if alert_key in gem_alerts_sent:
+                    continue
+
+                alert = None
+                alert_type = ""
+
+                # 🚀 Massive pump
+                if ch_5m > 20 and vol_ratio > 4 and buys > sells * 2:
+                    alert = (f"🚀 **MASSIVE PUMP DETECTED**\n"
+                             f"**${symbol}** +{ch_5m:.0f}% in 5m | {vol_ratio:.1f}x volume surge\n"
+                             f"💚 Buys: {buys} | 🔴 Sells: {sells}\n"
+                             f"MCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)}")
+                    alert_type = "pump"
+
+                # 💀 Massive dump
+                elif ch_5m < -20 and vol_ratio > 4 and sells > buys * 2:
+                    alert = (f"💀 **MASSIVE DUMP DETECTED**\n"
+                             f"**${symbol}** {ch_5m:.0f}% in 5m | {vol_ratio:.1f}x sell volume\n"
+                             f"💚 Buys: {buys} | 🔴 Sells: {sells}\n"
+                             f"MCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)}")
+                    alert_type = "dump"
+
+                # 🐳 Whale accumulation — huge volume, price stable
+                elif vol_ratio > 8 and abs(ch_5m) < 5 and buys > 20:
+                    alert = (f"🐳 **WHALE ACCUMULATION**\n"
+                             f"**${symbol}** — {vol_ratio:.0f}x normal volume, price barely moved\n"
+                             f"💚 Buys: {buys} | MCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)}\n"
+                             f"⚡ Smart money loading?")
+                    alert_type = "whale"
+
+                # 💎 New gem — small mcap, strong buy pressure, pumping
+                elif fdv < 500_000 and ch_1h > 30 and buys > sells * 1.5 and liq > 5000:
+                    alert = (f"💎 **POTENTIAL GEM**\n"
+                             f"**${symbol}** +{ch_1h:.0f}% in 1h — tiny mcap, strong buys\n"
+                             f"MCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)} | Buy pressure: {buys/max(sells,1):.1f}x")
+                    alert_type = "gem"
+
+                if alert and GROUP_CHAT_ID != 0:
+                    gem_alerts_sent.add(alert_key)
+                    ai_take = ""
+                    if _gemini and alert_type in ("pump", "gem", "whale"):
+                        ai_take = await gemini_ask(
+                            f"One sentence: is this {alert_type} on ${symbol} (MCap {fmt_usd(fdv)}, 5m {fmt_pct(ch_5m)}) worth acting on? Be direct.",
+                            fallback=""
+                        )
+                    full_alert = f"{alert}\n`{address}`"
+                    if ai_take:
+                        full_alert += f"\n\n🧠 Kayo AI: {ai_take}"
+                    try:
+                        await app.bot.send_message(
+                            chat_id=GROUP_CHAT_ID,
+                            text=full_alert,
+                            parse_mode="Markdown",
+                            reply_markup=get_chart_buttons(address, symbol)
+                        )
+                    except Exception as e:
+                        logger.warning(f"DEX alert send: {e}")
+
+            # Clean old baseline entries
+            if len(dex_baseline) > 500:
+                keys = list(dex_baseline.keys())
+                for k in keys[:100]:
+                    del dex_baseline[k]
+
+        except Exception as e:
+            logger.error(f"bg_dex_fast_scanner: {e}")
+        await asyncio.sleep(30)
+
+
+# ── Background: PumpFun Scanner (every 25s) ───────────────────
+async def bg_pumpfun_scanner(app: Application):
+    """Scan pump.fun every 25s for new launches and graduating tokens."""
+    await asyncio.sleep(45)
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                new_tokens, graduating = await asyncio.gather(
+                    pumpfun_new_tokens(session, 15),
+                    pumpfun_graduating(session)
+                )
+
+            # Alert new launches
+            for t in new_tokens:
+                addr  = t.get("mint", "")
+                sym   = t.get("symbol", "???")
+                name  = t.get("name", "?")
+                mcap  = t.get("market_cap", 0)
+                reply = t.get("reply_count", 0)
+                king  = t.get("king_of_the_hill_timestamp")
+
+                if not addr or addr in pump_seen:
+                    continue
+                pump_seen.add(addr)
+
+                # Only alert if it has some traction
+                if mcap < 5000 and reply < 3 and not king:
+                    continue
+
+                if GROUP_CHAT_ID == 0:
+                    continue
+
+                king_tag = " 👑 KING OF HILL" if king else ""
+                msg = (f"🆕 **NEW PUMP.FUN LAUNCH{king_tag}**\n"
+                       f"**${sym}** — {name}\n"
+                       f"MCap: {fmt_usd(mcap)} | 💬 {reply} replies\n"
+                       f"`{addr}`\n"
+                       f"/scan {addr}")
+                try:
+                    await app.bot.send_message(
+                        chat_id=GROUP_CHAT_ID,
+                        text=msg,
+                        parse_mode="Markdown",
+                        reply_markup=get_chart_buttons(addr, sym)
+                    )
+                    await asyncio.sleep(3)
+                except Exception as e:
+                    logger.warning(f"PumpFun alert: {e}")
+
+            # Alert graduating tokens
+            for t in graduating:
+                addr  = t.get("mint", "")
+                sym   = t.get("symbol", "???")
+                mcap  = t.get("market_cap", 0)
+                pct   = min(100, mcap / 69000 * 100)
+
+                grad_key = f"grad_{addr}"
+                if addr in pump_seen or grad_key in gem_alerts_sent:
+                    continue
+                if pct < 80:
+                    continue
+
+                gem_alerts_sent.add(grad_key)
+                if GROUP_CHAT_ID == 0:
+                    continue
+
+                bar = "█" * int(pct / 10) + "░" * (10 - int(pct / 10))
+                msg = (f"🎓 **GRADUATING SOON — {pct:.0f}%**\n"
+                       f"**${sym}** is about to hit DEX!\n"
+                       f"[{bar}]\n"
+                       f"MCap: {fmt_usd(mcap)} / 69k\n"
+                       f"`{addr}`")
+                try:
+                    await app.bot.send_message(
+                        chat_id=GROUP_CHAT_ID,
+                        text=msg,
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logger.warning(f"Graduating alert: {e}")
+
+            # Trim pump_seen
+            if len(pump_seen) > 2000:
+                old = list(pump_seen)[:500]
+                for o in old:
+                    pump_seen.discard(o)
+
+        except Exception as e:
+            logger.error(f"bg_pumpfun_scanner: {e}")
+        await asyncio.sleep(25)
+
+
+# ── Background: CryptoPanic News (every 3min) ────────────────
+async def bg_news_scanner(app: Application):
+    """Fetch CryptoPanic RSS every 3 minutes and alert breaking news."""
+    global news_cache, last_news_fetch
+    seen_news_titles: set = set()
+    await asyncio.sleep(30)
+    while True:
+        try:
+            async with aiohttp.ClientSession() as session:
+                articles = await fetch_cryptopanic(session)
+            if articles:
+                news_cache      = articles
+                last_news_fetch = __import__("time").time()
+                new_articles    = [a for a in articles if a["title"] not in seen_news_titles]
+                for a in new_articles:
+                    seen_news_titles.add(a["title"])
+
+                # If there are genuinely new articles, post a summary
+                if new_articles and GROUP_CHAT_ID != 0:
+                    headlines = "\n".join([f"• {a['title']}" for a in new_articles[:5]])
+                    if _gemini:
+                        summary = await gemini_ask(
+                            f"Summarize these crypto news headlines in 2 sentences. Flag anything urgent (hacks, regulations, big moves). Be punchy.\n\n{headlines}",
+                            fallback=""
+                        )
+                        msg = f"📰 **BREAKING NEWS**\n{'═'*30}\n\n{summary}\n\n{headlines}"
+                    else:
+                        msg = f"📰 **CRYPTO NEWS UPDATE**\n{'═'*30}\n\n{headlines}"
+                    try:
+                        await app.bot.send_message(
+                            chat_id=GROUP_CHAT_ID,
+                            text=msg[:4000],
+                            parse_mode="Markdown",
+                            disable_web_page_preview=True
+                        )
+                    except Exception as e:
+                        logger.warning(f"News alert: {e}")
+
+                # Keep seen_news_titles from growing forever
+                if len(seen_news_titles) > 500:
+                    old = list(seen_news_titles)[:200]
+                    for o in old:
+                        seen_news_titles.discard(o)
+
+        except Exception as e:
+            logger.error(f"bg_news_scanner: {e}")
+        await asyncio.sleep(180)   # every 3 minutes
+
+
+# ── Background: Price Alert Checker (every 30s) ───────────────
+async def bg_price_alert_checker(app: Application):
+    """Check user price alerts every 30s and notify when triggered."""
+    await asyncio.sleep(90)
+    while True:
+        try:
+            triggered = []
+            async with aiohttp.ClientSession() as session:
+                for uid, alerts in list(price_alerts.items()):
+                    remaining = []
+                    for a in alerts:
+                        pair = await dex_token(session, a["address"])
+                        if not pair:
+                            remaining.append(a)
+                            continue
+                        price = float(pair.get("priceUsd", 0) or 0)
+                        hit = (a["direction"] == "above" and price >= a["target"]) or                               (a["direction"] == "below" and price <= a["target"])
+                        if hit:
+                            triggered.append((uid, a, price))
+                        else:
+                            remaining.append(a)
+                    price_alerts[uid] = remaining
+
+            for uid, a, price in triggered:
+                try:
+                    await app.bot.send_message(
+                        chat_id=a["chat_id"],
+                        text=f"🔔 **PRICE ALERT TRIGGERED**\n\n**${a['symbol']}** is now {fmt_price(price)}\nYour target: {a['direction']} {fmt_price(a['target'])}\n\n`/scan {a['address']}`",
+                        parse_mode="Markdown"
+                    )
+                except Exception as e:
+                    logger.warning(f"Price alert notify: {e}")
+            if triggered:
+                save_state()
+
+        except Exception as e:
+            logger.error(f"bg_price_alert_checker: {e}")
+        await asyncio.sleep(30)
 
 async def bg_twitter_scanner(app: Application):
     """General Twitter scan for CA drops (not watchlist-specific)."""
@@ -1874,6 +2667,20 @@ def main():
         ("tz", tz_cmd), ("status", status_cmd),
         ("settings", settings_cmd), ("buttons", buttons_cmd),
         ("autoresponder", autoresponder_cmd),
+        # New commands
+        ("ask",         ask_cmd),
+        ("cryptonews",  cryptonews_cmd),
+        ("pump",        pump_cmd),
+        ("graduating",  graduating_cmd),
+        ("alert",       alert_cmd),
+        ("myalerts",    myalerts_cmd),
+        ("delalert",    delalert_cmd),
+        ("addport",     addport_cmd),
+        ("portfolio",   portfolio_cmd),
+        ("blacklist",   blacklist_cmd),
+        ("sentiment",   sentiment_cmd),
+        ("gems",        gems_cmd),
+        ("gsum",        gsum_cmd),
     ]:
         app.add_handler(CommandHandler(name, fn))
 
@@ -1886,11 +2693,16 @@ def main():
             await app.updater.start_polling(drop_pending_updates=True)
             logger.info("🚀 Kayo Brain v13 polling started")
             asyncio.create_task(bg_reminder_checker(app))
-            asyncio.create_task(bg_watchlist_scanner(app))   # NEW
+            asyncio.create_task(bg_watchlist_scanner(app))
             asyncio.create_task(bg_twitter_scanner(app))
             asyncio.create_task(bg_new_token_scanner(app))
             asyncio.create_task(bg_unusual_activity(app))
             asyncio.create_task(bg_wallet_tracker(app))
+            # New high-speed scanners
+            asyncio.create_task(bg_dex_fast_scanner(app))
+            asyncio.create_task(bg_pumpfun_scanner(app))
+            asyncio.create_task(bg_news_scanner(app))
+            asyncio.create_task(bg_price_alert_checker(app))
             while True:
                 await asyncio.sleep(3600)
 
