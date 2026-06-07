@@ -167,6 +167,9 @@ def _apply_state(data: dict):
     strategy_weights.update(data.get("strategy_weights", {}))
     reminders        = data.get("reminders", [])
     watchlist        = data.get("watchlist", {})
+    price_alerts.update({int(k): v for k, v in data.get("price_alerts", {}).items()})
+    portfolio.update({int(k): v for k, v in data.get("portfolio", {}).items()})
+    blacklist.update(set(data.get("blacklist", [])))
 
 def save_state():
     """Save state to Redis (primary) or local JSON (fallback)."""
@@ -482,106 +485,105 @@ async def coingecko_trending(session) -> List:
             return (await r.json()).get("coins", [])
     except: return []
 
+# ── Twitter / X scraping via twscrape ─────────────────────────
+TWITTER_AUTH_TOKEN = os.environ.get("TWITTER_AUTH_TOKEN", "")
+_tw_api = None
+_tw_ready = False
+
+async def _ensure_twscrape():
+    """Initialize twscrape account pool from TWITTER_AUTH_TOKEN env var."""
+    global _tw_api, _tw_ready
+    if _tw_ready:
+        return True
+    if not TWITTER_AUTH_TOKEN:
+        logger.warning("⚠️ TWITTER_AUTH_TOKEN not set — Twitter features disabled")
+        return False
+    try:
+        from twscrape import API as TwAPI
+        _tw_api = TwAPI()
+        await _tw_api.pool.add_account(
+            username="kayo_bot_scraper",
+            password="placeholder_pass",
+            email="kayo@placeholder.bot",
+            email_password="placeholder_pass",
+            cookies={"auth_token": TWITTER_AUTH_TOKEN}
+        )
+        await _tw_api.pool.login_all()
+        _tw_ready = True
+        logger.info("✅ twscrape Twitter scraper ready")
+    except Exception as e:
+        logger.warning(f"⚠️ twscrape init failed: {e}")
+        _tw_ready = False
+    return _tw_ready
+
+async def tw_search(query: str, limit: int = 10) -> List[Dict]:
+    """Search Twitter/X for tweets by keyword. Returns list of tweet dicts."""
+    if not TWITTER_AUTH_TOKEN:
+        return []
+    if not _tw_ready:
+        await _ensure_twscrape()
+    if not _tw_ready or not _tw_api:
+        return []
+    results = []
+    try:
+        async for tweet in _tw_api.search(f"{query} lang:en", limit=limit):
+            results.append({
+                "text":     tweet.rawContent,
+                "user":     tweet.user.username,
+                "likes":    tweet.likeCount,
+                "retweets": tweet.retweetCount,
+                "date":     str(tweet.date)[:10],
+                "url":      f"https://x.com/{tweet.user.username}/status/{tweet.id}"
+            })
+    except Exception as e:
+        logger.warning(f"tw_search('{query}') error: {e}")
+    return results
+
+async def tw_user_tweets(username: str, limit: int = 15) -> List[Dict]:
+    """Get recent tweets from a Twitter/X user timeline."""
+    if not TWITTER_AUTH_TOKEN:
+        return []
+    if not _tw_ready:
+        await _ensure_twscrape()
+    if not _tw_ready or not _tw_api:
+        return []
+    results = []
+    try:
+        uname = username.lstrip("@")
+        user  = await _tw_api.user_by_login(uname)
+        if not user:
+            return []
+        async for tweet in _tw_api.user_tweets(user.id, limit=limit):
+            results.append({
+                "text":     tweet.rawContent,
+                "user":     tweet.user.username,
+                "likes":    tweet.likeCount,
+                "retweets": tweet.retweetCount,
+                "date":     str(tweet.date)[:10],
+                "url":      f"https://x.com/{tweet.user.username}/status/{tweet.id}"
+            })
+    except Exception as e:
+        logger.warning(f"tw_user_tweets('{username}') error: {e}")
+    return results
+
+def _tw_not_configured() -> str:
+    return (
+        "⚠️ **Twitter/X not configured**\n\n"
+        "To enable Twitter commands:\n"
+        "1. Log into x.com in your browser\n"
+        "2. Press F12 → Application → Cookies → x.com\n"
+        "3. Copy the `auth\_token` value\n"
+        "4. Add it to Render env vars as `TWITTER_AUTH_TOKEN`\n\n"
+        "Then restart the bot — all Twitter commands will work instantly."
+    )
+
 async def scrape_nitter(session, query: str, limit=10) -> List[Dict]:
-    """
-    Fetch tweets via multiple free fallbacks (Nitter → RSS → mock).
-    Nitter instances are unreliable; we try several and fall back gracefully.
-    """
-    # Try working Nitter instances (updated list)
-    instances = [
-        "https://nitter.net",
-        "https://nitter.it",
-        "https://nitter.privacydev.net",
-        "https://nitter.poast.org",
-        "https://nitter.1d4.us",
-    ]
-    for base in instances:
-        try:
-            url = f"{base}/search?q={quote_plus(query)}&f=tweets"
-            async with session.get(
-                url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-                timeout=aiohttp.ClientTimeout(total=8)
-            ) as r:
-                if r.status != 200:
-                    continue
-                html   = await r.text()
-                tweets = re.findall(r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
-                users  = re.findall(r'<a class="username"[^>]*href="/([^"]+)"', html)
-                results = []
-                for i, t in enumerate(tweets[:limit]):
-                    clean = re.sub(r'<[^>]+>', '', t).strip()
-                    if clean and len(clean) > 20:
-                        results.append({"text": clean[:400], "user": users[i] if i < len(users) else "unknown"})
-                if results:
-                    return results
-        except:
-            continue
-
-    # Fallback: Twitter/X RSS via nitter.cz or similar RSS bridges
-    rss_instances = [
-        "https://nitter.cz",
-        "https://xcancel.com",
-    ]
-    for base in rss_instances:
-        try:
-            url = f"{base}/search?q={quote_plus(query)}&f=tweets"
-            async with session.get(
-                url,
-                headers={"User-Agent": "Mozilla/5.0"},
-                timeout=aiohttp.ClientTimeout(total=8)
-            ) as r:
-                if r.status != 200:
-                    continue
-                html   = await r.text()
-                tweets = re.findall(r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
-                users  = re.findall(r'<a class="username"[^>]*href="/([^"]+)"', html)
-                results = []
-                for i, t in enumerate(tweets[:limit]):
-                    clean = re.sub(r'<[^>]+>', '', t).strip()
-                    if clean and len(clean) > 20:
-                        results.append({"text": clean[:400], "user": users[i] if i < len(users) else "unknown"})
-                if results:
-                    return results
-        except:
-            continue
-
-    return []
+    """Search tweets via twscrape (replaces dead Nitter). Falls back to empty list."""
+    return await tw_search(query, limit=limit)
 
 async def scrape_nitter_user(session, username: str, limit=15) -> List[Dict]:
-    """Scrape tweets from a specific user's timeline via Nitter (with fallbacks)."""
-    instances = [
-        "https://nitter.net",
-        "https://nitter.it",
-        "https://nitter.cz",
-        "https://xcancel.com",
-        "https://nitter.privacydev.net",
-        "https://nitter.poast.org",
-        "https://nitter.1d4.us",
-    ]
-    username = username.lstrip('@')
-    for base in instances:
-        try:
-            url = f"{base}/{username}"
-            async with session.get(
-                url,
-                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as r:
-                if r.status != 200:
-                    continue
-                html   = await r.text()
-                tweets = re.findall(r'<div class="tweet-content[^"]*"[^>]*>(.*?)</div>', html, re.DOTALL)
-                results = []
-                for t in tweets[:limit]:
-                    clean = re.sub(r'<[^>]+>', '', t).strip()
-                    if clean and len(clean) > 10:
-                        results.append({"text": clean[:400], "user": username})
-                if results:
-                    return results
-        except:
-            continue
-    return []
+    """Get user timeline tweets via twscrape (replaces dead Nitter)."""
+    return await tw_user_tweets(username, limit=limit)
 
 # ── Smart scan ────────────────────────────────────────────────
 async def smart_scan(address: str) -> Dict:
