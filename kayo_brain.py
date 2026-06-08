@@ -82,7 +82,7 @@ _gemini = None
 if GEMINI_API_KEY:
     try:
         genai.configure(api_key=GEMINI_API_KEY)
-        _gemini = genai.GenerativeModel("gemini-1.5-flash")
+        _gemini = genai.GenerativeModel("gemini-2.0-flash")
         logger.info("✅ Gemini AI connected")
     except Exception as e:
         logger.warning(f"⚠️  Gemini init failed: {e}")
@@ -94,7 +94,7 @@ async def gemini_ask(prompt: str, fallback: str = "") -> str:
     if not _gemini:
         return fallback
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         resp = await loop.run_in_executor(None, lambda: _gemini.generate_content(prompt))
         return resp.text.strip()[:1000]
     except Exception as e:
@@ -346,35 +346,61 @@ async def goplus_sec(session, address: str) -> Dict:
     except: return {}
 
 
-# ── CryptoPanic RSS ───────────────────────────────────────────
+# ── Crypto News RSS (CoinDesk + Decrypt + Cointelegraph) ─────
 async def fetch_cryptopanic(session, filter_type="rising") -> List[Dict]:
-    """Fetch latest crypto news from CryptoPanic RSS (no key needed)."""
-    urls = [
-        "https://cryptopanic.com/news/rss/",
-        f"https://cryptopanic.com/news/{filter_type}/rss/",
+    """Fetch latest crypto news from multiple free RSS feeds.
+    CryptoPanic now blocks scrapers — replaced with CoinDesk, Decrypt, Cointelegraph.
+    """
+    rss_sources = [
+        ("CoinDesk",       "https://www.coindesk.com/arc/outboundfeeds/rss/"),
+        ("Cointelegraph",  "https://cointelegraph.com/rss"),
+        ("Decrypt",        "https://decrypt.co/feed"),
     ]
     results = []
-    for url in urls:
+    for source_name, url in rss_sources:
         try:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10),
-                                   headers={"User-Agent": "Mozilla/5.0"}) as r:
+            async with session.get(
+                url,
+                timeout=aiohttp.ClientTimeout(total=10),
+                headers={"User-Agent": "Mozilla/5.0 (compatible; KayoBrain/1.0)"}
+            ) as r:
                 if r.status != 200:
+                    logger.debug(f"News RSS {source_name}: HTTP {r.status}")
                     continue
                 text = await r.text()
-                root = ET.fromstring(text)
-                for item in root.findall('.//item')[:15]:
-                    title = item.findtext('title','').strip()
-                    link  = item.findtext('link','').strip()
-                    pub   = item.findtext('pubDate','').strip()
-                    desc  = item.findtext('description','').strip()
-                    if title:
-                        results.append({"title": title, "link": link, "pub": pub, "desc": desc})
-                if results:
-                    return results
+                # Fix unescaped & chars in XML
+                fixed = re.sub(r'&(?!amp;|lt;|gt;|quot;|apos;|#\d+;)', '&amp;', text)
+                root  = ET.fromstring(fixed)
+                items = root.findall('.//item')
+                for item in items[:8]:
+                    title = item.findtext('title', '').strip()
+                    link  = item.findtext('link',  '').strip()
+                    pub   = item.findtext('pubDate', '').strip()
+                    desc  = item.findtext('description', '').strip()
+                    # Strip CDATA wrappers
+                    title = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', title).strip()
+                    desc  = re.sub(r'<!\[CDATA\[(.*?)\]\]>', r'\1', desc).strip()
+                    desc  = re.sub(r'<[^>]+>', '', desc).strip()[:200]
+                    if title and len(title) > 10:
+                        results.append({
+                            "title":  title,
+                            "link":   link,
+                            "pub":    pub,
+                            "desc":   desc,
+                            "source": source_name
+                        })
         except Exception as e:
-            logger.debug(f"CryptoPanic RSS error: {e}")
+            logger.debug(f"News RSS {source_name} error: {e}")
             continue
-    return results
+    # Deduplicate by title
+    seen = set()
+    unique = []
+    for a in results:
+        key = a['title'].lower()[:50]
+        if key not in seen:
+            seen.add(key)
+            unique.append(a)
+    return unique[:20]
 
 # ── PumpFun API ───────────────────────────────────────────────
 async def pumpfun_new_tokens(session, limit=20) -> List[Dict]:
@@ -1720,10 +1746,10 @@ async def cryptonews_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     async with aiohttp.ClientSession() as session:
         articles = await fetch_cryptopanic(session)
     if not articles:
-        await wait.edit_text("❌ CryptoPanic unavailable right now. Try `/news` for Twitter intel."); return
+        await wait.edit_text("❌ News feeds unavailable right now. Try again in a moment."); return
     news_cache = articles
     last_news_fetch = __import__("time").time()
-    headlines = "\n".join([f"• {a['title']}" for a in articles[:10]])
+    headlines = "\n".join([f"• [{a.get('source','News')}] {a['title']}" for a in articles[:10]])
     if _gemini:
         prompt = f"""You are Kayo, a crypto analyst. Summarize these crypto news headlines into a sharp 4-line alpha briefing. Mention what's bullish, what's bearish, and what narrative is trending. Use emojis.
 
@@ -2363,7 +2389,7 @@ async def bg_news_scanner(app: Application):
 
                 # If there are genuinely new articles, post a summary
                 if new_articles and GROUP_CHAT_ID != 0:
-                    headlines = "\n".join([f"• {a['title']}" for a in new_articles[:5]])
+                    headlines = "\n".join([f"• [{a.get('source','News')}] {a['title']}" for a in new_articles[:5]])
                     # Only call Gemini for news if 3+ new articles (avoid wasting rate limit on 1 headline)
                     if _gemini and len(new_articles) >= 3:
                         summary = await gemini_ask(
