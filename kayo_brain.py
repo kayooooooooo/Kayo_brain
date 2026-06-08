@@ -87,7 +87,7 @@ if GEMINI_API_KEY:
     except Exception as e:
         logger.warning(f"⚠️  Gemini init failed: {e}")
 else:
-    logger.info("ℹ️  No GEMINI_API_KEY — AI features disabled")
+    logger.warning("🔴 GEMINI_API_KEY not set — ALL AI features disabled. Add it in Render env vars!")
 
 async def gemini_ask(prompt: str, fallback: str = "") -> str:
     """Ask Gemini a question. Returns fallback string on failure."""
@@ -1740,8 +1740,7 @@ Question: {question}"""
 
 # ── CryptoPanic News ──────────────────────────────────────────
 async def cryptonews_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fetch and AI-summarize latest crypto news from CryptoPanic."""
-    global news_cache, last_news_fetch
+    """Fetch and AI-summarize latest crypto news + find matching CAs on DexScreener."""
     wait = await update.message.reply_text("📰 Fetching crypto news...")
     async with aiohttp.ClientSession() as session:
         articles = await fetch_cryptopanic(session)
@@ -1760,6 +1759,69 @@ Headlines:
     else:
         msg = f"📰 **LATEST CRYPTO NEWS**\n{'═'*35}\n\n{headlines}"
     await wait.edit_text(msg[:4000], parse_mode="Markdown", disable_web_page_preview=True)
+
+    # ── Now find CAs on Solana matching the news narratives ──
+    if not _gemini:
+        return
+    await asyncio.sleep(1)
+    search_msg = await update.message.reply_text("🔍 Searching for CAs matching today's narratives...")
+    # Extract key tokens/narratives from headlines using Gemini
+    extract_prompt = f"""From these crypto news headlines, extract up to 4 short search keywords that would find relevant Solana tokens on DexScreener. Focus on: coin names, narratives (AI, RWA, gaming), or trending topics. Return ONLY a comma-separated list of keywords, nothing else.
+
+Headlines:
+{headlines}"""
+    keywords_raw = await gemini_ask(extract_prompt, fallback="")
+    if not keywords_raw:
+        await search_msg.edit_text("🔍 Could not extract keywords from news."); return
+
+    keywords = [k.strip() for k in keywords_raw.split(",") if k.strip()][:4]
+    logger.info(f"News CA search keywords: {keywords}")
+
+    found_tokens = []
+    seen_addrs   = set()
+    async with aiohttp.ClientSession() as session:
+        for kw in keywords:
+            try:
+                results = await dex_search(session, kw)
+                for p in results[:5]:
+                    base    = p.get("baseToken", {})
+                    address = base.get("address","")
+                    symbol  = base.get("symbol","???")
+                    name    = base.get("name","")
+                    chain   = p.get("chainId","")
+                    fdv     = float(p.get("fdv",0) or 0)
+                    liq     = float(p.get("liquidity",{}).get("usd",0) or 0)
+                    ch_1h   = float(p.get("priceChange",{}).get("h1",0) or 0)
+                    ch_24h  = float(p.get("priceChange",{}).get("h24",0) or 0)
+                    if not address or address in seen_addrs: continue
+                    if liq < 5000 or fdv < 10_000: continue
+                    if chain != "solana": continue
+                    seen_addrs.add(address)
+                    found_tokens.append({
+                        "keyword": kw, "symbol": symbol, "name": name,
+                        "address": address, "fdv": fdv, "liq": liq,
+                        "ch_1h": ch_1h, "ch_24h": ch_24h
+                    })
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                logger.debug(f"News CA search '{kw}': {e}")
+
+    if not found_tokens:
+        await search_msg.edit_text(f"🔍 Searched for: {', '.join(keywords)}\n❌ No matching Solana CAs found with good liquidity.")
+        return
+
+    lines_out = [f"🔍 **CAs MATCHING TODAY'S NEWS**\n{'═'*35}\n"]
+    lines_out.append(f"_Keywords searched: {', '.join(keywords)}_\n")
+    for t in found_tokens[:8]:
+        trend = "📈" if t["ch_1h"] > 0 else "📉"
+        lines_out.append(
+            f"{trend} **${t['symbol']}** — {t['name']}\n"
+            f"   MCap: {fmt_usd(t['fdv'])} | Liq: {fmt_usd(t['liq'])}\n"
+            f"   1h: {fmt_pct(t['ch_1h'])} | 24h: {fmt_pct(t['ch_24h'])}\n"
+            f"   `{t['address']}`\n"
+        )
+    await search_msg.edit_text("\n".join(lines_out)[:4000], parse_mode="Markdown", disable_web_page_preview=True)
+
 
 # ── PumpFun Commands ──────────────────────────────────────────
 async def pump_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2372,9 +2434,8 @@ async def bg_pumpfun_scanner(app: Application):
 
 # ── Background: CryptoPanic News (every 3min) ────────────────
 async def bg_news_scanner(app: Application):
-    """Fetch CryptoPanic RSS every 3 minutes and alert breaking news."""
+    """Refresh internal news cache every 3 minutes. NO auto-posting — use /cryptonews manually."""
     global news_cache, last_news_fetch
-    seen_news_titles: set = set()
     await asyncio.sleep(30)
     while True:
         try:
@@ -2383,44 +2444,12 @@ async def bg_news_scanner(app: Application):
             if articles:
                 news_cache      = articles
                 last_news_fetch = __import__("time").time()
-                new_articles    = [a for a in articles if a["title"] not in seen_news_titles]
-                for a in new_articles:
-                    seen_news_titles.add(a["title"])
-
-                # If there are genuinely new articles, post a summary
-                if new_articles and GROUP_CHAT_ID != 0:
-                    headlines = "\n".join([f"• [{a.get('source','News')}] {a['title']}" for a in new_articles[:5]])
-                    # Only call Gemini for news if 3+ new articles (avoid wasting rate limit on 1 headline)
-                    if _gemini and len(new_articles) >= 3:
-                        summary = await gemini_ask(
-                            f"Summarize these crypto news headlines in 2 sentences. Flag anything urgent (hacks, regulations, big moves). Be punchy.\n\n{headlines}",
-                            fallback=""
-                        )
-                        msg = f"📰 **BREAKING NEWS**\n{'═'*30}\n\n{summary}\n\n{headlines}"
-                    else:
-                        msg = f"📰 **CRYPTO NEWS UPDATE**\n{'═'*30}\n\n{headlines}"
-                    try:
-                        await app.bot.send_message(
-                            chat_id=GROUP_CHAT_ID,
-                            text=msg[:4000],
-                            parse_mode="Markdown",
-                            disable_web_page_preview=True
-                        )
-                    except Exception as e:
-                        logger.warning(f"News alert: {e}")
-
-                # Keep seen_news_titles from growing forever
-                if len(seen_news_titles) > 500:
-                    old = list(seen_news_titles)[:200]
-                    for o in old:
-                        seen_news_titles.discard(o)
-
+                logger.debug(f"News cache refreshed: {len(articles)} articles")
         except Exception as e:
             logger.error(f"bg_news_scanner: {e}")
-        await asyncio.sleep(180)   # every 3 minutes
+        await asyncio.sleep(180)
 
 
-# ── Background: Price Alert Checker (every 30s) ───────────────
 async def bg_price_alert_checker(app: Application):
     """Check user price alerts every 30s and notify when triggered."""
     await asyncio.sleep(90)
@@ -2503,6 +2532,7 @@ async def bg_twitter_scanner(app: Application):
         await asyncio.sleep(45)
 
 async def bg_new_token_scanner(app: Application):
+    """Scan DexScreener every 30s for new Solana tokens. Only posts tokens with good AI score."""
     await asyncio.sleep(120)
     while True:
         try:
@@ -2517,21 +2547,60 @@ async def bg_new_token_scanner(app: Application):
                 liq  = float(p.get("liquidity",{}).get("usd",0) or 0)
                 ch_5m= float(p.get("priceChange",{}).get("m5",0) or 0)
                 ch_1h= float(p.get("priceChange",{}).get("h1",0) or 0)
-                vol  = float(p.get("volume",{}).get("h24",0) or 0)
+                vol_5m = float(p.get("volume",{}).get("m5",0) or 0)
+                vol_1h = float(p.get("volume",{}).get("h1",0) or 0)
                 buys = int(p.get("txns",{}).get("h1",{}).get("buys",0) or 0)
+                sells= int(p.get("txns",{}).get("h1",{}).get("sells",0) or 0)
                 sym  = base.get("symbol", p.get("symbol","???"))
+                name = base.get("name", sym)
                 seen_tokens.add(address)
-                if liq < 500 or fdv > 10_000_000: continue
-                if vol < 500 and buys < 3: continue
+                # Basic quality filters — skip trash
+                if liq < 5000 or fdv > 5_000_000: continue
+                if fdv < 10_000: continue
+                if vol_5m < 200 and buys < 5: continue
+                if buys < sells: continue  # net selling — skip
                 if GROUP_CHAT_ID == 0: continue
+                # Security check
                 async with aiohttp.ClientSession() as s2:
                     sec = await goplus_sec(s2, address)
                 if sec.get("is_honeypot") == "1": continue
+                sell_tax = float(sec.get("sell_tax", 0) or 0)
+                if sell_tax > 15: continue  # too high tax
+                # Narrative detection from name/symbol
+                text = f"{name} {sym}".lower()
+                narrative = "Meme"
+                if any(w in text for w in ["ai","agent","gpt","neural","mind"]): narrative = "AI"
+                elif any(w in text for w in ["game","play","gaming","nft","quest"]): narrative = "Gaming"
+                elif any(w in text for w in ["defi","swap","yield","lend","farm"]): narrative = "DeFi"
+                elif any(w in text for w in ["rwa","real","estate","asset"]): narrative = "RWA"
+                elif any(w in text for w in ["dog","cat","pepe","frog","ape","shib"]): narrative = "Meme"
+                # Volume ratio
+                vol_ratio = vol_5m / max(vol_1h/12, 1) if vol_1h > 0 else 1
                 safety = "🟢 LP Locked" if sec.get("lp_locked") == "1" else "🟡 Check LP"
+                # AI opinion — only call if looks promising
+                ai_opinion = ""
+                if _gemini and ch_1h > 10 and buys > 10:
+                    ai_opinion = await gemini_ask(
+                        f"New Solana token: ${sym} ({narrative}). MCap {fmt_usd(fdv)}, Liq {fmt_usd(liq)}, +{ch_1h:.0f}% 1h, {buys}B/{sells}S buys. Vol spike {vol_ratio:.1f}x. One sentence: worth watching or skip?",
+                        fallback=""
+                    )
+                    await asyncio.sleep(2)  # rate limit buffer
+                msg = (
+                    f"🆕 **NEW TOKEN ALERT**\n"
+                    f"**${sym}** — {name}\n"
+                    f"🏷️ Narrative: {narrative}\n"
+                    f"💰 MCap: {fmt_usd(fdv)} | 💧 Liq: {fmt_usd(liq)}\n"
+                    f"📈 5m: {fmt_pct(ch_5m)} | 1h: {fmt_pct(ch_1h)}\n"
+                    f"⚡ Vol spike: {vol_ratio:.1f}x | 💚{buys} / 🔴{sells}\n"
+                    f"🛡️ {safety} | Tax: {sell_tax:.0f}%\n"
+                    f"`{address}`"
+                )
+                if ai_opinion:
+                    msg += f"\n\n🧠 Kayo: {ai_opinion}"
                 try:
                     await app.bot.send_message(
                         chat_id=GROUP_CHAT_ID,
-                        text=f"🆕 **NEW TOKEN**\n**${sym}**\n💧 Liq: {fmt_usd(liq)} | MCap: {fmt_usd(fdv)}\n📈 5m: {fmt_pct(ch_5m)} | 1h: {fmt_pct(ch_1h)}\n🛡️ {safety}\n\n`{address}`",
+                        text=msg,
                         parse_mode="Markdown",
                         reply_markup=get_chart_buttons(address, sym)
                     )
@@ -2542,13 +2611,16 @@ async def bg_new_token_scanner(app: Application):
             logger.error(f"Token scanner: {e}")
         await asyncio.sleep(30)
 
+
 async def bg_unusual_activity(app: Application):
     baseline: Dict[str, Dict] = {}
+    alerted:  Dict[str, float] = {}   # address -> last alert timestamp
     await asyncio.sleep(150)
     while True:
         try:
             async with aiohttp.ClientSession() as session:
                 pairs = await dex_search(session, "solana")
+            now = __import__("time").time()
             for p in pairs[:80]:
                 base    = p.get("baseToken",{})
                 address = base.get("address","")
@@ -2559,22 +2631,34 @@ async def bg_unusual_activity(app: Application):
                 liq     = float(p.get("liquidity",{}).get("usd",0) or 0)
                 fdv     = float(p.get("fdv",0) or 0)
                 if liq < 2000 or not address: continue
+                # 30-minute cooldown per token to avoid spam
+                if now - alerted.get(address, 0) < 1800: continue
                 vr   = vol_5m / max(vol_1h/12,1) if vol_1h > 0 else 0
                 prev = baseline.get(address,{})
                 baseline[address] = {"ch_5m": ch_5m, "vr": vr}
                 if not prev: continue
                 alert = None
                 if ch_5m > 15 and vr > 3:
-                    alert = f"🚀 **PUMP** — ${symbol} +{ch_5m:.0f}% in 5m | {vr:.1f}x volume"
+                    alert = f"🚀 **PUMP ALERT** — ${symbol} +{ch_5m:.0f}% in 5m | {vr:.1f}x volume spike"
                 elif ch_5m < -15 and vr > 3:
-                    alert = f"💀 **DUMP** — ${symbol} {ch_5m:.0f}% in 5m | {vr:.1f}x volume"
+                    alert = f"💀 **DUMP ALERT** — ${symbol} {ch_5m:.0f}% in 5m | {vr:.1f}x sell pressure"
                 elif vr > 5 and abs(ch_5m) < 3:
-                    alert = f"🐳 **WHALE** — ${symbol} massive volume ({vr:.1f}x) price still flat — watch this"
+                    alert = f"🐳 **WHALE LOADING** — ${symbol} {vr:.1f}x normal volume, price flat — accumulation?"
                 if alert and GROUP_CHAT_ID != 0:
+                    alerted[address] = now
+                    ai_take = ""
+                    if _gemini:
+                        ai_take = await gemini_ask(
+                            f"One sentence: ${symbol} MCap {fmt_usd(fdv)}, {ch_5m:+.0f}% 5m, {vr:.1f}x volume. Worth watching?",
+                            fallback=""
+                        )
+                    msg = f"{alert}\nMCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)}\n`{address}`"
+                    if ai_take:
+                        msg += f"\n\n🧠 Kayo: {ai_take}"
                     try:
                         await app.bot.send_message(
                             chat_id=GROUP_CHAT_ID,
-                            text=f"{alert}\nMCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)}\n`{address}`",
+                            text=msg,
                             parse_mode="Markdown",
                             reply_markup=get_chart_buttons(address, symbol)
                         )
@@ -2583,6 +2667,7 @@ async def bg_unusual_activity(app: Application):
         except Exception as e:
             logger.error(f"Activity scanner: {e}")
         await asyncio.sleep(120)
+
 
 async def bg_wallet_tracker(app: Application):
     wallet_last_seen: Dict[str, str] = {}
