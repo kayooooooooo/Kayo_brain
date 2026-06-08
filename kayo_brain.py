@@ -404,56 +404,85 @@ async def fetch_cryptopanic(session, filter_type="rising") -> List[Dict]:
 
 # ── PumpFun API ───────────────────────────────────────────────
 async def pumpfun_new_tokens(session, limit=20) -> List[Dict]:
-    """Fetch newest tokens from pump.fun."""
+    """Fetch newest Solana tokens. PumpFun API is Cloudflare-blocked, use DexScreener new pairs."""
     try:
+        # DexScreener /new-pairs endpoint for Solana
         async with session.get(
-            "https://frontend-api.pump.fun/coins?offset=0&limit=20&sort=created_timestamp&order=DESC&includeNsfw=false",
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as r:
-            if r.status != 200:
-                return []
-            data = await r.json()
-            if isinstance(data, list):
-                return data[:limit]
-            return []
-    except Exception as e:
-        logger.debug(f"PumpFun API error: {e}")
-        return []
-
-async def pumpfun_graduating(session) -> List[Dict]:
-    """Fetch tokens close to graduating from pump.fun (near bonding curve completion)."""
-    try:
-        async with session.get(
-            "https://frontend-api.pump.fun/coins?offset=0&limit=20&sort=market_cap&order=DESC&includeNsfw=false",
-            headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
-            timeout=aiohttp.ClientTimeout(total=10)
-        ) as r:
-            if r.status != 200:
-                return []
-            data = await r.json()
-            if isinstance(data, list):
-                # Filter near graduation (market cap > 50k = close to 69k bonding curve)
-                return [t for t in data if t.get("market_cap", 0) > 50000][:10]
-            return []
-    except Exception as e:
-        logger.debug(f"PumpFun graduating error: {e}")
-        return []
-
-async def dex_trending_solana(session) -> List[Dict]:
-    """Get trending Solana pairs from DexScreener with full data."""
-    try:
-        async with session.get(
-            "https://api.dexscreener.com/latest/dex/search?q=solana&chainIds=solana",
+            "https://api.dexscreener.com/latest/dex/search?q=solana+new&chainIds=solana",
             timeout=aiohttp.ClientTimeout(total=12)
         ) as r:
-            if r.status != 200:
-                return []
+            if r.status != 200: return []
             data = await r.json()
-            pairs = [p for p in data.get("pairs", []) if p.get("chainId") == "solana"]
-            return sorted(pairs, key=lambda x: float(x.get("volume",{}).get("h24",0) or 0), reverse=True)
-    except:
+            pairs = data.get("pairs", [])
+            result = []
+            for p in pairs[:limit]:
+                base = p.get("baseToken", {})
+                result.append({
+                    "mint":         base.get("address",""),
+                    "symbol":       base.get("symbol","???"),
+                    "name":         base.get("name","Unknown"),
+                    "market_cap":   float(p.get("fdv",0) or 0),
+                    "reply_count":  int(p.get("txns",{}).get("h1",{}).get("buys",0) or 0),
+                    "king_of_the_hill_timestamp": None,
+                    "liq":          float(p.get("liquidity",{}).get("usd",0) or 0),
+                    "ch_1h":        float(p.get("priceChange",{}).get("h1",0) or 0),
+                })
+            return result
+    except Exception as e:
+        logger.error(f"pumpfun_new_tokens: {e}")
         return []
+
+
+async def pumpfun_graduating(session) -> List[Dict]:
+    """Find tokens close to graduating to Raydium (near $69k bonding curve).
+    PumpFun API is Cloudflare-blocked — use DexScreener tokens with $50k-$80k mcap on Solana."""
+    try:
+        async with session.get(
+            "https://api.dexscreener.com/latest/dex/search?q=solana+pump+graduating&chainIds=solana",
+            timeout=aiohttp.ClientTimeout(total=12)
+        ) as r:
+            if r.status != 200: return []
+            data = await r.json()
+            result = []
+            for p in data.get("pairs", []):
+                fdv = float(p.get("fdv",0) or 0)
+                liq = float(p.get("liquidity",{}).get("usd",0) or 0)
+                # Graduating tokens: $40k-$80k mcap range (approaching $69k bonding curve)
+                if 40_000 <= fdv <= 80_000 and liq > 5000:
+                    base = p.get("baseToken",{})
+                    result.append({
+                        "mint":       base.get("address",""),
+                        "symbol":     base.get("symbol","???"),
+                        "market_cap": fdv,
+                        "liq":        liq,
+                    })
+            return result[:10]
+    except Exception as e:
+        logger.error(f"pumpfun_graduating: {e}")
+        return []
+
+
+async def dex_trending_solana(session) -> List[Dict]:
+    """Get broad Solana pair data via multiple DexScreener queries (returns 100+ unique pairs)."""
+    queries = ["solana meme", "solana ai", "solana pump", "solana new", "solana defi", "solana gaming"]
+    seen: dict = {}
+    for q in queries:
+        try:
+            async with session.get(
+                f"https://api.dexscreener.com/latest/dex/search?q={q.replace(' ','+')}",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status != 200: continue
+                data = await r.json()
+                for p in data.get("pairs", []):
+                    addr = p.get("baseToken", {}).get("address", "")
+                    if addr and p.get("chainId") == "solana":
+                        seen[addr] = p
+            await asyncio.sleep(0.3)
+        except Exception as e:
+            logger.debug(f"dex_trending_solana query '{q}': {e}")
+    return list(seen.values())
+
 
 async def dex_new_pairs(session) -> List[Dict]:
     """Get newest Solana pairs from DexScreener."""
@@ -813,10 +842,26 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def smartscan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wait = await update.message.reply_text("🎯 Smart scanning market...")
+    queries = ["solana meme", "solana ai", "solana pump", "solana new", "solana defi", "solana gaming"]
+    seen: dict = {}
     async with aiohttp.ClientSession() as session:
-        pairs = await dex_search(session, "solana")
+        for q in queries:
+            try:
+                async with session.get(
+                    f"https://api.dexscreener.com/latest/dex/search?q={q.replace(' ','+')}",
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        for p in data.get("pairs",[]):
+                            addr = p.get("baseToken",{}).get("address","")
+                            if addr and p.get("chainId") == "solana":
+                                seen[addr] = p
+                await asyncio.sleep(0.3)
+            except: pass
+    pairs = list(seen.values())
     candidates = []
-    for p in pairs[:100]:
+    for p in pairs:
         base  = p.get("baseToken", {})
         fdv   = float(p.get("fdv", 0) or 0)
         liq   = float(p.get("liquidity",{}).get("usd",0) or 0)
@@ -838,39 +883,88 @@ async def smartscan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await wait.edit_text("\n".join(lines), parse_mode="Markdown")
 
 async def runners_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Find top runners on Solana right now."""
     min_ch  = float(context.args[0]) if context.args else 5.0
-    min_vol = float(context.args[1]) if len(context.args) > 1 else 5000
-    wait = await update.message.reply_text(f"🏃 Finding runners (1h >{min_ch}%)...")
+    wait = await update.message.reply_text(f"🏃 Scanning Solana for runners (+{min_ch}%+ in 1h)...")
+    queries = ["solana meme", "solana ai", "solana pump", "solana new", "solana defi", "solana gaming"]
+    seen: dict = {}
     async with aiohttp.ClientSession() as session:
-        pairs = await dex_search(session, "solana")
+        for q in queries:
+            try:
+                async with session.get(
+                    f"https://api.dexscreener.com/latest/dex/search?q={q.replace(' ','+')}",
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as r:
+                    if r.status != 200: continue
+                    data = await r.json()
+                    for p in data.get("pairs", []):
+                        addr = p.get("baseToken",{}).get("address","")
+                        if addr and p.get("chainId") == "solana":
+                            seen[addr] = p
+                await asyncio.sleep(0.3)
+            except: pass
     runners = []
-    for p in pairs:
+    for p in seen.values():
         base  = p.get("baseToken", {})
-        ch_1h = float(p.get("priceChange",{}).get("h1",0) or 0)
-        vol   = float(p.get("volume",{}).get("h24",0) or 0)
-        fdv   = float(p.get("fdv",0) or 0)
-        liq   = float(p.get("liquidity",{}).get("usd",0) or 0)
-        if ch_1h >= min_ch and vol >= min_vol and liq >= 500:
-            runners.append({"symbol": base.get("symbol","???"), "address": base.get("address",""),
-                            "ch_1h": ch_1h, "fdv": fdv, "vol": vol})
-    runners.sort(key=lambda x: x["ch_1h"], reverse=True)
+        ch_1h = float(p.get("priceChange", {}).get("h1", 0) or 0)
+        ch_5m = float(p.get("priceChange", {}).get("m5", 0) or 0)
+        liq   = float(p.get("liquidity", {}).get("usd", 0) or 0)
+        vol_1h= float(p.get("volume", {}).get("h1", 0) or 0)
+        fdv   = float(p.get("fdv", 0) or 0)
+        buys  = int(p.get("txns", {}).get("h1", {}).get("buys", 0) or 0)
+        sells = int(p.get("txns", {}).get("h1", {}).get("sells", 0) or 0)
+        sym   = base.get("symbol", "???")
+        addr  = base.get("address", "")
+        if ch_1h < min_ch or liq < 5000 or vol_1h < 5000: continue
+        if fdv > 50_000_000: continue
+        runners.append({"sym": sym, "addr": addr, "ch_1h": ch_1h, "ch_5m": ch_5m,
+                        "liq": liq, "fdv": fdv, "buys": buys, "sells": sells})
+    runners.sort(key=lambda x: -x["ch_1h"])
     if not runners:
-        await wait.edit_text(
-            f"No runners found with 1h >{min_ch}%.\n\n💡 Try: `/runners 2` for 1h >2%",
-            parse_mode="Markdown"); return
-    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
-    lines  = [f"🚀 **RUNNERS** (1h >{min_ch}%)\n" + "═"*30 + "\n"]
-    for i, r in enumerate(runners[:10]):
-        lines.append(f"{medals[i]} **${r['symbol']}** — {fmt_pct(r['ch_1h'])}\n   MCap: {fmt_usd(r['fdv'])} | Vol: {fmt_usd(r['vol'])}\n   `/scan {r['address']}`\n")
-    lines.append(f"\n💡 Change filters: `/runners <min%> <min_vol>`")
-    await wait.edit_text("\n".join(lines), parse_mode="Markdown")
+        await wait.edit_text(f"❌ No runners found with >{min_ch}% gain in 1h. Market might be quiet — try `/runners 2`"); return
+    add_xp(update.effective_user.id, 3)
+    lines_out = [f"🏃 **SOLANA RUNNERS** (+{min_ch}%+ in 1h)\n{'═'*35}\n"]
+    for i, r in enumerate(runners[:12], 1):
+        trend = "🔥" if r["ch_1h"] > 20 else "📈"
+        lines_out.append(
+            f"{trend} **${r['sym']}** — +{r['ch_1h']:.1f}% 1h | {fmt_pct(r['ch_5m'])} 5m\n"
+            f"   MCap: {fmt_usd(r['fdv'])} | Liq: {fmt_usd(r['liq'])}\n"
+            f"   💚{r['buys']} / 🔴{r['sells']} | `{r['addr']}`\n"
+        )
+    msg = "\n".join(lines_out)
+    if _gemini and runners:
+        top3 = ", ".join([f"${r['sym']} +{r['ch_1h']:.0f}%" for r in runners[:3]])
+        ai_take = await gemini_ask(
+            f"Top Solana runners right now: {top3}. One sentence: what's driving this and should traders act?",
+            fallback=""
+        )
+        if ai_take:
+            msg += f"\n🧠 **Kayo AI:** {ai_take}"
+    await wait.edit_text(msg[:4000], parse_mode="Markdown", disable_web_page_preview=True)
+
 
 async def momentum_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wait = await update.message.reply_text("⚡ Scanning momentum...")
+    queries = ["solana meme", "solana ai", "solana pump", "solana new", "solana defi", "solana gaming"]
+    seen: dict = {}
     async with aiohttp.ClientSession() as session:
-        pairs = await dex_search(session, "solana")
+        for q in queries:
+            try:
+                async with session.get(
+                    f"https://api.dexscreener.com/latest/dex/search?q={q.replace(' ','+')}",
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        for p in data.get("pairs",[]):
+                            addr = p.get("baseToken",{}).get("address","")
+                            if addr and p.get("chainId") == "solana":
+                                seen[addr] = p
+                await asyncio.sleep(0.3)
+            except: pass
+    pairs = list(seen.values())
     spikes = []
-    for p in pairs[:100]:
+    for p in pairs:
         base   = p.get("baseToken", {})
         ch_5m  = float(p.get("priceChange",{}).get("m5",0) or 0)
         ch_1h  = float(p.get("priceChange",{}).get("h1",0) or 0)
