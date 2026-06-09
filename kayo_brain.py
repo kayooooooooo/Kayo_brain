@@ -83,9 +83,15 @@ _gemini = None
 if GEMINI_API_KEY:
     try:
         _gemini = genai_sdk.Client(api_key=GEMINI_API_KEY)
-        logger.info("✅ Gemini AI connected (google-genai SDK)")
+        # Startup test — verify the key actually works
+        _test = _gemini.models.generate_content(
+            model="gemini-1.5-flash",
+            contents="reply with: OK"
+        )
+        logger.info(f"✅ Gemini AI connected and tested — response: {_test.text.strip()[:20]}")
     except Exception as e:
-        logger.warning(f"⚠️  Gemini init failed: {e}")
+        logger.warning(f"⚠️  Gemini init/test failed: {type(e).__name__}: {e}")
+        _gemini = None   # disable so fallback messages show
 else:
     logger.warning("🔴 GEMINI_API_KEY not set — ALL AI features disabled. Add it in Render env vars!")
 
@@ -98,7 +104,7 @@ async def gemini_ask(prompt: str, fallback: str = "") -> str:
         resp = await loop.run_in_executor(
             None,
             lambda: _gemini.models.generate_content(
-                model="gemini-2.0-flash",
+                model="gemini-1.5-flash",
                 contents=prompt
             )
         )
@@ -410,30 +416,60 @@ async def fetch_cryptopanic(session, filter_type="rising") -> List[Dict]:
 
 # ── PumpFun API ───────────────────────────────────────────────
 async def pumpfun_new_tokens(session, limit=20) -> List[Dict]:
-    """Fetch newest Solana tokens. PumpFun API is Cloudflare-blocked, use DexScreener new pairs."""
+    """Fetch genuinely NEW Solana tokens — sorted by pair creation time."""
     try:
-        # DexScreener /new-pairs endpoint for Solana
-        async with session.get(
-            "https://api.dexscreener.com/latest/dex/search?q=solana+new&chainIds=solana",
-            timeout=aiohttp.ClientTimeout(total=12)
-        ) as r:
-            if r.status != 200: return []
-            data = await r.json()
-            pairs = data.get("pairs", [])
-            result = []
-            for p in pairs[:limit]:
-                base = p.get("baseToken", {})
-                result.append({
-                    "mint":         base.get("address",""),
-                    "symbol":       base.get("symbol","???"),
-                    "name":         base.get("name","Unknown"),
-                    "market_cap":   float(p.get("fdv",0) or 0),
-                    "reply_count":  int(p.get("txns",{}).get("h1",{}).get("buys",0) or 0),
-                    "king_of_the_hill_timestamp": None,
-                    "liq":          float(p.get("liquidity",{}).get("usd",0) or 0),
-                    "ch_1h":        float(p.get("priceChange",{}).get("h1",0) or 0),
-                })
-            return result
+        # Use multiple queries targeting fresh tokens; DexScreener returns newest pairs first
+        all_pairs: dict = {}
+        for q in ["solana new", "solana pump", "solana meme"]:
+            try:
+                async with session.get(
+                    f"https://api.dexscreener.com/latest/dex/search?q={q.replace(' ','+')}",
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as r:
+                    if r.status != 200: continue
+                    data = await r.json()
+                    for p in data.get("pairs", []):
+                        addr = p.get("baseToken", {}).get("address", "")
+                        if addr and p.get("chainId") == "solana":
+                            all_pairs[addr] = p
+                await asyncio.sleep(0.2)
+            except: pass
+
+        # Sort by pair creation time (newest first)
+        def created_at(p):
+            return p.get("pairCreatedAt", 0) or 0
+
+        sorted_pairs = sorted(all_pairs.values(), key=created_at, reverse=True)
+
+        result = []
+        import time as _t
+        now_ms = _t.time() * 1000
+        for p in sorted_pairs[:limit * 3]:  # oversample then filter
+            base = p.get("baseToken", {})
+            addr = base.get("address", "")
+            # Only include pairs created in the last 2 hours
+            created = p.get("pairCreatedAt", 0) or 0
+            age_minutes = (now_ms - created) / 60000 if created > 0 else 9999
+            if age_minutes > 120:
+                continue
+            fdv = float(p.get("fdv", 0) or 0)
+            liq = float(p.get("liquidity", {}).get("usd", 0) or 0)
+            if fdv < 1000 or liq < 500:  # too tiny
+                continue
+            result.append({
+                "mint":        addr,
+                "symbol":      base.get("symbol", "???"),
+                "name":        base.get("name", "Unknown"),
+                "market_cap":  fdv,
+                "reply_count": int(p.get("txns", {}).get("h1", {}).get("buys", 0) or 0),
+                "king_of_the_hill_timestamp": None,
+                "liq":         liq,
+                "ch_1h":       float(p.get("priceChange", {}).get("h1", 0) or 0),
+                "age_min":     round(age_minutes, 1),
+            })
+            if len(result) >= limit:
+                break
+        return result
     except Exception as e:
         logger.error(f"pumpfun_new_tokens: {e}")
         return []
@@ -2344,81 +2380,137 @@ async def bg_watchlist_scanner(app: Application):
 
 # ── Background: Fast DexScreener Scanner (every 30s) ─────────
 async def bg_dex_fast_scanner(app: Application):
-    """Scan DexScreener every 30s for new gems and unusual movement."""
-    await asyncio.sleep(60)
+    """Scan DexScreener every 30s — alerts for pumps, dumps, whales, gems, buy-pressure buildup."""
+    await asyncio.sleep(30)
+    alert_cooldown: dict = {}
+    prev_data: dict = {}
+
     while True:
         try:
+            import time as _time
+            now = _time.time()
+
+            queries = ["solana meme", "solana ai", "solana new", "solana pump", "solana gaming", "solana defi"]
+            seen: dict = {}
             async with aiohttp.ClientSession() as session:
-                pairs = await dex_trending_solana(session)
-            for p in pairs[:120]:
+                for q in queries:
+                    try:
+                        async with session.get(
+                            f"https://api.dexscreener.com/latest/dex/search?q={q.replace(' ','+')}",
+                            timeout=aiohttp.ClientTimeout(total=10)
+                        ) as r:
+                            if r.status == 200:
+                                data = await r.json()
+                                for p in data.get("pairs", []):
+                                    addr = p.get("baseToken", {}).get("address", "")
+                                    if addr and p.get("chainId") == "solana":
+                                        seen[addr] = p
+                        await asyncio.sleep(0.3)
+                    except Exception as e:
+                        logger.debug(f"dex scan query: {e}")
+
+            pairs = list(seen.values())
+            logger.info(f"[DEX SCAN] {len(pairs)} unique Solana pairs fetched")
+
+            for p in pairs:
                 base    = p.get("baseToken", {})
                 address = base.get("address", "")
                 symbol  = base.get("symbol", "???")
+
                 if not address or address in blacklist:
                     continue
-                fdv   = float(p.get("fdv", 0) or 0)
-                liq   = float(p.get("liquidity", {}).get("usd", 0) or 0)
-                ch_5m = float(p.get("priceChange", {}).get("m5", 0) or 0)
-                ch_1h = float(p.get("priceChange", {}).get("h1", 0) or 0)
-                vol_5m= float(p.get("volume", {}).get("m5", 0) or 0)
-                vol_1h= float(p.get("volume", {}).get("h1", 0) or 0)
-                buys  = int(p.get("txns", {}).get("m5", {}).get("buys", 0) or 0)
-                sells = int(p.get("txns", {}).get("m5", {}).get("sells", 0) or 0)
-                if liq < 2000 or fdv < 5000 or fdv > 20_000_000:
-                    continue
-                vol_ratio = vol_5m / max(vol_1h / 12, 1) if vol_1h > 0 else 1
-                dex_baseline[address] = {"ch_5m": ch_5m, "vol_ratio": vol_ratio, "buys": buys}
-
-                alert_key = f"{address}_{int(__import__('time').time() // 300)}"
-                if alert_key in gem_alerts_sent:
+                if now - alert_cooldown.get(address, 0) < 1800:
                     continue
 
-                alert = None
+                fdv      = float(p.get("fdv", 0) or 0)
+                liq      = float(p.get("liquidity", {}).get("usd", 0) or 0)
+                ch_5m    = float(p.get("priceChange", {}).get("m5", 0) or 0)
+                ch_1h    = float(p.get("priceChange", {}).get("h1", 0) or 0)
+                ch_6h    = float(p.get("priceChange", {}).get("h6", 0) or 0)
+                vol_5m   = float(p.get("volume", {}).get("m5", 0) or 0)
+                vol_1h   = float(p.get("volume", {}).get("h1", 0) or 0)
+                buys_5m  = int(p.get("txns", {}).get("m5", {}).get("buys", 0) or 0)
+                sells_5m = int(p.get("txns", {}).get("m5", {}).get("sells", 0) or 0)
+                buys_1h  = int(p.get("txns", {}).get("h1", {}).get("buys", 0) or 0)
+                sells_1h = int(p.get("txns", {}).get("h1", {}).get("sells", 0) or 0)
+
+                if liq < 3000 or fdv < 5000 or fdv > 30_000_000:
+                    continue
+
+                avg_5m_vol = vol_1h / 12 if vol_1h > 0 else 1
+                vol_ratio  = vol_5m / max(avg_5m_vol, 1)
+                prev       = prev_data.get(address, {})
+                prev_buys  = prev.get("buys_5m", 0)
+                buy_accel  = buys_5m > prev_buys * 1.5 and buys_5m > 5
+                prev_data[address] = {"buys_5m": buys_5m, "ch_5m": ch_5m, "vol_5m": vol_5m}
+
+                alert      = None
                 alert_type = ""
 
-                # 🚀 Massive pump
-                if ch_5m > 20 and vol_ratio > 4 and buys > sells * 2:
-                    alert = (f"🚀 **MASSIVE PUMP DETECTED**\n"
-                             f"**${symbol}** +{ch_5m:.0f}% in 5m | {vol_ratio:.1f}x volume surge\n"
-                             f"💚 Buys: {buys} | 🔴 Sells: {sells}\n"
-                             f"MCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)}")
+                if ch_5m >= 10 and buys_5m > sells_5m and vol_5m > 500:
+                    alert = (
+                        "🚀 **PUMP ALERT**\n"
+                        f"**${symbol}** +{ch_5m:.1f}% in 5m | +{ch_1h:.0f}% 1h\n"
+                        f"💚 {buys_5m} buys / 🔴 {sells_5m} sells | Vol5m: {fmt_usd(vol_5m)}\n"
+                        f"MCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)}\n"
+                        f"`{address}`"
+                    )
                     alert_type = "pump"
 
-                # 💀 Massive dump
-                elif ch_5m < -20 and vol_ratio > 4 and sells > buys * 2:
-                    alert = (f"💀 **MASSIVE DUMP DETECTED**\n"
-                             f"**${symbol}** {ch_5m:.0f}% in 5m | {vol_ratio:.1f}x sell volume\n"
-                             f"💚 Buys: {buys} | 🔴 Sells: {sells}\n"
-                             f"MCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)}")
+                elif ch_5m <= -12 and sells_5m > buys_5m and vol_5m > 500:
+                    alert = (
+                        "💀 **DUMP ALERT**\n"
+                        f"**${symbol}** {ch_5m:.1f}% in 5m | {ch_1h:.0f}% 1h\n"
+                        f"🔴 {sells_5m} sells / 💚 {buys_5m} buys | Vol5m: {fmt_usd(vol_5m)}\n"
+                        f"MCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)}\n"
+                        f"`{address}`"
+                    )
                     alert_type = "dump"
 
-                # 🐳 Whale accumulation — huge volume, price stable
-                elif vol_ratio > 8 and abs(ch_5m) < 5 and buys > 20:
-                    alert = (f"🐳 **WHALE ACCUMULATION**\n"
-                             f"**${symbol}** — {vol_ratio:.0f}x normal volume, price barely moved\n"
-                             f"💚 Buys: {buys} | MCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)}\n"
-                             f"⚡ Smart money loading?")
+                elif vol_ratio >= 3.0 and abs(ch_5m) < 5 and buys_1h > 15:
+                    alert = (
+                        "🐳 **WHALE ACCUMULATION**\n"
+                        f"**${symbol}** — {vol_ratio:.1f}x normal vol, price flat\n"
+                        f"💚 {buys_1h} buys 1h / 🔴 {sells_1h} sells\n"
+                        f"MCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)}\n"
+                        "⚡ Smart money loading silently\n"
+                        f"`{address}`"
+                    )
                     alert_type = "whale"
 
-                # 💎 New gem — small mcap, strong buy pressure, pumping
-                elif fdv < 500_000 and ch_1h > 30 and buys > sells * 1.5 and liq > 5000:
-                    alert = (f"💎 **POTENTIAL GEM**\n"
-                             f"**${symbol}** +{ch_1h:.0f}% in 1h — tiny mcap, strong buys\n"
-                             f"MCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)} | Buy pressure: {buys/max(sells,1):.1f}x")
+                elif buy_accel and ch_1h >= 15 and ch_5m >= 3 and liq > 5000:
+                    alert = (
+                        "📈 **BUY PRESSURE BUILDING**\n"
+                        f"**${symbol}** buys accelerating — {buys_5m} in last 5m (+{ch_5m:.1f}%)\n"
+                        f"1h trend: +{ch_1h:.0f}% | 6h: {fmt_pct(ch_6h)}\n"
+                        f"MCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)}\n"
+                        f"`{address}`"
+                    )
+                    alert_type = "pressure"
+
+                elif fdv < 500_000 and ch_1h >= 20 and (buys_1h / max(sells_1h, 1)) >= 1.5 and liq >= 5000:
+                    alert = (
+                        "💎 **HIDDEN GEM SPOTTED**\n"
+                        f"**${symbol}** +{ch_1h:.0f}% 1h | 6h: {fmt_pct(ch_6h)}\n"
+                        f"Buy ratio: {buys_1h}/{sells_1h} | MCap: {fmt_usd(fdv)}\n"
+                        f"Liq: {fmt_usd(liq)} | Small cap, strong momentum\n"
+                        f"`{address}`"
+                    )
                     alert_type = "gem"
 
                 if alert and GROUP_CHAT_ID != 0:
-                    gem_alerts_sent.add(alert_key)
+                    alert_cooldown[address] = now
                     ai_take = ""
-                    if _gemini and alert_type in ("pump", "gem", "whale"):
-                        await asyncio.sleep(2)  # Gemini rate limit buffer (15 req/min)
+                    if _gemini and alert_type in ("pump", "gem", "whale", "pressure"):
                         ai_take = await gemini_ask(
-                            f"One sentence: is this {alert_type} on ${symbol} (MCap {fmt_usd(fdv)}, 5m {fmt_pct(ch_5m)}) worth acting on? Be direct.",
+                            f"One sentence alpha take on ${symbol}: MCap {fmt_usd(fdv)}, "
+                            f"5m {fmt_pct(ch_5m)}, 1h {fmt_pct(ch_1h)}, liq {fmt_usd(liq)}. "
+                            f"Signal: {alert_type}. Worth acting on? Be direct.",
                             fallback=""
                         )
-                    full_alert = f"{alert}\n`{address}`"
+                    full_alert = alert
                     if ai_take:
-                        full_alert += f"\n\n🧠 Kayo AI: {ai_take}"
+                        full_alert += f"\n🧠 *Kayo AI:* {ai_take}"
                     try:
                         await app.bot.send_message(
                             chat_id=GROUP_CHAT_ID,
@@ -2426,19 +2518,19 @@ async def bg_dex_fast_scanner(app: Application):
                             parse_mode="Markdown",
                             reply_markup=get_chart_buttons(address, symbol)
                         )
+                        await asyncio.sleep(2)
                     except Exception as e:
                         logger.warning(f"DEX alert send: {e}")
 
-            # Clean old baseline entries
-            if len(dex_baseline) > 500:
-                keys = list(dex_baseline.keys())
-                for k in keys[:100]:
-                    del dex_baseline[k]
+            alert_cooldown = {k: v for k, v in alert_cooldown.items() if now - v < 7200}
+            if len(prev_data) > 500:
+                for k in list(prev_data.keys())[:200]:
+                    del prev_data[k]
 
         except Exception as e:
-            logger.error(f"bg_dex_fast_scanner: {e}")
-        await asyncio.sleep(30)
+            logger.error(f"bg_dex_fast_scanner error: {e}", exc_info=True)
 
+        await asyncio.sleep(30)
 
 # ── Background: PumpFun Scanner (every 25s) ───────────────────
 async def bg_pumpfun_scanner(app: Application):
@@ -2472,10 +2564,12 @@ async def bg_pumpfun_scanner(app: Application):
                 if GROUP_CHAT_ID == 0:
                     continue
 
+                age_min = t.get("age_min", "?")
                 king_tag = " 👑 KING OF HILL" if king else ""
-                msg = (f"🆕 **NEW PUMP.FUN LAUNCH{king_tag}**\n"
+                msg = (f"🆕 **NEW TOKEN LAUNCH{king_tag}**\n"
                        f"**${sym}** — {name}\n"
-                       f"MCap: {fmt_usd(mcap)} | 💬 {reply} replies\n"
+                       f"Age: {age_min}m | MCap: {fmt_usd(mcap)} | Liq: {fmt_usd(t.get('liq',0))}\n"
+                       f"💚 {reply} early buys\n"
                        f"`{addr}`\n"
                        f"/scan {addr}")
                 try:
@@ -2713,61 +2807,102 @@ async def bg_new_token_scanner(app: Application):
 
 
 async def bg_unusual_activity(app: Application):
-    baseline: Dict[str, Dict] = {}
-    alerted:  Dict[str, float] = {}   # address -> last alert timestamp
-    await asyncio.sleep(150)
+    """Detect unusual volume/price patterns every 60s. Multi-query for broad coverage."""
+    baseline: dict = {}
+    alerted:  dict = {}
+    await asyncio.sleep(120)
     while True:
         try:
+            import time as _time
+            now = _time.time()
+            queries = ["solana meme", "solana ai", "solana new", "solana defi"]
+            seen: dict = {}
             async with aiohttp.ClientSession() as session:
-                pairs = await dex_search(session, "solana")
-            now = __import__("time").time()
-            for p in pairs[:80]:
-                base    = p.get("baseToken",{})
-                address = base.get("address","")
-                symbol  = base.get("symbol","???")
-                ch_5m   = float(p.get("priceChange",{}).get("m5",0) or 0)
-                vol_5m  = float(p.get("volume",{}).get("m5",0) or 0)
-                vol_1h  = float(p.get("volume",{}).get("h1",0) or 0)
-                liq     = float(p.get("liquidity",{}).get("usd",0) or 0)
-                fdv     = float(p.get("fdv",0) or 0)
-                if liq < 2000 or not address: continue
-                # 30-minute cooldown per token to avoid spam
-                if now - alerted.get(address, 0) < 1800: continue
-                vr   = vol_5m / max(vol_1h/12,1) if vol_1h > 0 else 0
-                prev = baseline.get(address,{})
-                baseline[address] = {"ch_5m": ch_5m, "vr": vr}
-                if not prev: continue
-                alert = None
-                if ch_5m > 15 and vr > 3:
-                    alert = f"🚀 **PUMP ALERT** — ${symbol} +{ch_5m:.0f}% in 5m | {vr:.1f}x volume spike"
-                elif ch_5m < -15 and vr > 3:
-                    alert = f"💀 **DUMP ALERT** — ${symbol} {ch_5m:.0f}% in 5m | {vr:.1f}x sell pressure"
-                elif vr > 5 and abs(ch_5m) < 3:
-                    alert = f"🐳 **WHALE LOADING** — ${symbol} {vr:.1f}x normal volume, price flat — accumulation?"
-                if alert and GROUP_CHAT_ID != 0:
+                for q in queries:
+                    try:
+                        async with session.get(
+                            f"https://api.dexscreener.com/latest/dex/search?q={q.replace(' ','+')}",
+                            timeout=aiohttp.ClientTimeout(total=10)
+                        ) as r:
+                            if r.status == 200:
+                                data = await r.json()
+                                for p in data.get("pairs", []):
+                                    addr = p.get("baseToken", {}).get("address", "")
+                                    if addr and p.get("chainId") == "solana":
+                                        seen[addr] = p
+                        await asyncio.sleep(0.3)
+                    except:
+                        pass
+
+            for address, p in seen.items():
+                base   = p.get("baseToken", {})
+                symbol = base.get("symbol", "???")
+                ch_5m  = float(p.get("priceChange", {}).get("m5", 0) or 0)
+                vol_5m = float(p.get("volume", {}).get("m5", 0) or 0)
+                vol_1h = float(p.get("volume", {}).get("h1", 0) or 0)
+                liq    = float(p.get("liquidity", {}).get("usd", 0) or 0)
+                fdv    = float(p.get("fdv", 0) or 0)
+                buys   = int(p.get("txns", {}).get("m5", {}).get("buys", 0) or 0)
+                sells  = int(p.get("txns", {}).get("m5", {}).get("sells", 0) or 0)
+
+                if liq < 3000 or fdv < 5000 or fdv > 30_000_000:
+                    continue
+                if address in blacklist:
+                    continue
+                if now - alerted.get(address, 0) < 1800:
+                    continue
+
+                avg_5m = vol_1h / 12 if vol_1h > 0 else 1
+                ratio  = vol_5m / max(avg_5m, 1)
+
+                if address not in baseline:
+                    baseline[address] = {"vol_5m": vol_5m, "ch_5m": ch_5m}
+                    continue
+
+                prev_vol = baseline[address].get("vol_5m", 0)
+                vol_jump = vol_5m / max(prev_vol, 1) if prev_vol > 0 else 1
+                baseline[address] = {"vol_5m": vol_5m, "ch_5m": ch_5m}
+
+                if ratio < 3.0 or vol_jump < 2.0 or vol_5m < 500:
+                    continue
+
+                direction = "BUYING" if buys > sells else "SELLING"
+                alert = (
+                    "⚡ **UNUSUAL ACTIVITY**\n"
+                    f"**${symbol}** — {ratio:.1f}x normal volume spike\n"
+                    f"5m: {fmt_pct(ch_5m)} | {direction} pressure\n"
+                    f"💚 {buys} buys / 🔴 {sells} sells\n"
+                    f"MCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)}\n"
+                    f"`{address}`"
+                )
+
+                if GROUP_CHAT_ID != 0:
                     alerted[address] = now
-                    ai_take = ""
-                    if _gemini:
-                        ai_take = await gemini_ask(
-                            f"One sentence: ${symbol} MCap {fmt_usd(fdv)}, {ch_5m:+.0f}% 5m, {vr:.1f}x volume. Worth watching?",
-                            fallback=""
-                        )
-                    msg = f"{alert}\nMCap: {fmt_usd(fdv)} | Liq: {fmt_usd(liq)}\n`{address}`"
+                    ai_take = await gemini_ask(
+                        f"Unusual vol spike on ${symbol} (MCap {fmt_usd(fdv)}, "
+                        f"5m {fmt_pct(ch_5m)}, {ratio:.1f}x vol). "
+                        "One sentence: what does this pattern mean?",
+                        fallback=""
+                    )
                     if ai_take:
-                        msg += f"\n\n🧠 Kayo: {ai_take}"
+                        alert += f"\n🧠 *Kayo AI:* {ai_take}"
                     try:
                         await app.bot.send_message(
-                            chat_id=GROUP_CHAT_ID,
-                            text=msg,
+                            chat_id=GROUP_CHAT_ID, text=alert,
                             parse_mode="Markdown",
                             reply_markup=get_chart_buttons(address, symbol)
                         )
                     except Exception as e:
-                        logger.warning(f"Activity alert: {e}")
-        except Exception as e:
-            logger.error(f"Activity scanner: {e}")
-        await asyncio.sleep(120)
+                        logger.warning(f"unusual alert: {e}")
 
+            alerted  = {k: v for k, v in alerted.items() if now - v < 7200}
+            if len(baseline) > 500:
+                for k in list(baseline.keys())[:200]:
+                    del baseline[k]
+
+        except Exception as e:
+            logger.error(f"bg_unusual_activity: {e}", exc_info=True)
+        await asyncio.sleep(60)
 
 async def bg_wallet_tracker(app: Application):
     wallet_last_seen: Dict[str, str] = {}
@@ -2800,54 +2935,85 @@ async def bg_wallet_tracker(app: Application):
 # ── Bot setup ─────────────────────────────────────────────────
 async def post_init(app: Application):
     await app.bot.set_my_commands([
-        BotCommand("start",         "🏠 Welcome & all commands"),
-        BotCommand("scan",          "🔍 Full scan + opinion"),
-        BotCommand("smartscan",     "🎯 Best coins NOW"),
-        BotCommand("runners",       "🏃 Today's runners"),
-        BotCommand("momentum",      "⚡ Momentum spikes"),
-        BotCommand("verify",        "🛡️ Rug check"),
-        BotCommand("chart",         "📊 DEX chart inside Telegram"),
-        BotCommand("watch",         "👁️ Watch account for CA drops"),
-        BotCommand("unwatch",       "❌ Stop watching account"),
-        BotCommand("watchlist",     "📋 See watched accounts"),
-        BotCommand("news",          "📰 Twitter alpha"),
-        BotCommand("trending",      "🔥 Hot narratives"),
-        BotCommand("tt",            "🐦 Trending tweets"),
-        BotCommand("moni",          "👤 Scan any Twitter account"),
-        BotCommand("insiders",      "🧠 Insider accounts"),
-        BotCommand("copy",          "📋 Copy trade from account"),
-        BotCommand("twittersearch", "🔍 Twitter sentiment"),
-        BotCommand("narrative",     "🔮 Find coins by narrative"),
-        BotCommand("learn",         "🧠 Force Kayo to learn"),
-        BotCommand("mystats",       "📊 Your stats + Kayo brain"),
-        BotCommand("strategies",    "📈 Strategy win rates"),
-        BotCommand("record",        "📝 Teach Kayo from trades"),
-        BotCommand("call",          "📞 Register a call"),
-        BotCommand("mycalls",       "📊 Your calls + live P&L"),
-        BotCommand("stop",          "🔒 Close a call"),
-        BotCommand("leaderboard",   "🏆 Top traders"),
-        BotCommand("w",             "👛 Wallet overview"),
-        BotCommand("trackwallet",   "👀 Track wallet activity"),
-        BotCommand("mywallet",      "👛 Set your wallet"),
-        BotCommand("walletpnl",     "📊 Your trade P&L"),
-        BotCommand("untrackwallet", "❌ Stop tracking wallet"),
-        BotCommand("a",             "🪙 CoinGecko price"),
-        BotCommand("macro",         "🌍 Global market"),
-        BotCommand("index",         "📊 Top 10 by MCap"),
-        BotCommand("dt",            "🔥 Trending DEX"),
-        BotCommand("x",             "⚡ Quick token query"),
-        BotCommand("z",             "⚡ Ultra quick price"),
-        BotCommand("p",             "💰 Simple price"),
-        BotCommand("s",             "🔍 Search token"),
-        BotCommand("gp",            "🏆 Group points"),
+        # ── SCANNING ──────────────────────────────────────────
+        BotCommand("scan",          "🔍 Deep scan a CA — full analysis"),
+        BotCommand("c",             "⚡ Quick price check for a CA"),
+        BotCommand("dex",           "📊 DexScreener data for a CA"),
+        BotCommand("smartscan",     "🎯 AI picks best coins RIGHT NOW"),
+        BotCommand("runners",       "🏃 Top gainers on Solana (1h)"),
+        BotCommand("momentum",      "⚡ Momentum coins — volume surging"),
+        BotCommand("gems",          "💎 AI hidden gem finder"),
+        BotCommand("verify",        "✅ Rug-check a token"),
+        BotCommand("narrative",     "📖 Find coins matching a narrative"),
+        # ── AI ────────────────────────────────────────────────
+        BotCommand("ask",           "🧠 Ask Kayo AI anything crypto"),
+        BotCommand("sentiment",     "📊 AI market sentiment right now"),
+        BotCommand("gsum",          "📝 AI group chat summary"),
+        # ── NEWS ──────────────────────────────────────────────
+        BotCommand("cryptonews",    "📰 Latest crypto news + AI summary"),
+        BotCommand("trending",      "🔥 Trending Solana tokens"),
+        # ── NEW TOKENS ────────────────────────────────────────
+        BotCommand("pump",          "🆕 Latest new token launches"),
+        BotCommand("graduating",    "🎓 Tokens about to hit DEX"),
+        # ── CALLS & TRACKING ─────────────────────────────────
+        BotCommand("call",          "📢 Make a token call"),
+        BotCommand("mycalls",       "📋 Your open calls"),
+        BotCommand("stop",          "🛑 Close a call"),
+        BotCommand("leaderboard",   "🏆 Top callers in group"),
+        # ── WATCHLIST ────────────────────────────────────────
+        BotCommand("watch",         "👁 Add CA to watchlist"),
+        BotCommand("unwatch",       "❌ Remove from watchlist"),
+        BotCommand("watchlist",     "📋 View your watchlist"),
+        # ── ALERTS ───────────────────────────────────────────
+        BotCommand("alert",         "🔔 Set price alert for a token"),
+        BotCommand("myalerts",      "🔔 View your active alerts"),
+        BotCommand("delalert",      "🗑 Delete a price alert"),
+        # ── PORTFOLIO ────────────────────────────────────────
+        BotCommand("addport",       "💼 Add token to portfolio"),
+        BotCommand("portfolio",     "💼 View your portfolio"),
+        BotCommand("blacklist",     "🚫 Blacklist a rug token"),
+        # ── WALLET ───────────────────────────────────────────
+        BotCommand("trackwallet",   "👛 Track a Solana wallet"),
+        BotCommand("mywallet",      "👛 Link your wallet"),
+        BotCommand("walletpnl",     "💰 Wallet PnL report"),
+        BotCommand("untrackwallet", "🗑 Stop tracking a wallet"),
+        # ── TWITTER/SOCIAL ───────────────────────────────────
+        BotCommand("tt",            "🐦 Twitter sentiment for a CA"),
+        BotCommand("moni",          "🔍 Monitor a Twitter account"),
+        BotCommand("insiders",      "🕵️ Check insider wallets"),
+        BotCommand("copy",          "📋 Copy-trade a wallet"),
+        BotCommand("twittersearch", "🔎 Search Twitter for a term"),
+        # ── MARKET DATA ──────────────────────────────────────
+        BotCommand("chart",         "📈 Price chart for a token"),
+        BotCommand("markets",       "🌍 Global crypto market overview"),
+        BotCommand("macro",         "📉 Macro market conditions"),
+        BotCommand("index",         "📊 Crypto fear & greed index"),
+        BotCommand("a",             "💰 CoinGecko price lookup"),
+        BotCommand("dt",            "📊 Day trading signals"),
+        BotCommand("x",             "🔀 Cross-chain info"),
+        BotCommand("z",             "🔍 Solana token deep dive"),
+        BotCommand("p",             "💵 Solana token price"),
+        BotCommand("s",             "📈 Solana token stats"),
+        BotCommand("w",             "🌊 Whale watcher"),
+        BotCommand("gp",            "🏆 Group points leaderboard"),
+        # ── SOCIAL / FUN ─────────────────────────────────────
+        BotCommand("learn",         "📚 Add knowledge to Kayo AI"),
+        BotCommand("strategies",    "♟ Trading strategies"),
+        BotCommand("record",        "📝 Record a strategy note"),
+        BotCommand("mystats",       "📊 Your personal stats"),
         BotCommand("rank",          "⭐ Your XP & rank"),
+        BotCommand("dubs",          "🎉 Celebrate a win"),
+        # ── UTILITY ──────────────────────────────────────────
         BotCommand("remindme",      "⏰ Set a reminder"),
         BotCommand("tz",            "🕐 World timezones"),
-        BotCommand("status",        "✅ Bot status"),
-        BotCommand("settings",      "⚙️ Settings"),
+        BotCommand("ping",          "🏓 Check bot latency"),
+        BotCommand("status",        "✅ Bot status & health"),
+        BotCommand("settings",      "⚙️ Personal settings"),
         BotCommand("buttons",       "🔘 Toggle chart buttons"),
         BotCommand("autoresponder", "🤖 Toggle auto CA scan"),
-        BotCommand("help",          "❓ All commands"),
+        BotCommand("news",          "📰 Quick news fetch"),
+        BotCommand("help",          "❓ Full command list"),
+        BotCommand("start",         "🏠 Welcome message"),
     ])
     await app.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
     logger.info("=" * 60)
