@@ -2,5 +2,5 @@ python-telegram-bot==21.3
 aiohttp==3.9.0
 flask==3.0.0
 redis==5.0.1
-google-genai==1.16.0
+google-genai==1.16.1
 twscrape==0.18.1
