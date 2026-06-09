@@ -22,7 +22,8 @@ from urllib.parse import quote_plus
 import aiohttp
 import redis
 import xml.etree.ElementTree as ET
-import google.generativeai as genai
+from google import genai as genai_sdk
+from google.genai import types as genai_types
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     BotCommand, MenuButtonCommands, WebAppInfo,
@@ -81,24 +82,29 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 _gemini = None
 if GEMINI_API_KEY:
     try:
-        genai.configure(api_key=GEMINI_API_KEY)
-        _gemini = genai.GenerativeModel("gemini-2.0-flash")
-        logger.info("✅ Gemini AI connected")
+        _gemini = genai_sdk.Client(api_key=GEMINI_API_KEY)
+        logger.info("✅ Gemini AI connected (google-genai SDK)")
     except Exception as e:
         logger.warning(f"⚠️  Gemini init failed: {e}")
 else:
     logger.warning("🔴 GEMINI_API_KEY not set — ALL AI features disabled. Add it in Render env vars!")
 
 async def gemini_ask(prompt: str, fallback: str = "") -> str:
-    """Ask Gemini a question. Returns fallback string on failure."""
+    """Ask Gemini a question using the new google-genai SDK."""
     if not _gemini:
         return fallback
     try:
         loop = asyncio.get_running_loop()
-        resp = await loop.run_in_executor(None, lambda: _gemini.generate_content(prompt))
+        resp = await loop.run_in_executor(
+            None,
+            lambda: _gemini.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt
+            )
+        )
         return resp.text.strip()[:1000]
     except Exception as e:
-        logger.warning(f"Gemini error: {e}")
+        logger.warning(f"Gemini error: {type(e).__name__}: {e}")
         return fallback
 
 # ── Global state ──────────────────────────────────────────────
