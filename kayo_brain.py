@@ -867,9 +867,10 @@ def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
     return card
 
 def scan_buttons(addr: str, sym: str = "") -> InlineKeyboardMarkup:
+    label = f"📊 {sym} Chart" if sym else "📊 Chart"
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/solana/{addr}"),
+            InlineKeyboardButton(label, callback_data=f"chart:{addr}"),
             InlineKeyboardButton("🔫 Photon", url=f"https://photon-sol.tinyastro.io/en/lp/{addr}"),
             InlineKeyboardButton("🌙 BullX", url=f"https://bullx.io/terminal?chainId=1399811149&address={addr}"),
         ],
@@ -890,7 +891,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "🦅 *KAYO BRAIN v16*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "_Your Solana alpha intelligence bot_\n\n"
-        "*SCAN*  `/scan <ca>` · `/c <ca>` · `/verify <ca>`\n"
+        "*SCAN*  `/scan <ca>` · `/c <ca>` · `/verify <ca>` · `/chart <ca>`\n"
         "*DISCOVER*  `/runners` · `/new` · `/pump` · `/gems`\n"
         "*TRENDS*  `/trending` · `/narrative <word>` · `/news`\n"
         "*AI*  `/ask <q>` · `/sentiment` · `/macro`\n"
@@ -906,7 +907,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "🦅 *KAYO BRAIN v16 — COMMANDS*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "*📊 SCAN & ANALYZE*\n"
-        "`/scan <ca>` — Full scan + AI opinion\n"
+        "`/scan <ca>` — Full scan + AI opinion\n"        "`/chart <ca>` — In-app chart image (no DexScreener needed)\n"
         "`/c <ca>` — Quick price check\n"
         "`/price <coin>` — Live price: btc, sol, eth, etc.\n"
         "`/verify <ca>` — Rug & honeypot check\n\n"
@@ -1622,7 +1623,7 @@ async def call_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "addr": addr, "sym": sym, "entry": entry,
         "time": time.time(), "status": "open", "exit": None, "pnl": None
     })
-    _save(); add_xp(user.id, 10)
+    asyncio.create_task(_save()); add_xp(user.id, 10)
     await u.message.reply_text(
         f"📢 *CALL — ${sym}*\n"
         f"Entry: {_price(entry)}\n"
@@ -1702,7 +1703,7 @@ async def addport_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid   = str(u.effective_user.id)
     if uid not in portfolios: portfolios[uid] = []
     portfolios[uid].append({"addr": addr, "sym": sym, "amount": amount, "entry_price": price, "time": time.time()})
-    _save(); add_xp(u.effective_user.id, 3)
+    asyncio.create_task(_save()); add_xp(u.effective_user.id, 3)
     await u.message.reply_text(f"✅ Added *${sym}* — ${amount:.2f} at {_price(price)}", parse_mode="Markdown")
 
 async def portfolio_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -1767,7 +1768,7 @@ async def trackwallet_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     addr  = c.args[0].strip()
     label = " ".join(c.args[1:]) or addr[:8]
     tracked_wallets[addr] = {"label": label, "by": u.effective_user.id, "added": time.time()}
-    _save(); add_xp(u.effective_user.id, 5)
+    asyncio.create_task(_save()); add_xp(u.effective_user.id, 5)
     await u.message.reply_text(f"👛 Tracking *{label}*\n`{addr}`", parse_mode="Markdown")
 
 async def mywallet_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -1902,6 +1903,151 @@ async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     else:
         await msg.edit_text(f"❌ Couldn't find price for `{query}`. Try `/a {coin_id}` for CoinGecko lookup.")
 
+async def chart_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """
+    /chart <ca>  — sends an in-app chart image directly in Telegram.
+    Uses DexScreener chart image + Birdeye chart as fallback.
+    No need to open DexScreener!
+    """
+    if not c.args:
+        await u.message.reply_text(
+            "Usage: `/chart <contract_address>`\n"
+            "Example: `/chart EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`",
+            parse_mode="Markdown"
+        ); return
+
+    addr = c.args[0].strip()
+    msg  = await u.message.reply_text("📊 *Loading chart...*", parse_mode="Markdown")
+
+    # Step 1: Get token info from DexScreener
+    pairs = await dex_pairs_by_token(addr)
+    if not pairs:
+        pairs_search = await dex_search_pairs(addr)
+        pairs = [p for p in pairs_search if p.get("chainId") == "solana"]
+
+    if not pairs:
+        await msg.edit_text("❌ Token not found on DexScreener. Check the contract address.")
+        return
+
+    p     = pairs[0]
+    base  = p.get("baseToken", {})
+    sym   = base.get("symbol", "???")
+    name  = base.get("name", "Unknown")
+    price = float(p.get("priceUsd", 0) or 0)
+    fdv   = float(p.get("fdv", 0) or 0)
+    liq   = float((p.get("liquidity") or {}).get("usd", 0) or 0)
+    ch5m  = float((p.get("priceChange") or {}).get("m5", 0) or 0)
+    ch1h  = float((p.get("priceChange") or {}).get("h1", 0) or 0)
+    ch24h = float((p.get("priceChange") or {}).get("h24", 0) or 0)
+    v24h  = float((p.get("volume") or {}).get("h24", 0) or 0)
+    b1h   = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
+    s1h   = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
+    pair_addr = p.get("pairAddress", "")
+    dex_url   = p.get("url", f"https://dexscreener.com/solana/{addr}")
+
+    # Step 2: Try chart image sources in order of preference
+    chart_url = None
+    chart_source = ""
+
+    # Source A: DexScreener chart image (official, best quality)
+    dex_chart_candidates = [
+        f"https://io.dexscreener.com/dex/chart/amm/v3/solana/{pair_addr}?theme=dark&interval=15&baseToken={addr}",
+        f"https://io.dexscreener.com/dex/chart/amm/v2/solana/{pair_addr}?theme=dark&interval=15&baseToken={addr}",
+        f"https://io.dexscreener.com/dex/chart/solana/{pair_addr}?theme=dark&tvWidgetTheme=dark",
+    ]
+
+    async with aiohttp.ClientSession() as s:
+        for url in dex_chart_candidates:
+            try:
+                async with s.head(url, timeout=aiohttp.ClientTimeout(total=5),
+                                  headers={"User-Agent": "Mozilla/5.0"}) as r:
+                    if r.status == 200 and "image" in r.headers.get("content-type", ""):
+                        chart_url = url
+                        chart_source = "DexScreener"
+                        break
+            except Exception:
+                continue
+
+        # Source B: Birdeye chart image API
+        if not chart_url:
+            birdeye_url = f"https://birdeye.so/charts/trading-view/history?address={addr}&type=15&currency=USD&chain=solana"
+            # Use Birdeye public image endpoint
+            birdeye_img = f"https://birdeye-chart.s3.amazonaws.com/sol/{addr}.png"
+            try:
+                async with s.head(birdeye_img, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    if r.status == 200:
+                        chart_url = birdeye_img
+                        chart_source = "Birdeye"
+            except Exception:
+                pass
+
+        # Source C: Defined.fi chart screenshot
+        if not chart_url:
+            defined_img = f"https://cache.defined.fi/charts/{addr}?resolution=15&networkId=1399811149"
+            try:
+                async with s.head(defined_img, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    if r.status == 200:
+                        chart_url = defined_img
+                        chart_source = "Defined.fi"
+            except Exception:
+                pass
+
+    # Caption with all key stats
+    press  = "🟢 BUY PRESSURE" if b1h > s1h else "🔴 SELL PRESSURE"
+    age    = _age(p.get("pairCreatedAt", 0) or 0)
+    caption = (
+        f"📊 *${sym}* — _{name}_\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 Price: *{_price(price)}*\n"
+        f"📦 MCap: `{_usd(fdv)}`  |  Liq: `{_usd(liq)}`\n"
+        f"📈 5m: {_pct(ch5m)}  |  1h: {_pct(ch1h)}  |  24h: {_pct(ch24h)}\n"
+        f"💹 Vol 24h: `{_usd(v24h)}`\n"
+        f"🔄 Buys/Sells (1h): {b1h} / {s1h}  →  {press}\n"
+        f"⏱ Age: {age}\n"
+        f"`{addr}`"
+    )
+    if chart_source:
+        caption += f"\n\n_Chart via {chart_source}_"
+
+    # Buttons
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🌐 DexScreener", url=dex_url),
+            InlineKeyboardButton("🦅 Birdeye", url=f"https://birdeye.so/token/{addr}?chain=solana"),
+        ],
+        [
+            InlineKeyboardButton("🔫 Photon", url=f"https://photon-sol.tinyastro.io/en/lp/{addr}"),
+            InlineKeyboardButton("🌙 BullX", url=f"https://bullx.io/terminal?chainId=1399811149&address={addr}"),
+        ],
+    ])
+
+    add_xp(u.effective_user.id, 2)
+
+    if chart_url:
+        try:
+            await msg.delete()
+            await u.message.reply_photo(
+                photo=chart_url,
+                caption=caption,
+                parse_mode="Markdown",
+                reply_markup=markup,
+            )
+            return
+        except Exception as e:
+            logger.debug(f"chart photo send failed: {e}")
+
+    # Fallback: no image available — send stats card + links
+    await msg.edit_text(
+        f"📊 *${sym} CHART*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"_Live chart image not available for this token yet._\n\n"
+        + caption.replace(f"📊 *${sym}* — _{name}_\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", ""),
+        parse_mode="Markdown",
+        reply_markup=markup,
+        disable_web_page_preview=True,
+    )
+
+
 async def autoresponder_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid  = u.effective_user.id
     curr = get_setting(uid, "autoresponder", True)
@@ -1934,6 +2080,104 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════════════════════
 # AUTO-RESPONDER
 # ═══════════════════════════════════════════════════════════════
+async def handle_chart_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles 'chart:<addr>' callback from the inline chart button.
+    Sends chart image directly in Telegram — no DexScreener needed.
+    """
+    query = u.callback_query
+    await query.answer("Loading chart...")
+    data  = query.data or ""
+    if not data.startswith("chart:"): return
+    addr  = data.split(":", 1)[1].strip()
+
+    # Notify
+    await query.message.reply_text("📊 *Loading chart...*", parse_mode="Markdown")
+
+    # Get pair data
+    pairs = await dex_pairs_by_token(addr)
+    if not pairs:
+        await query.message.reply_text("❌ Token not found. Try /chart <ca> directly.")
+        return
+
+    p       = pairs[0]
+    base    = p.get("baseToken", {})
+    sym     = base.get("symbol", "???")
+    name    = base.get("name", "Unknown")
+    price   = float(p.get("priceUsd", 0) or 0)
+    fdv     = float(p.get("fdv", 0) or 0)
+    liq     = float((p.get("liquidity") or {}).get("usd", 0) or 0)
+    ch5m    = float((p.get("priceChange") or {}).get("m5", 0) or 0)
+    ch1h    = float((p.get("priceChange") or {}).get("h1", 0) or 0)
+    ch24h   = float((p.get("priceChange") or {}).get("h24", 0) or 0)
+    v24h    = float((p.get("volume") or {}).get("h24", 0) or 0)
+    b1h     = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
+    s1h     = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
+    pair_addr = p.get("pairAddress", "")
+    dex_url   = p.get("url", f"https://dexscreener.com/solana/{addr}")
+
+    press  = "🟢 BUY PRESSURE" if b1h > s1h else "🔴 SELL PRESSURE"
+    age    = _age(p.get("pairCreatedAt", 0) or 0)
+
+    caption = (
+        f"📊 *${sym}* — _{name}_\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 Price: *{_price(price)}*\n"
+        f"📦 MCap: `{_usd(fdv)}`  |  Liq: `{_usd(liq)}`\n"
+        f"📈 5m: {_pct(ch5m)}  |  1h: {_pct(ch1h)}  |  24h: {_pct(ch24h)}\n"
+        f"💹 Vol 24h: `{_usd(v24h)}`\n"
+        f"🔄 Buys/Sells (1h): {b1h}/{s1h}  →  {press}\n"
+        f"⏱ Age: {age}\n"
+        f"`{addr}`"
+    )
+
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🌐 DexScreener", url=dex_url),
+            InlineKeyboardButton("🦅 Birdeye", url=f"https://birdeye.so/token/{addr}?chain=solana"),
+        ],
+        [
+            InlineKeyboardButton("🔫 Photon", url=f"https://photon-sol.tinyastro.io/en/lp/{addr}"),
+            InlineKeyboardButton("🌙 BullX", url=f"https://bullx.io/terminal?chainId=1399811149&address={addr}"),
+        ],
+    ])
+
+    # Try chart images
+    chart_url = None
+    chart_source = ""
+    chart_candidates = [
+        (f"https://io.dexscreener.com/dex/chart/amm/v3/solana/{pair_addr}?theme=dark&interval=15&baseToken={addr}", "DexScreener"),
+        (f"https://io.dexscreener.com/dex/chart/amm/v2/solana/{pair_addr}?theme=dark&interval=15&baseToken={addr}", "DexScreener"),
+        (f"https://cache.defined.fi/charts/{addr}?resolution=15&networkId=1399811149", "Defined.fi"),
+    ]
+    async with aiohttp.ClientSession() as s:
+        for url, src in chart_candidates:
+            try:
+                async with s.head(url, timeout=aiohttp.ClientTimeout(total=5),
+                                  headers={"User-Agent": "Mozilla/5.0"}) as r:
+                    ct = r.headers.get("content-type", "")
+                    if r.status == 200 and "image" in ct:
+                        chart_url = url; chart_source = src; break
+            except Exception:
+                continue
+
+    if chart_url:
+        cap = caption + f"\n\n_Chart via {chart_source}_"
+        try:
+            await query.message.reply_photo(photo=chart_url, caption=cap,
+                                            parse_mode="Markdown", reply_markup=markup)
+            return
+        except Exception as e:
+            logger.debug(f"chart photo: {e}")
+
+    # Fallback: stats card with links
+    await query.message.reply_text(
+        f"📊 *${sym} CHART*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"_Image not available — open chart via links below._\n\n" + caption,
+        parse_mode="Markdown", reply_markup=markup, disable_web_page_preview=True
+    )
+
+
 async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not u.message or not u.message.text: return
     text = u.message.text
@@ -2548,6 +2792,7 @@ async def post_init(app: Application):
         BotCommand("gsum",          "AI group chat summary"),
         BotCommand("dubs",          "Celebrate a win"),
         BotCommand("remindme",      "Set a reminder"),
+        BotCommand("chart",         "In-app chart: /chart <ca>"),
         BotCommand("price",         "Live price: /price btc /price sol"),
         BotCommand("autoresponder", "Toggle CA auto-scan"),
         BotCommand("status",        "Bot health check"),
@@ -2586,12 +2831,15 @@ def main():
         ("trackwallet", trackwallet_cmd), ("mywallet", mywallet_cmd),
         ("rank", rank_cmd), ("gp", gp_cmd), ("gsum", gsum_cmd),
         ("dubs", dubs_cmd), ("remindme", remindme_cmd),
+        ("chart", chart_cmd),
         ("price", price_cmd),
         ("autoresponder", autoresponder_cmd),
         ("status", status_cmd), ("ping", ping_cmd),
     ]
     for name, fn in CMDS:
         app.add_handler(CommandHandler(name, fn))
+    # CallbackQuery handler for inline chart button
+    app.add_handler(CallbackQueryHandler(handle_chart_callback, pattern=r"^chart:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     async def run():
