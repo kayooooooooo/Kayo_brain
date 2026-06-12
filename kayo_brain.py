@@ -1,20 +1,23 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v15 — FULL REBUILD                    ║
+║                    KAYO BRAIN v16 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
+║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
 ║  News:    5 RSS feeds + keyword→CA narrative matching               ║
 ║  Alerts:  Pump / Gem / Whale / New Launch / Narrative               ║
-║  State:   Redis (persistent) → local JSON (fallback)                ║
+║  State:   Redis async (persistent) → local JSON (fallback)          ║
 ╚══════════════════════════════════════════════════════════════════════╝
 """
 
 import asyncio, logging, re, time, json, os, threading, hashlib
-from collections import defaultdict
+from collections import defaultdict, OrderedDict
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Set
 
-import aiohttp, redis
+import aiohttp
+import redis.asyncio as aioredis
+import redis as sync_redis
 import xml.etree.ElementTree as ET
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
@@ -47,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v15", 200
+def _root(): return "🦅 Kayo Brain v16", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -61,17 +64,23 @@ threading.Thread(
 ).start()
 
 # ═══════════════════════════════════════════════════════════════
-# REDIS
+# REDIS  (async client — does not block the event loop)
 # ═══════════════════════════════════════════════════════════════
-_redis = None
-if REDIS_URL:
+_redis: Optional[aioredis.Redis] = None   # set in post_init after loop starts
+
+def _make_redis() -> Optional[aioredis.Redis]:
+    """Create async Redis client; returns None if REDIS_URL not set."""
+    if not REDIS_URL:
+        return None
     try:
-        _redis = redis.from_url(REDIS_URL, decode_responses=True)
-        _redis.ping()
-        logger.info("✅ Redis connected")
+        # Quick sync ping to confirm connectivity before we hand it to async
+        r_test = sync_redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=3)
+        r_test.ping()
+        r_test.close()
+        return aioredis.from_url(REDIS_URL, decode_responses=True)
     except Exception as e:
-        logger.warning(f"Redis failed: {e}")
-        _redis = None
+        logger.warning(f"Redis unavailable: {e}")
+        return None
 
 # ═══════════════════════════════════════════════════════════════
 # STATE
@@ -88,42 +97,59 @@ tracked_wallets: Dict[str, dict] = {}
 knowledge_base:  List[str]       = []
 reminders:       List[dict]      = []
 group_messages:  list            = []
-seen_alert_ids:  Set[str]        = set()   # Redis-persisted dedup set
-watchlist_seen:  Set[str]        = set()
-seen_news_ids:   Set[str]        = set()
+# BUG FIX: Use OrderedDict as a bounded ordered set so we can evict
+# the OLDEST entries (not random ones like plain set).
+seen_alert_ids:  "OrderedDict[str, int]" = OrderedDict()  # key=id, value=timestamp
+watchlist_seen:  "OrderedDict[str, int]" = OrderedDict()
+seen_news_ids:   Set[str]                = set()
+_MAX_SEEN = 3000   # max entries before oldest are trimmed
 
-def _save():
-    data = {
-        "watchlist": watchlist,
-        "user_alerts": user_alerts,
-        "portfolios": portfolios,
-        "active_calls": active_calls,
-        "blacklist": list(blacklist),
-        "xp_db": xp_db,
-        "user_settings": user_settings,
-        "user_wallets": user_wallets,
-        "tracked_wallets": tracked_wallets,
-        "knowledge_base": knowledge_base,
-        "reminders": reminders,
-        "seen_alert_ids": list(seen_alert_ids)[-2000:],
-    }
-    raw = json.dumps(data)
-    try:
-        if _redis:
-            _redis.set(REDIS_KEY, raw)
-        else:
-            with open(STATE_FILE, "w") as f: f.write(raw)
-    except Exception as e:
-        logger.warning(f"save_state: {e}")
+def _seen_add(od: "OrderedDict[str, int]", key: str):
+    """Add key to bounded ordered dedup dict, evicting oldest if over limit."""
+    od[key] = int(time.time())
+    while len(od) > _MAX_SEEN:
+        od.popitem(last=False)   # remove oldest
 
-def _load():
+def _seen_check(od: "OrderedDict[str, int]", key: str) -> bool:
+    return key in od
+
+_save_lock = asyncio.Lock()
+
+async def _save():
+    """Async-safe state save — runs without blocking the event loop."""
+    async with _save_lock:
+        data = {
+            "watchlist": watchlist,
+            "user_alerts": user_alerts,
+            "portfolios": portfolios,
+            "active_calls": active_calls,
+            "blacklist": list(blacklist),
+            "xp_db": xp_db,
+            "user_settings": user_settings,
+            "user_wallets": user_wallets,
+            "tracked_wallets": tracked_wallets,
+            "knowledge_base": knowledge_base,
+            "reminders": reminders,
+            "seen_alert_ids": list(seen_alert_ids.keys())[-3000:],
+        }
+        raw = json.dumps(data)
+        try:
+            if _redis:
+                await _redis.set(REDIS_KEY, raw)
+            else:
+                loop = asyncio.get_event_loop()
+                await loop.run_in_executor(None, lambda: open(STATE_FILE, "w").write(raw))
+        except Exception as e:
+            logger.warning(f"save_state: {e}")
+
+async def _load():
     global watchlist, user_alerts, portfolios, active_calls, blacklist
     global xp_db, user_settings, user_wallets, tracked_wallets
     global knowledge_base, reminders, seen_alert_ids
     try:
         raw = None
         if _redis:
-            raw = _redis.get(REDIS_KEY)
+            raw = await _redis.get(REDIS_KEY)
         if not raw and os.path.exists(STATE_FILE):
             raw = open(STATE_FILE).read()
         if not raw: return
@@ -139,7 +165,7 @@ def _load():
         tracked_wallets = d.get("tracked_wallets", {})
         knowledge_base  = d.get("knowledge_base", [])
         reminders       = d.get("reminders", [])
-        seen_alert_ids  = set(d.get("seen_alert_ids", []))
+        seen_alert_ids  = OrderedDict((k, 0) for k in d.get("seen_alert_ids", []))
         logger.info(f"✅ State loaded — {len(watchlist)} watched, {len(active_calls)} calls, {len(seen_alert_ids)} seen alerts")
     except Exception as e:
         logger.warning(f"load_state: {e}")
@@ -157,16 +183,98 @@ def set_setting(uid, key, val):
     user_settings[uid][key] = val
 
 # ═══════════════════════════════════════════════════════════════
+# LIVE MARKET CONTEXT  — injected into every AI call
+# Fetches BTC/SOL/ETH real-time prices so AI never hallucinates
+# ═══════════════════════════════════════════════════════════════
+_market_ctx_cache: Dict = {"data": None, "ts": 0}
+_MARKET_CTX_TTL = 60   # seconds between refreshes
+
+async def get_live_market_context() -> str:
+    """
+    Returns a compact market-context string with LIVE prices.
+    Used to ground every AI prompt — no more outdated price hallucinations.
+    Refreshes at most once per minute (cached).
+    """
+    global _market_ctx_cache
+    now = time.time()
+    if _market_ctx_cache["data"] and (now - _market_ctx_cache["ts"]) < _MARKET_CTX_TTL:
+        return _market_ctx_cache["data"]
+
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://api.coingecko.com/api/v3/simple/price"
+                "?ids=bitcoin,solana,ethereum,binancecoin"
+                "&vs_currencies=usd"
+                "&include_24hr_change=true"
+                "&include_market_cap=true",
+                timeout=aiohttp.ClientTimeout(total=8),
+                headers={"User-Agent": "Mozilla/5.0"}
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    btc  = d.get("bitcoin", {})
+                    sol  = d.get("solana", {})
+                    eth  = d.get("ethereum", {})
+                    bnb  = d.get("binancecoin", {})
+                    fg   = await cg_fear_greed()
+                    fg_v = fg.get("value", "?")
+                    fg_c = fg.get("value_classification", "?")
+
+                    ctx = (
+                        f"[LIVE MARKET DATA - {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}]\n"
+                        f"BTC: ${btc.get('usd',0):,.0f} ({btc.get('usd_24h_change',0):+.2f}% 24h) | MCap ${btc.get('usd_market_cap',0)/1e9:.1f}B\n"
+                        f"ETH: ${eth.get('usd',0):,.0f} ({eth.get('usd_24h_change',0):+.2f}% 24h)\n"
+                        f"SOL: ${sol.get('usd',0):,.2f} ({sol.get('usd_24h_change',0):+.2f}% 24h)\n"
+                        f"BNB: ${bnb.get('usd',0):,.2f} ({bnb.get('usd_24h_change',0):+.2f}% 24h)\n"
+                        f"Fear & Greed: {fg_v}/100 - {fg_c}\n"
+                        f"---\n"
+                        f"You are Kayo, a sharp Solana alpha intelligence bot. "
+                        f"ALWAYS use the live data above when asked about prices — never use training data for prices."
+                    )
+                    _market_ctx_cache["data"] = ctx
+                    _market_ctx_cache["ts"]   = now
+                    return ctx
+    except Exception as e:
+        logger.debug(f"market_ctx: {e}")
+
+    # fallback minimal context
+    ctx = (
+        f"[LIVE MARKET DATA - {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}]\n"
+        f"(Price data temporarily unavailable - use DexScreener/CoinGecko as source.)\n"
+        f"You are Kayo, a sharp Solana alpha intelligence bot. Be honest if data is missing."
+    )
+    return ctx
+
+# ═══════════════════════════════════════════════════════════════
 # AI — PURE HTTP, NO SDK
+# Groq primary → Gemini fallback
+# Every call is injected with LIVE market context so prices are always real
 # ═══════════════════════════════════════════════════════════════
 GROQ_MODELS = ["llama-3.3-70b-versatile", "llama3-70b-8192", "llama3-8b-8192"]
 
-async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 280) -> str:
+async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
+                 inject_market: bool = True) -> str:
     """
-    Primary: Groq (free, 500k tok/day, ~800 tok/s)
-    Fallback: Gemini 2.0 Flash via REST
-    Both use raw HTTP — zero SDK dependency.
+    Primary: Groq — fast, free tier 500k tokens/day
+    Fallback: Gemini 2.0 Flash
+    inject_market=True prepends live BTC/SOL/ETH prices so AI never
+    gives stale price answers.
     """
+    # Build system context with live prices
+    system_ctx = await get_live_market_context() if inject_market else (
+        "You are Kayo, a sharp Solana alpha intelligence bot. Be direct, professional, "
+        "and data-driven. No fluff, no disclaimers."
+    )
+    system_msg = {
+        "role": "system",
+        "content": (
+            f"{system_ctx}\n\n"
+            "Style: Drop alpha like a pro - cite exact prices, be sharp and direct, "
+            "no fluff, no disclaimers. Telegram traders scan fast."
+        )
+    }
+
     if GROQ_API_KEY:
         for model in GROQ_MODELS:
             try:
@@ -179,29 +287,30 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 280) -> str:
                         },
                         json={
                             "model": model,
-                            "messages": [{"role": "user", "content": prompt}],
+                            "messages": [system_msg, {"role": "user", "content": prompt}],
                             "max_tokens": max_tokens,
-                            "temperature": 0.7,
+                            "temperature": 0.65,
                         },
-                        timeout=aiohttp.ClientTimeout(total=12),
+                        timeout=aiohttp.ClientTimeout(total=14),
                     ) as r:
                         if r.status == 200:
                             d = await r.json()
                             return d["choices"][0]["message"]["content"].strip()
                         elif r.status == 429:
-                            await asyncio.sleep(1)
+                            await asyncio.sleep(1.5)
                             continue
             except Exception as e:
                 logger.debug(f"Groq {model}: {e}")
 
     if GEMINI_API_KEY:
         try:
+            full_prompt = f"{system_ctx}\n\n{prompt}"
             async with aiohttp.ClientSession() as s:
                 async with s.post(
                     f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
-                    json={"contents": [{"parts": [{"text": prompt}]}],
+                    json={"contents": [{"parts": [{"text": full_prompt}]}],
                           "generationConfig": {"maxOutputTokens": max_tokens}},
-                    timeout=aiohttp.ClientTimeout(total=15),
+                    timeout=aiohttp.ClientTimeout(total=18),
                 ) as r:
                     if r.status == 200:
                         d = await r.json()
@@ -424,49 +533,103 @@ async def fetch_news(limit: int = 10) -> List[Dict]:
 # TWITTER (requires TWITTER_AUTH_TOKEN cookie)
 # ═══════════════════════════════════════════════════════════════
 def _tw_headers() -> Optional[Dict]:
+    """
+    Twitter auth via cookie-based internal GraphQL API.
+    TWITTER_AUTH_TOKEN = the `auth_token` cookie from your logged-in browser session.
+    The guest-bearer token below is the public app-level token required alongside the cookie.
+    """
     if not TWITTER_AUTH_TOKEN: return None
+    # This guest bearer + auth_token cookie combo targets the internal API
+    # (same as what the Twitter web app uses) — not the v2 REST API.
     return {
         "Authorization": "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
-        "cookie": f"auth_token={TWITTER_AUTH_TOKEN}",
-        "User-Agent": "Mozilla/5.0",
+        "Cookie": f"auth_token={TWITTER_AUTH_TOKEN}",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         "x-twitter-active-user": "yes",
         "x-twitter-auth-type": "OAuth2Session",
+        "x-twitter-client-language": "en",
+        "Referer": "https://twitter.com/",
+        "Origin": "https://twitter.com",
     }
 
+async def _tw_guest_token() -> str:
+    """Fetch a guest token required for Twitter's internal API calls."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(
+                "https://api.twitter.com/1.1/guest/activate.json",
+                headers={
+                    "Authorization": "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
+                    "User-Agent": "Mozilla/5.0",
+                },
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status == 200:
+                    return (await r.json()).get("guest_token", "")
+    except Exception as e:
+        logger.debug(f"guest_token: {e}")
+    return ""
+
 async def tw_search(query: str, limit: int = 15) -> List[Dict]:
+    """Search Twitter via the internal adaptive search API (no v2 API key needed)."""
     h = _tw_headers()
     if not h: return []
     try:
-        enc = query.replace(" ", "%20")
+        guest = await _tw_guest_token()
+        if not guest: return []
+        h["x-guest-token"] = guest
+        params = {
+            "q": query,
+            "count": str(min(limit, 20)),
+            "result_type": "recent",
+            "tweet_mode": "extended",
+        }
         async with aiohttp.ClientSession() as s:
             async with s.get(
-                f"https://api.twitter.com/2/tweets/search/recent?query={enc}&max_results={min(limit,100)}&tweet.fields=created_at,text",
-                headers=h, timeout=aiohttp.ClientTimeout(total=12)
+                "https://api.twitter.com/1.1/search/tweets.json",
+                headers=h,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=12),
             ) as r:
                 if r.status == 200:
-                    return (await r.json()).get("data", [])
+                    data = await r.json()
+                    tweets = data.get("statuses", [])
+                    return [
+                        {"id": t.get("id_str", ""),
+                         "text": t.get("full_text", t.get("text", ""))}
+                        for t in tweets
+                    ]
     except Exception as e:
         logger.debug(f"tw_search: {e}")
     return []
 
 async def tw_user_tweets(username: str, limit: int = 10) -> List[Dict]:
+    """Get user tweets via Twitter 1.1 timeline API with cookie auth."""
     h = _tw_headers()
     if not h: return []
     try:
+        guest = await _tw_guest_token()
+        if not guest: return []
+        h["x-guest-token"] = guest
         async with aiohttp.ClientSession() as s:
             async with s.get(
-                f"https://api.twitter.com/2/users/by/username/{username}",
-                headers=h, timeout=aiohttp.ClientTimeout(total=8)
-            ) as r:
-                if r.status != 200: return []
-                uid = (await r.json()).get("data", {}).get("id", "")
-            if not uid: return []
-            async with s.get(
-                f"https://api.twitter.com/2/users/{uid}/tweets?max_results={min(limit,100)}&tweet.fields=created_at,text",
-                headers=h, timeout=aiohttp.ClientTimeout(total=10)
+                "https://api.twitter.com/1.1/statuses/user_timeline.json",
+                headers=h,
+                params={
+                    "screen_name": username,
+                    "count": str(min(limit, 20)),
+                    "tweet_mode": "extended",
+                    "include_rts": "false",
+                },
+                timeout=aiohttp.ClientTimeout(total=12),
             ) as r:
                 if r.status == 200:
-                    return (await r.json()).get("data", [])
+                    tweets = await r.json()
+                    return [
+                        {"id": t.get("id_str", ""),
+                         "text": t.get("full_text", t.get("text", ""))}
+                        for t in tweets
+                    ]
     except Exception as e:
         logger.debug(f"tw_user: {e}")
     return []
@@ -724,7 +887,7 @@ def scan_buttons(addr: str, sym: str = "") -> InlineKeyboardMarkup:
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     add_xp(u.effective_user.id, 10)
     await u.message.reply_text(
-        "🦅 *KAYO BRAIN v15*\n"
+        "🦅 *KAYO BRAIN v16*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "_Your Solana alpha intelligence bot_\n\n"
         "*SCAN*  `/scan <ca>` · `/c <ca>` · `/verify <ca>`\n"
@@ -740,11 +903,12 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await u.message.reply_text(
-        "🦅 *KAYO BRAIN — COMMANDS*\n"
+        "🦅 *KAYO BRAIN v16 — COMMANDS*\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "*📊 SCAN & ANALYZE*\n"
         "`/scan <ca>` — Full scan + AI opinion\n"
         "`/c <ca>` — Quick price check\n"
+        "`/price <coin>` — Live price: btc, sol, eth, etc.\n"
         "`/verify <ca>` — Rug & honeypot check\n\n"
         "*🔍 DISCOVER*\n"
         "`/runners` — Top Solana gainers right now\n"
@@ -809,9 +973,15 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     add_xp(u.effective_user.id, 5)
     ai = await ai_ask(
         f"Solana token ${t['sym']} — MCap {_usd(t['mcap'])}, liq {_usd(t['liq'])}, "
-        f"1h {_pct(t['ch1h'])}, 24h {_pct(t['ch24h'])}, buy ratio {t['buy_pct']:.0f}%, "
-        f"risk {t['risk_score']}/100. 2-sentence alpha verdict. Be direct.",
-        fallback=""
+        f"age {_age(t['created'])}, 5m {_pct(t['ch5m'])}, 1h {_pct(t['ch1h'])}, "
+        f"24h {_pct(t['ch24h'])}, buy ratio {t['buy_pct']:.0f}%, vol spike {t['vol_spike']:.1f}x, "
+        f"momentum {t['mscore']}/100, risk {t['risk_score']}/100, "
+        f"narrative #{t['narrative']}, honeypot={t['is_honeypot']}, lp_locked={t['lp_locked']}. "
+        "Give a sharp alpha verdict: is this worth aping right now? "
+        "Consider the current market conditions from your live context. "
+        "Call out any red flags. 2-3 direct sentences.",
+        fallback="",
+        inject_market=True
     )
     await msg.edit_text(
         build_scan_card(t, ai),
@@ -1150,8 +1320,14 @@ async def news_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     add_xp(u.effective_user.id, 1)
     titles = "\n".join([i["title"] for i in items[:6]])
     ai_sum = await ai_ask(
-        f"Summarize these crypto headlines for a Solana trader. 3 key points, what matters most:\n{titles}",
-        fallback=""
+        f"Crypto headlines just in:\n{titles}\n\n"
+        "As Kayo, give a sharp intelligence briefing: "
+        "(1) The single most important macro story and why it moves markets, "
+        "(2) Direct impact on SOL/Solana ecosystem specifically, "
+        "(3) Any narrative plays — coins/sectors that could pump from this news. "
+        "Keep it tight, specific, and actionable. Cross-reference with live prices.",
+        fallback="",
+        inject_market=True
     )
     lines = ["📰 *CRYPTO NEWS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
     for item in items[:6]:
@@ -1164,14 +1340,21 @@ async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
         await u.message.reply_text("Usage: `/ask <question>`", parse_mode="Markdown"); return
     q   = " ".join(c.args)
-    msg = await u.message.reply_text("🧠 *Thinking...*", parse_mode="Markdown")
+    msg = await u.message.reply_text("🧠 *Kayo thinking...*", parse_mode="Markdown")
     add_xp(u.effective_user.id, 2)
     ans = await ai_ask(
-        f"You are Kayo, a sharp Solana alpha intelligence bot. A trader asks: {q}\n"
-        "Answer directly, concisely, and professionally. No filler words.",
-        max_tokens=350
+        f"Trader question: {q}\n"
+        "Answer using the live market data provided in your context. "
+        "Be sharp, cite exact numbers, and drop alpha like a pro trader would. "
+        "If the question is about price, ALWAYS use the live prices above.",
+        max_tokens=420,
+        inject_market=True
     )
-    await msg.edit_text(f"🧠 *Kayo AI*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{ans}", parse_mode="Markdown")
+    ts = datetime.utcnow().strftime("%H:%M UTC")
+    await msg.edit_text(
+        f"\U0001f9e0 *Kayo AI*\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{ans}\n\n_Live data as of {ts}_",
+        parse_mode="Markdown"
+    )
 
 async def sentiment_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     msg = await u.message.reply_text("📊 *Reading market sentiment...*", parse_mode="Markdown")
@@ -1185,10 +1368,14 @@ async def sentiment_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t_names  = [coin["item"]["symbol"].upper() for coin in trending[:5]]
     add_xp(u.effective_user.id, 2)
     ai = await ai_ask(
-        f"Crypto market: F&G={fg_val} ({fg_class}), BTC dom={btc_dom:.1f}%, "
+        f"Market data: F&G={fg_val} ({fg_class}), BTC dom={btc_dom:.1f}%, "
         f"Total MCap={_usd(total_mc)} ({mc_chg:+.1f}% 24h), trending: {t_names}. "
-        "2-sentence market verdict for a Solana degen. What's the play?",
-        fallback=""
+        "Give a sharp 3-point market read: (1) current risk appetite, "
+        "(2) what BTC dominance means for alts right now, "
+        "(3) the actual play for a Solana degen today. "
+        "Use exact numbers from the live context. Be direct — no fluff.",
+        fallback="",
+        inject_market=True
     )
     text = (
         f"📊 *MARKET SENTIMENT*\n"
@@ -1210,11 +1397,16 @@ async def macro_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     mc_chg   = float(glob.get("market_cap_change_percentage_24h_usd", 0) or 0)
     add_xp(u.effective_user.id, 1)
     ai = await ai_ask(
-        f"Macro briefing for a Solana degen: F&G={fg_val}, BTC dom={btc_dom:.1f}%, "
-        f"MCap 24h={mc_chg:+.1f}%. "
-        "Give 3 sharp bullet points: macro environment, risk appetite, and the best play this week.",
+        f"Macro briefing request: F&G={fg_val}, BTC dom={btc_dom:.1f}%, MCap 24h={mc_chg:+.1f}%. "
+        "Deliver 4 sharp points: "
+        "1) BTC price action & trend, "
+        "2) SOL strength vs BTC, "
+        "3) overall risk environment (risk-on/risk-off, why), "
+        "4) the highest-conviction play for a Solana degen this week. "
+        "Use the live prices from your context. Be specific with numbers.",
         fallback="Macro analysis unavailable.",
-        max_tokens=300
+        max_tokens=450,
+        inject_market=True
     )
     await msg.edit_text(f"📉 *MACRO BRIEFING*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{ai}", parse_mode="Markdown")
 
@@ -1291,7 +1483,7 @@ async def watch_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await u.message.reply_text("Usage: `/watch @username` — watch a Twitter account for CA drops", parse_mode="Markdown"); return
     username = c.args[0].lstrip("@").lower()
     watchlist[username] = {"added": time.time(), "by": u.effective_user.id, "hits": 0}
-    _save()
+    await _save()
     add_xp(u.effective_user.id, 5)
     await u.message.reply_text(
         f"👁 *Watching @{username}*\n"
@@ -1385,7 +1577,7 @@ async def alert_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     price = float(p.get("priceUsd", 0) or 0)
     direction = "above" if target > price else "below"
     user_alerts.append({"uid": u.effective_user.id, "addr": addr, "sym": sym, "target": target, "direction": direction, "triggered": False})
-    _save()
+    await _save()
     add_xp(u.effective_user.id, 3)
     await u.message.reply_text(
         f"🔔 *Alert set for ${sym}*\n"
@@ -1467,7 +1659,7 @@ async def stop_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
                 pnl_pct = (exit_p - cl["entry"]) / cl["entry"] * 100
                 cl["pnl"] = f"{pnl_pct:+.1f}%"
                 if pnl_pct > 0: add_xp(uid, int(pnl_pct / 10))
-            _save()
+            await _save()
             await u.message.reply_text(
                 f"🛑 *Call closed — ${cl['sym']}*\n"
                 f"Entry: {_price(cl['entry'])}  Exit: {_price(exit_p) if exit_p else 'N/A'}\n"
@@ -1627,6 +1819,89 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     ms  = int((time.time() - t) * 1000)
     await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v15 alive.", parse_mode="Markdown")
 
+async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """
+    /price btc  or  /price sol  — live price from CoinGecko
+    Always accurate, always real-time. Never relies on AI training data.
+    """
+    if not c.args:
+        await u.message.reply_text(
+            "Usage: `/price <coin>` — e.g. `/price btc` `/price sol` `/price eth`",
+            parse_mode="Markdown"
+        ); return
+
+    query = c.args[0].lower().strip()
+    # Map common short-forms to CoinGecko IDs
+    COIN_MAP = {
+        "btc": "bitcoin", "bitcoin": "bitcoin",
+        "sol": "solana",  "solana":  "solana",
+        "eth": "ethereum","ethereum": "ethereum",
+        "bnb": "binancecoin", "bnb": "binancecoin",
+        "xrp": "ripple",  "doge": "dogecoin",
+        "ada": "cardano", "avax": "avalanche-2",
+        "dot": "polkadot", "link": "chainlink",
+        "matic": "matic-network", "pol": "matic-network",
+        "sui": "sui", "apt": "aptos",
+        "jup": "jupiter-exchange-solana",
+        "ray": "raydium", "jto": "jito-governance-token",
+        "bonk": "bonk", "wif": "dogwifcoin",
+        "pengu": "pudgy-penguins",
+    }
+    coin_id = COIN_MAP.get(query, query)
+    msg = await u.message.reply_text(f"💰 *Fetching live price...*", parse_mode="Markdown")
+
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.coingecko.com/api/v3/simple/price"
+                f"?ids={coin_id}&vs_currencies=usd"
+                f"&include_24hr_change=true&include_market_cap=true&include_24hr_vol=true",
+                timeout=aiohttp.ClientTimeout(total=8),
+                headers={"User-Agent": "Mozilla/5.0"}
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    if coin_id in d:
+                        data  = d[coin_id]
+                        price = data.get("usd", 0)
+                        chg24 = data.get("usd_24h_change", 0)
+                        mcap  = data.get("usd_market_cap", 0)
+                        vol   = data.get("usd_24h_vol", 0)
+                        add_xp(u.effective_user.id, 1)
+                        await msg.edit_text(
+                            f"💰 *{query.upper()} — LIVE PRICE*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"Price: *${price:,.4f}*\n"
+                            f"24h: {_pct(chg24)}\n"
+                            f"MCap: `{_usd(mcap)}`  Vol 24h: `{_usd(vol)}`\n"
+                            f"\n_Live data as of {datetime.utcnow().strftime(chr(37)+chr(72)+chr(58)+chr(37)+chr(77)+chr(32)+chr(85)+chr(84)+chr(67))}_",
+                            parse_mode="Markdown"
+                        )
+                        return
+    except Exception as e:
+        logger.debug(f"price_cmd: {e}")
+
+    # Fallback: try DexScreener
+    pairs = await dex_search_pairs(query)
+    sol_pairs = [p for p in pairs if p.get("chainId") == "solana"]
+    if sol_pairs:
+        p = sol_pairs[0]
+        base  = p.get("baseToken", {})
+        sym   = base.get("symbol", query.upper())
+        price = float(p.get("priceUsd", 0) or 0)
+        fdv   = float(p.get("fdv", 0) or 0)
+        ch24  = float((p.get("priceChange") or {}).get("h24", 0) or 0)
+        await msg.edit_text(
+            f"💰 *${sym} — LIVE PRICE (DexScreener)*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Price: *{_price(price)}*\n"
+            f"24h: {_pct(ch24)}  MCap: `{_usd(fdv)}`\n"
+            f"\n_Live data as of {datetime.utcnow().strftime(chr(37)+chr(72)+chr(58)+chr(37)+chr(77)+chr(32)+chr(85)+chr(84)+chr(67))}_",
+            parse_mode="Markdown"
+        )
+    else:
+        await msg.edit_text(f"❌ Couldn't find price for `{query}`. Try `/a {coin_id}` for CoinGecko lookup.")
+
 async def autoresponder_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid  = u.effective_user.id
     curr = get_setting(uid, "autoresponder", True)
@@ -1641,7 +1916,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v15 STATUS*\n"
+        f"⚙️ *KAYO BRAIN v16 STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -1756,11 +2031,9 @@ async def bg_main_scanner(app: Application):
 
                 # Dedup via Redis-persisted set
                 alert_id = hashlib.md5(f"{addr}:{alert_type}:{int(now/3600)}".encode()).hexdigest()[:16]
-                if alert_id in seen_alert_ids: continue
-                seen_alert_ids.add(alert_id)
-                if len(seen_alert_ids) > 3000:
-                    seen_alert_ids.discard(next(iter(seen_alert_ids)))
-                _save()  # persist dedup set
+                if _seen_check(seen_alert_ids, alert_id): continue
+                _seen_add(seen_alert_ids, alert_id)
+                asyncio.create_task(_save())  # non-blocking persist
 
                 cooldown[addr] = now
 
@@ -1783,10 +2056,14 @@ async def bg_main_scanner(app: Application):
                     "mscore": min(100, int(abs(ch1h) + buy_pct/2 + vol_spike*10)),
                 }
                 ai = await ai_ask(
-                    f"${sym} Solana signal: MCap {_usd(mcap)}, 5m {_pct(ch5m)}, "
-                    f"1h {_pct(ch1h)}, liq {_usd(liq)}, buys/sells {b1h}/{s1h}. "
-                    "Worth aping? 1 direct sentence.",
-                    fallback=""
+                    f"Solana alert — ${sym} ({alert_type.upper()}): MCap {_usd(mcap)}, "
+                    f"liq {_usd(liq)}, 5m {_pct(ch5m)}, 1h {_pct(ch1h)}, "
+                    f"buys/sells {b1h}/{s1h}, vol spike {vol_spike:.1f}x. "
+                    f"Narrative: #{nar}. "
+                    "Given current market conditions, is this worth acting on NOW? "
+                    "1 razor-sharp sentence — entry thesis or stay away.",
+                    fallback="",
+                    inject_market=True
                 )
                 card = build_alert_card(tok, alert_type, ai)
                 if GROUP_CHAT_ID != 0:
@@ -1849,7 +2126,7 @@ async def bg_new_launch_scanner(app: Application):
                 if not addr or addr in blacklist: continue
 
                 alert_id = hashlib.md5(f"{addr}:newlaunch".encode()).hexdigest()[:16]
-                if alert_id in seen_alert_ids: continue
+                if _seen_check(seen_alert_ids, alert_id): continue
 
                 base    = pd.get("baseToken", {})
                 sym     = base.get("symbol", "???")
@@ -1886,8 +2163,8 @@ async def bg_new_launch_scanner(app: Application):
                 if score < 38: continue
                 if GROUP_CHAT_ID == 0: continue
 
-                seen_alert_ids.add(alert_id)
-                _save()
+                _seen_add(seen_alert_ids, alert_id)
+                asyncio.create_task(_save())
 
                 tw_link = next((l.get("url", "") for l in links if l.get("type") == "twitter"), "")
                 tg_link = next((l.get("url", "") for l in links if l.get("type") == "telegram"), "")
@@ -2007,8 +2284,9 @@ async def bg_narrative_news_scanner(app: Application):
 
                 for score, addr, p in candidates[:2]:
                     alert_id = hashlib.md5(f"{addr}:nar:{nar}:{int(now/3600)}".encode()).hexdigest()[:16]
-                    if alert_id in seen_alert_ids: continue
-                    seen_alert_ids.add(alert_id); _save()
+                    if _seen_check(seen_alert_ids, alert_id): continue
+                    _seen_add(seen_alert_ids, alert_id)
+                    asyncio.create_task(_save())
 
                     base  = p.get("baseToken", {})
                     sym   = base.get("symbol", "???")
@@ -2088,9 +2366,13 @@ async def bg_trending_metas_scanner(app: Application):
                     lines.append(f"• *{name}*  MCap: `{_usd(mcap)}`  1h: {_pct(c1h)}  24h: {_pct(c24h)}")
                 nar_names = [m.get("name", "") for m in top5]
                 ai = await ai_ask(
-                    f"These are the top trending crypto metas right now: {nar_names}. "
-                    "Which one has the most potential for a Solana degen today and why? 2 sharp sentences.",
-                    fallback=""
+                    f"Top trending metas right now: {nar_names}. "
+                    "With the current market conditions (live data in context), "
+                    "which meta has the strongest momentum, what's driving it, "
+                    "and what specific type of Solana token should a degen be hunting in it? "
+                    "3 sentences max, be precise.",
+                    fallback="",
+                    inject_market=True
                 )
                 if ai: lines.append(f"\n🧠 _{ai}_")
                 try:
@@ -2154,12 +2436,12 @@ async def bg_watchlist_scanner(app: Application):
                         tid  = tweet.get("id", "")
                         text = tweet.get("text", "")
                         tid_key = hashlib.md5(f"{username}:{tid}".encode()).hexdigest()[:16]
-                        if not tid or tid_key in watchlist_seen: continue
-                        watchlist_seen.add(tid_key)
+                        if not tid or _seen_check(watchlist_seen, tid_key): continue
+                        _seen_add(watchlist_seen, tid_key)
                         cas = extract_cas(text)
                         if not cas: continue
                         watchlist[username]["hits"] = watchlist[username].get("hits", 0) + 1
-                        _save()
+                        await _save()
                         for ca in cas[:2]:
                             pairs = await dex_pairs_by_token(ca)
                             if not pairs: continue
@@ -2187,9 +2469,7 @@ async def bg_watchlist_scanner(app: Application):
                     await asyncio.sleep(1)
                 except Exception as e:
                     logger.debug(f"watchlist @{username}: {e}")
-        if len(watchlist_seen) > 5000:
-            watchlist_seen.clear()
-            watchlist_seen.update(set())
+        # OrderedDict auto-trims via _seen_add; no manual clear needed
         await asyncio.sleep(60)
 
 
@@ -2207,7 +2487,7 @@ async def bg_reminder_checker(app: Application):
                         parse_mode="Markdown",
                     )
                     reminders.remove(r)
-                    _save()
+                    await _save()
                 except Exception as e:
                     logger.debug(f"reminder: {e}")
         except Exception as e:
@@ -2219,7 +2499,11 @@ async def bg_reminder_checker(app: Application):
 # POST INIT & MAIN
 # ═══════════════════════════════════════════════════════════════
 async def post_init(app: Application):
-    _load()
+    global _redis
+    _redis = _make_redis()
+    if _redis:
+        logger.info("✅ Async Redis connected")
+    await _load()
     cmds = [
         BotCommand("start",         "Welcome + quick start"),
         BotCommand("help",          "Full command list"),
@@ -2264,6 +2548,7 @@ async def post_init(app: Application):
         BotCommand("gsum",          "AI group chat summary"),
         BotCommand("dubs",          "Celebrate a win"),
         BotCommand("remindme",      "Set a reminder"),
+        BotCommand("price",         "Live price: /price btc /price sol"),
         BotCommand("autoresponder", "Toggle CA auto-scan"),
         BotCommand("status",        "Bot health check"),
         BotCommand("ping",          "Latency check"),
@@ -2274,7 +2559,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v15 ready — "
+        f"🦅 Kayo Brain v16 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -2301,6 +2586,7 @@ def main():
         ("trackwallet", trackwallet_cmd), ("mywallet", mywallet_cmd),
         ("rank", rank_cmd), ("gp", gp_cmd), ("gsum", gsum_cmd),
         ("dubs", dubs_cmd), ("remindme", remindme_cmd),
+        ("price", price_cmd),
         ("autoresponder", autoresponder_cmd),
         ("status", status_cmd), ("ping", ping_cmd),
     ]
