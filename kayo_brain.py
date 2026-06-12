@@ -887,80 +887,88 @@ def scan_buttons(addr: str, sym: str = "") -> InlineKeyboardMarkup:
 
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     add_xp(u.effective_user.id, 10)
+    name = u.effective_user.first_name or "degen"
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("\U0001f52c Scan Token",   callback_data="menu:scan"),
+            InlineKeyboardButton("\U0001f4ca Chart",        callback_data="menu:chart"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f3c3 Runners",      callback_data="menu:runners"),
+            InlineKeyboardButton("\U0001f195 New Launches", callback_data="menu:new"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f680 Pumps",        callback_data="menu:pump"),
+            InlineKeyboardButton("\U0001f48e Gems",         callback_data="menu:gems"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f525 Trending",     callback_data="menu:trending"),
+            InlineKeyboardButton("\U0001f4f0 News",         callback_data="menu:news"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f916 Ask Kayo AI",  callback_data="menu:ask"),
+            InlineKeyboardButton("\U0001f624 Sentiment",    callback_data="menu:sentiment"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f4bc Portfolio",    callback_data="menu:portfolio"),
+            InlineKeyboardButton("\U0001f514 My Alerts",    callback_data="menu:myalerts"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f4e2 Leaderboard",  callback_data="menu:leaderboard"),
+            InlineKeyboardButton("\U00002b50 My Rank",      callback_data="menu:rank"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f4b5 Price Check",  callback_data="menu:price"),
+            InlineKeyboardButton("\U0001f6e1 Verify Token", callback_data="menu:verify"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f4cb Full Command List", callback_data="menu:help"),
+        ],
+    ])
     await u.message.reply_text(
-        "🦅 *KAYO BRAIN v16*\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "_Your Solana alpha intelligence bot_\n\n"
-        "*SCAN*  `/scan <ca>` · `/c <ca>` · `/verify <ca>` · `/chart <ca>`\n"
-        "*DISCOVER*  `/runners` · `/new` · `/pump` · `/gems`\n"
-        "*TRENDS*  `/trending` · `/narrative <word>` · `/news`\n"
-        "*AI*  `/ask <q>` · `/sentiment` · `/macro`\n"
-        "*CALLS*  `/call <ca> <entry>` · `/leaderboard`\n"
-        "*ALERTS*  `/alert <ca> <price>` · `/watchlist`\n"
-        "*PORTFOLIO*  `/addport <ca> <$>` · `/portfolio`\n\n"
-        "Type `/help` for the full list.",
-        parse_mode="Markdown"
+        f"\U0001f985 *KAYO BRAIN v16*\n"
+        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
+        f"Tap any button below or type `/` to browse all commands in the menu bar."
+        f"\nEvery command is tap-to-use from the menu \u2b07\ufe0f",
+        parse_mode="Markdown",
+        reply_markup=markup,
     )
 
 async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Paginated help with tappable category buttons."""
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("\U0001f52c Scan & Analyze",  callback_data="help:scan"),
+            InlineKeyboardButton("\U0001f50d Discover",        callback_data="help:discover"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f4d6 Narratives",      callback_data="help:narrative"),
+            InlineKeyboardButton("\U0001f4f0 News & AI",       callback_data="help:ai"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f426 Twitter/Social",  callback_data="help:twitter"),
+            InlineKeyboardButton("\U0001f514 Alerts",          callback_data="help:alerts"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f4e2 Calls",           callback_data="help:calls"),
+            InlineKeyboardButton("\U0001f4bc Portfolio",       callback_data="help:portfolio"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f45b Wallets",         callback_data="help:wallets"),
+            InlineKeyboardButton("\U0001f3ae XP & Social",     callback_data="help:social"),
+        ],
+        [
+            InlineKeyboardButton("\U00002699\ufe0f System",   callback_data="help:system"),
+        ],
+    ])
     await u.message.reply_text(
-        "🦅 *KAYO BRAIN v16 — COMMANDS*\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        "*📊 SCAN & ANALYZE*\n"
-        "`/scan <ca>` — Full scan + AI opinion\n"        "`/chart <ca>` — In-app chart image (no DexScreener needed)\n"
-        "`/c <ca>` — Quick price check\n"
-        "`/price <coin>` — Live price: btc, sol, eth, etc.\n"
-        "`/verify <ca>` — Rug & honeypot check\n\n"
-        "*🔍 DISCOVER*\n"
-        "`/runners` — Top Solana gainers right now\n"
-        "`/new` — Brand new token launches\n"
-        "`/pump` — Fresh pumps in last 5 minutes\n"
-        "`/gems` — Hidden gem finder\n"
-        "`/boosted` — Tokens teams are promoting\n"
-        "`/takeover` — Community takeover tokens\n\n"
-        "*📖 NARRATIVES & TRENDS*\n"
-        "`/trending` — Trending metas on DexScreener\n"
-        "`/narrative <word>` — Coins matching a narrative\n"
-        "`/explain <narrative>` — AI explains a narrative\n\n"
-        "*📰 NEWS & AI*\n"
-        "`/news` — Latest news + AI summary\n"
-        "`/ask <q>` — Ask Kayo AI anything\n"
-        "`/sentiment` — Market mood\n"
-        "`/macro` — Macro briefing\n"
-        "`/markets` — Global market data\n"
-        "`/index` — Fear & greed index\n"
-        "`/a <coin_id>` — CoinGecko lookup\n\n"
-        "*🐦 TWITTER*\n"
-        "`/tt <ca>` — Twitter sentiment\n"
-        "`/moni @user` — Monitor a Twitter account\n"
-        "`/watch @user` — Watch for CA drops\n"
-        "`/unwatch @user` — Stop watching\n"
-        "`/watchlist` — Your watched accounts\n\n"
-        "*🔔 ALERTS & PORTFOLIO*\n"
-        "`/alert <ca> <price>` — Price alert\n"
-        "`/myalerts` — View your alerts\n"
-        "`/delalert <n>` — Delete alert\n"
-        "`/addport <ca> <$>` — Add to portfolio\n"
-        "`/portfolio` — View P&L\n"
-        "`/blacklist <ca>` — Flag a rug\n\n"
-        "*📢 CALLS*\n"
-        "`/call <ca> <entry>` — Make a call\n"
-        "`/mycalls` — Your calls\n"
-        "`/stop <sym> <exit>` — Close a call\n"
-        "`/leaderboard` — Top callers\n\n"
-        "*👛 WALLETS*\n"
-        "`/trackwallet <addr> <label>` — Track a wallet\n"
-        "`/mywallet <addr>` — Link your wallet\n\n"
-        "*🎮 XP & SOCIAL*\n"
-        "`/rank` — Your XP rank\n"
-        "`/gp` — Group XP leaderboard\n"
-        "`/dubs <story>` — Celebrate a win\n"
-        "`/gsum` — AI group chat summary\n"
-        "`/remindme <min> <msg>` — Set reminder\n\n"
-        "*⚙️ SYSTEM*\n"
-        "`/status` — Bot health check\n"
-        "`/ping` — Latency check",
-        parse_mode="Markdown"
+        "\U0001f985 *KAYO BRAIN v16 — COMMANDS*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "Tap a category \U0001f447 to see its commands.\n"
+        "Or type `/` in the chat bar to tap any command directly.",
+        parse_mode="Markdown",
+        reply_markup=markup,
     )
 
 async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -2080,6 +2088,209 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 # ═══════════════════════════════════════════════════════════════
 # AUTO-RESPONDER
 # ═══════════════════════════════════════════════════════════════
+HELP_PAGES = {
+    "scan": (
+        "\U0001f52c *SCAN & ANALYZE*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/scan <CA>` — Full token deep scan + AI verdict\n"
+        "`/c <CA>` — Quick price snapshot\n"
+        "`/chart <CA>` — In-app chart image (no DexScreener needed)\n"
+        "`/price btc` — Live price for any coin (btc, sol, eth, bnb...)\n"
+        "`/verify <CA>` — Rug & honeypot check via GoPlus\n"
+        "`/a <coin-id>` — Full CoinGecko coin lookup"
+    ),
+    "discover": (
+        "\U0001f50d *DISCOVER*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/runners` — Top Solana gainers right now\n"
+        "`/new` — Brand new token launches\n"
+        "`/pump` — Fresh 5-minute pumps\n"
+        "`/gems` — Hidden gems (low cap, good momentum)\n"
+        "`/boosted` — Tokens teams are actively promoting\n"
+        "`/takeover` — Community takeover tokens"
+    ),
+    "narrative": (
+        "\U0001f4d6 *NARRATIVES & TRENDS*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/trending` — Trending metas on DexScreener\n"
+        "`/narrative <word>` — Tokens matching a narrative\n"
+        "  e.g. `/narrative ai` `/narrative gaming`\n"
+        "`/explain <narrative>` — AI professional breakdown of a narrative\n"
+        "  e.g. `/explain defi` `/explain meme`"
+    ),
+    "ai": (
+        "\U0001f4f0 *NEWS & AI*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/news` — Latest 5-source news + AI intelligence briefing\n"
+        "`/ask <question>` — Ask Kayo AI anything (uses live prices)\n"
+        "`/sentiment` — Market mood, F&G, BTC dom + AI verdict\n"
+        "`/macro` — Macro briefing: BTC, SOL, risk environment\n"
+        "`/markets` — Global market cap & volume data\n"
+        "`/index` — Fear & Greed index"
+    ),
+    "twitter": (
+        "\U0001f426 *TWITTER / SOCIAL*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/tt <CA>` — Twitter sentiment for a token\n"
+        "`/moni @user` — Analyze a KOL account (tweet history + CAs)\n"
+        "`/watch @user` — Monitor account for CA drops\n"
+        "`/unwatch @user` — Stop monitoring\n"
+        "`/watchlist` — Your monitored accounts"
+    ),
+    "alerts": (
+        "\U0001f514 *ALERTS*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/alert <CA> <price>` — Set a price alert\n"
+        "  e.g. `/alert EPjF... 0.05` — fires when price hits target\n"
+        "`/myalerts` — View all your active alerts\n"
+        "`/delalert <number>` — Delete an alert by its number\n"
+        "`/blacklist <CA>` — Blacklist a rug (filtered from all scans)"
+    ),
+    "calls": (
+        "\U0001f4e2 *CALLS*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/call <CA> <entry>` — Make a public alpha call\n"
+        "  e.g. `/call EPjF... 0.042`\n"
+        "`/mycalls` — Your call history\n"
+        "`/stop <symbol> <exit>` — Close a call + auto P&L\n"
+        "  e.g. `/stop WIF 0.08`\n"
+        "`/leaderboard` — Top callers ranked by P&L & win rate"
+    ),
+    "portfolio": (
+        "\U0001f4bc *PORTFOLIO*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/addport <CA> <$amount>` — Add a token to portfolio\n"
+        "  e.g. `/addport EPjF... 500`\n"
+        "`/portfolio` — View live P&L for all holdings"
+    ),
+    "wallets": (
+        "\U0001f45b *WALLETS*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/trackwallet <address> <label>` — Track any Solana wallet\n"
+        "  e.g. `/trackwallet 9xQe... whaleacc`\n"
+        "`/mywallet <address>` — Link your own Solana wallet"
+    ),
+    "social": (
+        "\U0001f3ae *XP & SOCIAL*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/rank` — Your XP level and rank\n"
+        "`/gp` — Group XP leaderboard\n"
+        "`/dubs <story>` — Celebrate a win (+20 XP)\n"
+        "`/gsum` — AI summary of last 50 group messages\n"
+        "`/remindme <min> <msg>` — Set a reminder\n"
+        "  e.g. `/remindme 30 check WIF chart`"
+    ),
+    "system": (
+        "\U00002699\ufe0f *SYSTEM*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/autoresponder` — Toggle auto-scan when CA is pasted\n"
+        "`/status` — Full bot health check (Redis, AI, Twitter, group)\n"
+        "`/ping` — Latency check\n"
+        "`/start` — Reopen main menu"
+    ),
+}
+
+BACK_BTN = InlineKeyboardMarkup([[InlineKeyboardButton("\u2b05\ufe0f Back to categories", callback_data="help:back")]])
+
+async def handle_help_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Shows per-category command pages when tapping help category buttons."""
+    query = u.callback_query
+    await query.answer()
+    data = (query.data or "").replace("help:", "")
+
+    if data == "back":
+        # Re-show the help category menu
+        await help_cmd(u, c)
+        return
+
+    page = HELP_PAGES.get(data)
+    if page:
+        try:
+            await query.message.edit_text(page, parse_mode="Markdown", reply_markup=BACK_BTN)
+        except Exception:
+            await query.message.reply_text(page, parse_mode="Markdown", reply_markup=BACK_BTN)
+
+
+async def handle_menu_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles all menu button taps from /start.
+    For commands that need no args (runners, gems, etc.) — runs them directly.
+    For commands that need a CA/arg — sends a friendly prompt to type it.
+    """
+    query = u.callback_query
+    await query.answer()
+    cmd = (query.data or "").replace("menu:", "")
+
+    # Commands that run immediately with no args
+    NO_ARG_CMDS = {
+        "runners":     runners_cmd,
+        "new":         new_cmd,
+        "pump":        pump_cmd,
+        "gems":        gems_cmd,
+        "trending":    trending_cmd,
+        "news":        news_cmd,
+        "sentiment":   sentiment_cmd,
+        "macro":       macro_cmd,
+        "markets":     markets_cmd,
+        "index":       index_cmd,
+        "portfolio":   portfolio_cmd,
+        "myalerts":    myalerts_cmd,
+        "leaderboard": leaderboard_cmd,
+        "rank":        rank_cmd,
+        "gp":          gp_cmd,
+        "watchlist":   watchlist_cmd,
+        "mycalls":     mycalls_cmd,
+        "status":      status_cmd,
+        "ping":        ping_cmd,
+    }
+
+    # Commands that need an argument — show a prompt
+    ARG_PROMPTS = {
+        "scan":      ("\U0001f52c", "Send me the *contract address* to scan:\n`/scan <CA>`"),
+        "chart":     ("\U0001f4ca", "Send me the *contract address* to chart:\n`/chart <CA>`"),
+        "c":         ("\U0001f4b0", "Send me the *contract address* for quick price:\n`/c <CA>`"),
+        "price":     ("\U0001f4b5", "Send me the *coin name* for live price:\n`/price btc` or `/price sol`"),
+        "verify":    ("\U0001f6e1", "Send me the *contract address* to verify:\n`/verify <CA>`"),
+        "ask":       ("\U0001f916", "Send me your *question*:\n`/ask <your question>`"),
+        "narrative": ("\U0001f4d6", "Send me the *narrative keyword*:\n`/narrative <word>` e.g. `/narrative ai`"),
+        "explain":   ("\U0001f9e0", "Send me the *narrative to explain*:\n`/explain <narrative>`"),
+        "alert":     ("\U0001f514", "Set a price alert:\n`/alert <CA> <target_price>`\nExample: `/alert EPjF... 0.05`"),
+        "call":      ("\U0001f4e2", "Make a public alpha call:\n`/call <CA> <entry_price>`"),
+        "addport":   ("\U00002795", "Add to portfolio:\n`/addport <CA> <dollar_amount>`"),
+        "tt":        ("\U0001f426", "Twitter sentiment for a token:\n`/tt <CA or keyword>`"),
+        "moni":      ("\U0001f441", "Monitor a KOL:\n`/moni @username`"),
+        "watch":     ("\U0001f4e1", "Watch a Twitter account for CA drops:\n`/watch @username`"),
+        "trackwallet":("\U0001f45b","Track a Solana wallet:\n`/trackwallet <address> <label>`"),
+        "mywallet":  ("\U0001f517", "Link your wallet:\n`/mywallet <address>`"),
+        "a":         ("\U0001f50d", "CoinGecko lookup:\n`/a <coin-id>` e.g. `/a solana`"),
+        "dubs":      ("\U0001f389", "Celebrate a win:\n`/dubs <your story>`"),
+        "remindme":  ("\U000023f0", "Set a reminder:\n`/remindme <minutes> <message>`"),
+        "blacklist": ("\U000026d4", "Blacklist a rug token:\n`/blacklist <CA>`"),
+        "stop":      ("\U0001f3c1", "Close a call:\n`/stop <symbol> <exit_price>`"),
+        "delalert":  ("\U0001f5d1", "Delete an alert:\n`/delalert <alert_number>`"),
+        "help":      None,
+    }
+
+    if cmd == "help":
+        await help_cmd(u, c)
+        return
+
+    if cmd in NO_ARG_CMDS:
+        await NO_ARG_CMDS[cmd](u, c)
+        return
+
+    if cmd in ARG_PROMPTS and ARG_PROMPTS[cmd]:
+        icon, prompt = ARG_PROMPTS[cmd]
+        await query.message.reply_text(
+            f"{icon} {prompt}",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Unknown — show main menu again
+    await start(u, c)
+
+
 async def handle_chart_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
     Handles 'chart:<addr>' callback from the inline chart button.
@@ -2748,59 +2959,103 @@ async def post_init(app: Application):
     if _redis:
         logger.info("✅ Async Redis connected")
     await _load()
-    cmds = [
-        BotCommand("start",         "Welcome + quick start"),
-        BotCommand("help",          "Full command list"),
-        BotCommand("scan",          "Full token scan + AI opinion"),
-        BotCommand("c",             "Quick price check"),
-        BotCommand("verify",        "Rug & honeypot check"),
-        BotCommand("runners",       "Top Solana gainers now"),
-        BotCommand("new",           "Brand new token launches"),
-        BotCommand("pump",          "Fresh pumps (5m movers)"),
-        BotCommand("gems",          "Hidden gem finder"),
-        BotCommand("boosted",       "Boosted tokens"),
-        BotCommand("takeover",      "Community takeovers"),
-        BotCommand("trending",      "Trending metas"),
-        BotCommand("narrative",     "Coins matching a narrative"),
-        BotCommand("explain",       "AI explains a narrative"),
-        BotCommand("ask",           "Ask Kayo AI anything"),
-        BotCommand("news",          "Latest news + AI summary"),
-        BotCommand("sentiment",     "Market mood"),
-        BotCommand("macro",         "Macro conditions briefing"),
-        BotCommand("markets",       "Global market data"),
-        BotCommand("index",         "Fear & greed index"),
-        BotCommand("a",             "CoinGecko coin lookup"),
-        BotCommand("tt",            "Twitter sentiment for a CA"),
-        BotCommand("moni",          "Monitor a Twitter account"),
-        BotCommand("watch",         "Watch account for CA drops"),
-        BotCommand("unwatch",       "Stop watching account"),
-        BotCommand("watchlist",     "Your watched accounts"),
-        BotCommand("alert",         "Set a price alert"),
-        BotCommand("myalerts",      "View your price alerts"),
-        BotCommand("delalert",      "Delete a price alert"),
-        BotCommand("addport",       "Add token to portfolio"),
-        BotCommand("portfolio",     "View portfolio P&L"),
-        BotCommand("blacklist",     "Blacklist a rug token"),
-        BotCommand("call",          "Make a public call"),
-        BotCommand("mycalls",       "Your calls"),
-        BotCommand("stop",          "Close a call"),
-        BotCommand("leaderboard",   "Top callers leaderboard"),
-        BotCommand("trackwallet",   "Track a Solana wallet"),
-        BotCommand("mywallet",      "Link your wallet"),
-        BotCommand("rank",          "Your XP rank"),
-        BotCommand("gp",            "Group XP leaderboard"),
-        BotCommand("gsum",          "AI group chat summary"),
-        BotCommand("dubs",          "Celebrate a win"),
-        BotCommand("remindme",      "Set a reminder"),
-        BotCommand("chart",         "In-app chart: /chart <ca>"),
-        BotCommand("price",         "Live price: /price btc /price sol"),
-        BotCommand("autoresponder", "Toggle CA auto-scan"),
-        BotCommand("status",        "Bot health check"),
-        BotCommand("ping",          "Latency check"),
+    # ── Full command list (all 48) — shown in private chat menu ──────────
+    all_cmds = [
+        # Scan & Analyze
+        BotCommand("start",         "🦅 Welcome & quick menu"),
+        BotCommand("help",          "📋 Full command list"),
+        BotCommand("scan",          "🔬 Full token scan + AI verdict"),
+        BotCommand("c",             "💰 Quick price check"),
+        BotCommand("chart",         "📊 In-app chart (no DexScreener)"),
+        BotCommand("price",         "💵 Live price: btc sol eth etc"),
+        BotCommand("verify",        "🛡 Rug & honeypot check"),
+        # Discover
+        BotCommand("runners",       "🏃 Top Solana gainers now"),
+        BotCommand("new",           "🆕 Brand new launches"),
+        BotCommand("pump",          "🚀 Fresh 5m pumps"),
+        BotCommand("gems",          "💎 Hidden gem finder"),
+        BotCommand("boosted",       "⚡ Boosted tokens"),
+        BotCommand("takeover",      "🏴 Community takeovers"),
+        # Narratives & Trends
+        BotCommand("trending",      "🔥 Trending metas now"),
+        BotCommand("narrative",     "📖 Coins in a narrative"),
+        BotCommand("explain",       "🧠 AI explains a narrative"),
+        # News & AI
+        BotCommand("news",          "📰 Latest news + AI summary"),
+        BotCommand("ask",           "🤖 Ask Kayo AI anything"),
+        BotCommand("sentiment",     "😤 Market mood & risk"),
+        BotCommand("macro",         "🌍 Macro briefing"),
+        BotCommand("markets",       "📈 Global market data"),
+        BotCommand("index",         "😨 Fear & Greed index"),
+        BotCommand("a",             "🔍 CoinGecko coin lookup"),
+        # Twitter
+        BotCommand("tt",            "🐦 Twitter sentiment for CA"),
+        BotCommand("moni",          "👁 Monitor a KOL account"),
+        BotCommand("watch",         "📡 Watch account for CA drops"),
+        BotCommand("unwatch",       "🚫 Stop watching account"),
+        BotCommand("watchlist",     "📋 Your watched accounts"),
+        # Alerts & Portfolio
+        BotCommand("alert",         "🔔 Set a price alert"),
+        BotCommand("myalerts",      "🔔 View your price alerts"),
+        BotCommand("delalert",      "🗑 Delete a price alert"),
+        BotCommand("addport",       "➕ Add token to portfolio"),
+        BotCommand("portfolio",     "💼 View portfolio P&L"),
+        BotCommand("blacklist",     "⛔ Blacklist a rug token"),
+        # Calls
+        BotCommand("call",          "📢 Make a public alpha call"),
+        BotCommand("mycalls",       "📂 Your calls history"),
+        BotCommand("stop",          "🏁 Close a call + P&L"),
+        BotCommand("leaderboard",   "🏆 Top callers leaderboard"),
+        # Wallets
+        BotCommand("trackwallet",   "👛 Track a Solana wallet"),
+        BotCommand("mywallet",      "🔗 Link your wallet"),
+        # XP & Social
+        BotCommand("rank",          "⭐ Your XP rank"),
+        BotCommand("gp",            "🏅 Group XP leaderboard"),
+        BotCommand("dubs",          "🎉 Celebrate a win (+XP)"),
+        BotCommand("gsum",          "💬 AI group chat summary"),
+        BotCommand("remindme",      "⏰ Set a reminder"),
+        # System
+        BotCommand("autoresponder", "🤖 Toggle CA auto-scan"),
+        BotCommand("status",        "⚙️ Bot health check"),
+        BotCommand("ping",          "📶 Latency check"),
     ]
+
+    # ── Group chat menu — top discovery commands only (keeps it clean) ──
+    group_cmds = [
+        BotCommand("scan",      "🔬 Full token scan + AI verdict"),
+        BotCommand("c",         "💰 Quick price check"),
+        BotCommand("chart",     "📊 In-app chart"),
+        BotCommand("price",     "💵 Live price: btc sol eth"),
+        BotCommand("verify",    "🛡 Rug & honeypot check"),
+        BotCommand("runners",   "🏃 Top Solana gainers now"),
+        BotCommand("new",       "🆕 Brand new launches"),
+        BotCommand("pump",      "🚀 Fresh 5m pumps"),
+        BotCommand("gems",      "💎 Hidden gem finder"),
+        BotCommand("trending",  "🔥 Trending metas"),
+        BotCommand("news",      "📰 News + AI summary"),
+        BotCommand("ask",       "🤖 Ask Kayo AI anything"),
+        BotCommand("sentiment", "😤 Market mood"),
+        BotCommand("call",      "📢 Make a public call"),
+        BotCommand("leaderboard","🏆 Top callers"),
+        BotCommand("gsum",      "💬 AI group chat summary"),
+        BotCommand("gp",        "🏅 Group XP leaderboard"),
+        BotCommand("help",      "📋 Full command list"),
+    ]
+
     try:
-        await app.bot.set_my_commands(cmds)
-        logger.info(f"✅ {len(cmds)} commands registered")
+        from telegram import (
+            BotCommandScopeAllPrivateChats,
+            BotCommandScopeAllGroupChats,
+            BotCommandScopeDefault,
+        )
+        # Private chats: full list — tap any command without typing
+        await app.bot.set_my_commands(all_cmds, scope=BotCommandScopeAllPrivateChats())
+        # Group chats: curated top commands
+        await app.bot.set_my_commands(group_cmds, scope=BotCommandScopeAllGroupChats())
+        # Default fallback
+        await app.bot.set_my_commands(all_cmds, scope=BotCommandScopeDefault())
+        logger.info(f"✅ {len(all_cmds)} private + {len(group_cmds)} group commands registered")
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
@@ -2839,6 +3094,9 @@ def main():
     for name, fn in CMDS:
         app.add_handler(CommandHandler(name, fn))
     # CallbackQuery handler for inline chart button
+    # CallbackQuery handlers
+    app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
+    app.add_handler(CallbackQueryHandler(handle_help_callback, pattern=r"^help:"))
     app.add_handler(CallbackQueryHandler(handle_chart_callback, pattern=r"^chart:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
