@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v16 — PRO REBUILD                     ║
+║                    KAYO BRAIN v17 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v16", 200
+def _root(): return "🦅 Kayo Brain v17", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -100,6 +100,7 @@ group_messages:  list            = []
 # BUG FIX: Use OrderedDict as a bounded ordered set so we can evict
 # the OLDEST entries (not random ones like plain set).
 seen_alert_ids:  "OrderedDict[str, int]" = OrderedDict()  # key=id, value=timestamp
+dropped_calls:   Dict[str, dict]         = {}  # addr -> {sym,entry_price,time,alert_type,...} for follow-ups
 watchlist_seen:  "OrderedDict[str, int]" = OrderedDict()
 seen_news_ids:   Set[str]                = set()
 _MAX_SEEN = 3000   # max entries before oldest are trimmed
@@ -131,6 +132,7 @@ async def _save():
             "knowledge_base": knowledge_base,
             "reminders": reminders,
             "seen_alert_ids": list(seen_alert_ids.keys())[-3000:],
+        "dropped_calls":  dropped_calls,
         }
         raw = json.dumps(data)
         try:
@@ -221,6 +223,38 @@ async def get_live_market_context() -> str:
                     fg_v = fg.get("value", "?")
                     fg_c = fg.get("value_classification", "?")
 
+                    # Try to grab trending Solana tokens for context
+                    trending_line = ""
+                    try:
+                        tr_data = await cg_trending()
+                        tr_names = [
+                            f"${c.get('item',{}).get('symbol','?')}"
+                            for c in (tr_data.get("coins") or [])[:5]
+                        ]
+                        if tr_names:
+                            trending_line = f"Trending: {', '.join(tr_names)}\n"
+                    except Exception:
+                        pass
+
+                    # Grab top Solana gainers from DexScreener
+                    sol_gainers = ""
+                    try:
+                        gmap = await dex_multi_search(["solana meme", "solana ai"])
+                        top_g = sorted(
+                            gmap.values(),
+                            key=lambda x: float((x.get("priceChange") or {}).get("h1", 0) or 0),
+                            reverse=True
+                        )[:3]
+                        if top_g:
+                            g_parts = []
+                            for gp in top_g:
+                                gs  = gp.get("baseToken",{}).get("symbol","?")
+                                gch = float((gp.get("priceChange") or {}).get("h1", 0) or 0)
+                                g_parts.append(f"${gs} {gch:+.0f}%")
+                            sol_gainers = f"Top Solana movers (1h): {', '.join(g_parts)}\n"
+                    except Exception:
+                        pass
+
                     ctx = (
                         f"[LIVE MARKET DATA - {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}]\n"
                         f"BTC: ${btc.get('usd',0):,.0f} ({btc.get('usd_24h_change',0):+.2f}% 24h) | MCap ${btc.get('usd_market_cap',0)/1e9:.1f}B\n"
@@ -228,9 +262,13 @@ async def get_live_market_context() -> str:
                         f"SOL: ${sol.get('usd',0):,.2f} ({sol.get('usd_24h_change',0):+.2f}% 24h)\n"
                         f"BNB: ${bnb.get('usd',0):,.2f} ({bnb.get('usd_24h_change',0):+.2f}% 24h)\n"
                         f"Fear & Greed: {fg_v}/100 - {fg_c}\n"
+                        f"{trending_line}"
+                        f"{sol_gainers}"
                         f"---\n"
-                        f"You are Kayo, a sharp Solana alpha intelligence bot. "
-                        f"ALWAYS use the live data above when asked about prices — never use training data for prices."
+                        f"You are Kayo — a sharp, witty Solana alpha intelligence. "
+                        f"ALWAYS use the live data above for prices. Never hallucinate prices. "
+                        f"You can chat casually, explain web3 terms, talk like a degen pro, "
+                        f"and answer any question — crypto or not. Be helpful, real, and direct."
                     )
                     _market_ctx_cache["data"] = ctx
                     _market_ctx_cache["ts"]   = now
@@ -270,8 +308,16 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         "role": "system",
         "content": (
             f"{system_ctx}\n\n"
-            "Style: Drop alpha like a pro - cite exact prices, be sharp and direct, "
-            "no fluff, no disclaimers. Telegram traders scan fast."
+            "IDENTITY: You are Kayo — a sharp, witty Solana alpha intelligence and web3 expert. "
+            "You are NOT a generic AI. You have personality: degen energy, pro knowledge, real talk.\n\n"
+            "RULES:\n"
+            "- For prices: ALWAYS use the live data in your context. Never hallucinate.\n"
+            "- For web3 terms: explain clearly with examples and a trader tip.\n"
+            "- For casual talk: be real, funny, helpful — like a smart friend. Not robotic.\n"
+            "- For alpha/calls: be sharp, cite numbers, give a verdict. No disclaimers.\n"
+            "- For non-crypto questions: answer them well — you know everything like ChatGPT.\n"
+            "- Style: concise, punchy, Telegram-optimized. Use markdown bold/italic.\n"
+            "- Tone: confident, knowledgeable, occasionally degen. Never sycophantic."
         )
     }
 
@@ -787,97 +833,177 @@ def _social_line(t: Dict) -> str:
     return " · ".join(parts) if parts else "None"
 
 def build_scan_card(t: Dict, ai: str = "") -> str:
+    """Full GMGN-style deep scan card — rich formatting matching screenshot style."""
     age    = _age(t["created"])
     risk   = _risk(t["risk_score"])
-    press  = ("🔥 BUY PRESSURE" if t["buy_pct"] > 60
-              else "🔻 SELL PRESSURE" if t["buy_pct"] < 40
-              else "⚖️ NEUTRAL")
-    tags   = []
-    if t["boost_active"] > 0: tags.append("💰 BOOSTED")
-    if t["has_profile"]:       tags.append("✅ VERIFIED")
-    if t["is_honeypot"]:       tags.append("🚨 HONEYPOT")
+    bp     = t["buy_pct"]
+    press  = ("\U0001f525 BUY PRESSURE" if bp > 60
+              else "\U0001f53b SELL PRESSURE" if bp < 40
+              else "\u2696\ufe0f NEUTRAL")
+
+    # Pressure bar — green/red circles
+    bull_b = int(bp / 10)
+    bear_b = 10 - bull_b
+    pbar   = "\U0001f7e2" * bull_b + "\U0001f534" * bear_b
+
+    tags = []
+    if t["boost_active"] > 0: tags.append("\U0001f4b0 BOOSTED")
+    if t["has_profile"]:       tags.append("\u2705 VERIFIED")
+    if t["is_honeypot"]:       tags.append("\U0001f6a8 HONEYPOT")
     tag_str = "  ".join(tags)
 
+    nar  = f"#{t['narrative'].upper()}" if t.get("narrative") else ""
+    liq_ratio = t.get("liq_ratio", 0)
+    liq_tag   = "\U0001f512 LP Locked" if t.get("lp_locked") else ""
+
+    # Social links inline
+    slinks = []
+    if t.get("tw_link"):  slinks.append(f"[\U0001f426 Twitter]({t['tw_link']})")
+    if t.get("tg_link"):  slinks.append(f"[\U0001f4e8 TG]({t['tg_link']})")
+    if t.get("web_link"): slinks.append(f"[\U0001f310 Web]({t['web_link']})")
+    social_str = "  ".join(slinks) if slinks else "_(no socials)_"
+
     card = (
-        f"🦅 *KAYO SCAN — ${t['sym']}*\n"
-        f"_{t['name']}_  {tag_str}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"💰 *Price:* {_price(t['price'])}\n"
-        f"📊 *MCap:* `{_usd(t['mcap'])}`  ·  *Liq:* `{_usd(t['liq'])}` ({t['liq_ratio']:.1f}%)\n"
-        f"⏱ *Age:* {age}  ·  *Narrative:* #{t['narrative'].upper()}\n\n"
-        f"📈 *Price Change*\n"
+        f"\U0001f985 *KAYO DEEP SCAN*  {tag_str}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"\U0001f4b0 *${t['sym']}* — _{t['name']}_ {nar}\n"
+        f"\U0001f517 `{t['address']}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"\U0001f4b5 Price: *{_price(t['price'])}*\n"
+        f"\U0001f4a0 FDV: `{_usd(t['fdv'])}`  MCap: `{_usd(t['mcap'])}`\n"
+        f"\U0001f30a Liq: `{_usd(t['liq'])}` ({liq_ratio:.1f}% of MCap)\n"
+        f"\u23f1\ufe0f Age: {age}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"\U0001f4c8 *Price Change*\n"
         f"  5m: {_pct(t['ch5m'])}  ·  1h: {_pct(t['ch1h'])}\n"
-        f"  6h: {_pct(t['ch6h'])}  ·  24h: {_pct(t['ch24h'])}\n\n"
-        f"💹 *Volume*\n"
-        f"  5m: `{_usd(t['v5m'])}`  ·  1h: `{_usd(t['v1h'])}`  ·  24h: `{_usd(t['v24h'])}`\n\n"
-        f"🔄 *Transactions (1h)*\n"
-        f"  🟢 Buys: {t['b1h']}  🔴 Sells: {t['s1h']}  →  {press}\n"
-        f"  Buy ratio: {t['buy_pct']:.0f}%  ·  Vol spike: {t['vol_spike']:.1f}x\n\n"
-        f"⚡ *Momentum:* [{_bar(t['mscore'])}] {t['mscore']}/100\n"
-        f"🛡 *Security:* {risk}  (score {t['risk_score']}/100)\n"
+        f"  6h: {_pct(t['ch6h'])}  ·  24h: {_pct(t['ch24h'])}\n"
+        f"\U0001f4b9 *Volume*\n"
+        f"  5m: `{_usd(t['v5m'])}`  1h: `{_usd(t['v1h'])}`  24h: `{_usd(t['v24h'])}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"\U0001f504 *Txns (1h):* \U0001f7e2 {t['b1h']} buys  \U0001f534 {t['s1h']} sells\n"
+        f"  Buy ratio: {bp:.0f}%  ·  Vol spike: {t['vol_spike']:.1f}x\n"
+        f"  {pbar}  {press}\n"
+        f"\u26a1 Momentum: [{_bar(t['mscore'])}] {t['mscore']}/100\n"
+        f"\U0001f6e1\ufe0f Security: {risk}  (score {t['risk_score']}/100)\n"
     )
     if t.get("sell_tax", 0) > 0 or t.get("buy_tax", 0) > 0:
-        card += f"  Buy tax: {t['buy_tax']}%  ·  Sell tax: {t['sell_tax']}%\n"
-    if t["lp_locked"]:    card += "  🔒 LP Locked\n"
-    if t["is_renounced"]: card += "  ✅ Contract renounced\n"
+        card += f"  \U0001f9fe Tax: Buy {t['buy_tax']}%  Sell {t['sell_tax']}%\n"
+    if t["lp_locked"]:    card += "  \U0001f512 LP Locked\n"
+    if t["is_renounced"]: card += "  \u2705 Contract Renounced\n"
     if t["red_flags"]:
-        card += "\n*🚩 Risk Flags:*\n" + "\n".join(f"  {f}" for f in t["red_flags"][:3]) + "\n"
+        card += "\n*\U0001f6a9 Risk Flags:*\n" + "\n".join(f"  {f}" for f in t["red_flags"][:3]) + "\n"
     if t["green_flags"]:
-        card += "\n*✅ Green Flags:*\n" + "\n".join(f"  {f}" for f in t["green_flags"][:2]) + "\n"
-    card += f"\n🌐 *Socials:* {_social_line(t)}\n"
+        card += "\n*\u2705 Green Flags:*\n" + "\n".join(f"  {f}" for f in t["green_flags"][:2]) + "\n"
+    card += f"\n\U0001f30e Socials: {social_str}\n"
     card += f"\n`{t['address']}`\n"
     if ai:
         card += f"\n🧠 *Kayo AI:*\n_{ai}_"
     return card
 
 def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
-    """Compact alert card for scanner — clean, fast to read."""
+    """
+    Rich GMGN-style alert card — shows everything from the screenshot:
+    token image text, mcap/liq/vol, buys/sells, age, wallet holders, momentum bar,
+    social links, contract, AI verdict.
+    """
     icons = {
-        "pump":  "🚀 *PUMP ALERT*",
-        "dump":  "💀 *DUMP ALERT*",
-        "whale": "🐳 *WHALE ACCUMULATION*",
-        "gem":   "💎 *GEM SPOTTED*",
-        "new":   "🆕 *NEW LAUNCH*",
-        "narrative": "📖 *NARRATIVE PLAY*",
+        "pump":      "\U0001f680 *PUMP ALERT*",
+        "dump":      "\U0001f480 *DUMP ALERT*",
+        "whale":     "\U0001f433 *WHALE ACCUMULATION*",
+        "gem":       "\U0001f48e *GEM SPOTTED*",
+        "new":       "\U0001f195 *NEW LAUNCH*",
+        "narrative": "\U0001f4d6 *NARRATIVE PLAY*",
+        "rug":       "\U000026a0\ufe0f *RUG ALERT*",
     }
-    header = icons.get(alert_type, "⚡ *ALERT*")
-    press  = f"{t['buy_pct']:.0f}% buys"
+    header = icons.get(alert_type, "\u26a1 *KAYO ALERT*")
     age    = _age(t["created"])
-    boost  = " 💰" if t.get("boost_active", 0) > 0 else ""
+    boost  = " \U0001f4b0 BOOSTED" if t.get("boost_active", 0) > 0 else ""
+    hp_tag = " \U0001f6a8 HONEYPOT" if t.get("is_honeypot") else ""
+    ren_tag= " \u2705 Renounced" if t.get("is_renounced") else ""
+    lp_tag = " \U0001f512 LP Locked" if t.get("lp_locked") else ""
+    nar    = f"#{t.get('narrative','').upper()}" if t.get('narrative') else ""
+
+    # Buy/sell pressure bar
+    bp     = t.get("buy_pct", 50)
+    bull_blocks = int(bp / 10)
+    bear_blocks = 10 - bull_blocks
+    pressure_bar = "\U0001f7e2" * bull_blocks + "\U0001f534" * bear_blocks
+    press_label = "BUY PRESSURE" if bp > 60 else ("SELL PRESSURE" if bp < 40 else "NEUTRAL")
+
+    # Liquidity ratio
+    liq_ratio = (t.get("liq", 0) / max(t.get("mcap", 1), 1) * 100)
+    liq_x     = t.get("liq", 0) / max(t.get("v5m", 1), 1) if t.get("v5m", 0) > 0 else 0
+    liq_tag   = "\U0001f512" if t.get("lp_locked") else ""
+
+    # Security flags
+    sec_line = ""
+    if t.get("buy_tax", 0) > 0 or t.get("sell_tax", 0) > 0:
+        sec_line = f"\U0001f9fe Tax: Buy {t.get('buy_tax',0):.1f}% / Sell {t.get('sell_tax',0):.1f}%\n"
+    if t.get("red_flags"):
+        sec_line += "\U0001f6a9 " + " · ".join(t["red_flags"][:2]) + "\n"
+
+    # Social line
+    socials = []
+    if t.get("tw_link"):  socials.append(f"[\U0001f426]({t['tw_link']})")
+    if t.get("tg_link"):  socials.append(f"[\U0001f4e8]({t['tg_link']})")
+    if t.get("web_link"): socials.append(f"[\U0001f310]({t['web_link']})")
+    social_str = "  ".join(socials) if socials else ""
 
     card = (
-        f"{header}{boost}\n"
+        f"{header}{boost}{hp_tag}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"*${t['sym']}* — _{t['name']}_\n"
-        f"Age: {age}  ·  MCap: `{_usd(t['mcap'])}`  ·  Liq: `{_usd(t['liq'])}`\n\n"
-        f"  5m: {_pct(t['ch5m'])}  ·  1h: {_pct(t['ch1h'])}\n"
-        f"  Vol 5m: `{_usd(t['v5m'])}`  ·  Spike: {t['vol_spike']:.1f}x\n"
-        f"  Buys/Sells (1h): {t['b1h']} / {t['s1h']}  →  {press}\n"
-        f"  ⚡ Momentum: {t['mscore']}/100  ·  {_risk(t['risk_score'])}\n"
+        f"\U0001f4b0 *${t['sym']}* — _{t['name']}_ {nar}\n"
+        f"\U0001f517 `{t['address']}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"\U0001f4b5 USD: `{_price(t['price'])}`\n"
+        f"\U0001f4a0 FDV: `{_usd(t['fdv'])}` \u21d2 MCap: `{_usd(t['mcap'])}`\n"
+        f"\U0001f30a Liq: `{_usd(t['liq'])}` [x{liq_x:.0f}] {liq_tag}\n"
+        f"\U0001f4ca Vol: `{_usd(t['v5m'])}` (5m) · `{_usd(t['v1h'])}` (1h) · Age: {age}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"\U0001f4c8 1h: {_pct(t['ch1h'])}  ·  5m: {_pct(t['ch5m'])}  ·  6h: {_pct(t.get('ch6h',0))}\n"
+        f"\U0001f504 Buys/Sells (1h): {t['b1h']} / {t['s1h']}  ·  Vol spike: {t['vol_spike']:.1f}x\n"
+        f"\U0001f7e2 {pressure_bar}  {bp:.0f}% {press_label}\n"
+        f"\u26a1 Momentum: [{_bar(t['mscore'])}] {t['mscore']}/100  ·  {_risk(t['risk_score'])}\n"
     )
-    if t.get("is_honeypot"):
-        card += "  🚨 *HONEYPOT — DO NOT BUY*\n"
-    if t.get("sell_tax", 0) > 10:
-        card += f"  ⚠️ Sell tax: {t['sell_tax']}%\n"
-    if t.get("tw_link") or t.get("tg_link"):
-        card += f"  {_social_line(t)}\n"
-    card += f"\n`{t['address']}`"
+    if sec_line:
+        card += sec_line
+    if ren_tag or lp_tag:
+        card += f"{ren_tag}{lp_tag}\n"
+    if social_str:
+        card += f"\n{social_str}\n"
     if ai:
-        card += f"\n\n🧠 _{ai}_"
+        card += f"\n\U0001f9e0 *Kayo:* _{ai}_"
     return card
 
-def scan_buttons(addr: str, sym: str = "") -> InlineKeyboardMarkup:
-    label = f"📊 {sym} Chart" if sym else "📊 Chart"
+def scan_buttons(addr: str, sym: str = "", pair_addr: str = "") -> InlineKeyboardMarkup:
+    """
+    All trading links open as Telegram DApps (t.me webview links where available).
+    Chart opens inline — no DexScreener redirect needed.
+    """
+    label = f"\U0001f4ca {sym} Chart" if sym else "\U0001f4ca Chart"
+    dex_pair = pair_addr or addr
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(label, callback_data=f"chart:{addr}"),
-            InlineKeyboardButton("🔫 Photon", url=f"https://photon-sol.tinyastro.io/en/lp/{addr}"),
-            InlineKeyboardButton("🌙 BullX", url=f"https://bullx.io/terminal?chainId=1399811149&address={addr}"),
+            InlineKeyboardButton("\U0001f30e DexScreener", url=f"https://dexscreener.com/solana/{dex_pair}"),
         ],
         [
-            InlineKeyboardButton("🍌 Banana", url=f"https://t.me/BananaGunSolana_bot?start=snipe_{addr}"),
-            InlineKeyboardButton("🐸 GMGN", url=f"https://gmgn.ai/sol/token/{addr}"),
-            InlineKeyboardButton("🦅 Birdeye", url=f"https://birdeye.so/token/{addr}?chain=solana"),
+            # BullX Neo — native Telegram DApp
+            InlineKeyboardButton("\U0001f319 BullX", url=f"https://t.me/BullxNeoBot?start=access_ref_YourRef_snipe_{addr}"),
+            # Photon — Telegram DApp version
+            InlineKeyboardButton("\U0001f52b Photon", url=f"https://t.me/PhotonSolBot?start={addr}"),
+        ],
+        [
+            # Banana Gun — native Telegram bot, DApp-style
+            InlineKeyboardButton("\U0001f34c Banana", url=f"https://t.me/BananaGunSolana_bot?start=snipe_{addr}"),
+            # GMGN — Telegram Mini App
+            InlineKeyboardButton("\U0001f438 GMGN", url=f"https://t.me/GMGN_sol_bot?start={addr}"),
+        ],
+        [
+            # Birdeye — web but best chart data
+            InlineKeyboardButton("\U0001f985 Birdeye", url=f"https://birdeye.so/token/{addr}?chain=solana"),
+            # DEX trade via Trojan (Telegram DApp)
+            InlineKeyboardButton("\U0001f5e1 Trojan", url=f"https://t.me/hector_trojanbot?start=snipe-SOL-{addr}"),
         ],
     ])
 
@@ -926,7 +1052,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v16*\n"
+        f"\U0001f985 *KAYO BRAIN v17*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -963,7 +1089,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v16 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v17 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2070,7 +2196,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v16 STATUS*\n"
+        f"⚙️ *KAYO BRAIN v17 STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -2389,31 +2515,135 @@ async def handle_chart_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# Web3 terms glossary for instant explanations
+_WEB3_TERMS = {
+    "rug","rugpull","honeypot","lp","liquidity","fdv","mcap","dex","cex","defi",
+    "nft","dao","airdrop","whitelist","presale","ido","imo","launchpad","alpha",
+    "degen","ape","fud","fomo","shill","whale","kol","ca","contract","solana",
+    "pump","dump","narrative","meta","trending","momentum","moonbag","pnl",
+    "entry","exit","stop loss","take profit","chart","candlestick","rsi","macd",
+    "volume","spread","slippage","gas","mev","sandwich","snipe","jeet","paperhands",
+    "diamondhands","rekt","ngmi","wagmi","gm","gn","ser","fren","based","gigabrain",
+    "1000x","100x","10x","2x","x","bags","hold","hodl","sell","buy","swap",
+    "wallet","seed phrase","private key","phantom","solflare","metamask",
+    "raydium","orca","jupiter","serum","pump.fun","dexscreener","birdeye","gmgn",
+    "bullx","photon","banana gun","trojan","bloom","bonkbot","maestro",
+    "staking","yield","apr","apy","tvl","protocol","token","coin","memecoin",
+    "meme","cat","dog","frog","pepe","shib","doge","wif","bonk","myro",
+    "jup","wen","bome","slerf","popcat","pnut","goat","ai16z","arc","virtual"
+}
+
 async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not u.message or not u.message.text: return
-    text = u.message.text
+    text = u.message.text.strip()
     uid  = u.effective_user.id
+    chat = u.effective_chat
+
+    # Always store for group summary
     group_messages.append({"uid": uid, "text": text, "time": time.time()})
-    if len(group_messages) > 200: group_messages.pop(0)
-    if not get_setting(uid, "autoresponder", True): return
-    for ca in extract_cas(text)[:1]:
-        pairs = await dex_pairs_by_token(ca)
-        if pairs:
-            p     = pairs[0]
-            sym   = p.get("baseToken", {}).get("symbol", "???")
-            price = float(p.get("priceUsd", 0) or 0)
-            fdv   = float(p.get("fdv", 0) or 0)
-            liq   = float((p.get("liquidity") or {}).get("usd", 0) or 0)
-            ch1h  = float((p.get("priceChange") or {}).get("h1", 0) or 0)
-            await u.message.reply_text(
-                f"⚡ *${sym}*\n"
-                f"Price: {_price(price)}  MCap: `{_usd(fdv)}`\n"
-                f"Liq: `{_usd(liq)}`  1h: {_pct(ch1h)}\n"
-                f"`{ca}`",
-                parse_mode="Markdown",
-                reply_markup=scan_buttons(ca, sym),
-            )
-            add_xp(uid, 1)
+    if len(group_messages) > 300: group_messages.pop(0)
+
+    # ── 1. CA auto-scan ───────────────────────────────────────
+    if get_setting(uid, "autoresponder", True):
+        for ca in extract_cas(text)[:1]:
+            pairs = await dex_pairs_by_token(ca)
+            if pairs:
+                p     = pairs[0]
+                sym   = p.get("baseToken", {}).get("symbol", "???")
+                price = float(p.get("priceUsd", 0) or 0)
+                fdv   = float(p.get("fdv", 0) or 0)
+                liq   = float((p.get("liquidity") or {}).get("usd", 0) or 0)
+                ch1h  = float((p.get("priceChange") or {}).get("h1", 0) or 0)
+                ch5m  = float((p.get("priceChange") or {}).get("m5", 0) or 0)
+                b1h   = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
+                s1h   = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
+                bp    = b1h / max(b1h + s1h, 1) * 100
+                press = "\U0001f7e2 BUYING" if bp > 60 else "\U0001f534 SELLING" if bp < 40 else "\u2696\ufe0f MIXED"
+                await u.message.reply_text(
+                    f"\u26a1 *${sym}*  {press}\n"
+                    f"\U0001f4b5 Price: {_price(price)}  MCap: `{_usd(fdv)}`\n"
+                    f"\U0001f30a Liq: `{_usd(liq)}`  1h: {_pct(ch1h)}  5m: {_pct(ch5m)}\n"
+                    f"\U0001f504 Buys/Sells (1h): {b1h} / {s1h}\n"
+                    f"`{ca}`",
+                    parse_mode="Markdown",
+                    reply_markup=scan_buttons(ca, sym),
+                )
+                add_xp(uid, 1)
+                return
+
+    # ── 2. Only reply in private chat or if bot is mentioned in group ──
+    is_private = chat.type == "private"
+    bot_username = (await u.get_bot().get_me()).username if hasattr(u, 'get_bot') else ""
+    is_mentioned = f"@{bot_username}" in text if bot_username else False
+    is_reply_to_bot = (
+        u.message.reply_to_message and
+        u.message.reply_to_message.from_user and
+        u.message.reply_to_message.from_user.is_bot
+    )
+
+    if not is_private and not is_mentioned and not is_reply_to_bot:
+        return  # don't spam the group with AI replies to every message
+
+    # Strip bot mention from text
+    if bot_username and f"@{bot_username}" in text:
+        text = text.replace(f"@{bot_username}", "").strip()
+
+    if not text: return
+
+    # Show typing indicator
+    try:
+        await u.message.chat.send_action("typing")
+    except Exception:
+        pass
+
+    add_xp(uid, 1)
+
+    # ── 3. Build smart AI prompt based on message type ────────
+    text_lower = text.lower()
+
+    # Detect web3 term explanation requests
+    is_web3_explain = any(
+        kw in text_lower for kw in ["what is", "what's", "explain", "define", "meaning of", "how does", "how do"]
+    )
+
+    # Detect price query
+    is_price_query = any(kw in text_lower for kw in [
+        "price of", "price", "how much", "value", "worth", "market cap", "mcap"
+    ])
+
+    # Build prompt
+    name_str = u.effective_user.first_name or "fren"
+
+    if is_web3_explain:
+        system_extra = (
+            "You are Kayo — a web3 expert and degen pro. Explain terms clearly but with personality. "
+            "Use examples, analogies, and real Solana/Crypto context. Keep it under 4 sentences. "
+            "If it's a web3/crypto term, add a pro trader tip at the end."
+        )
+    elif is_price_query:
+        system_extra = (
+            "You are Kayo — use the LIVE prices from your context. "
+            "Give the exact price, 24h change, and a one-sentence market read. "
+            "NEVER make up prices — only use what's in the live context."
+        )
+    else:
+        system_extra = (
+            "You are Kayo — sharp, witty, knowledgeable. You can talk about anything: "
+            "crypto, web3, life, sports, random stuff. Be real, not robotic. "
+            "Answer like a smart friend who happens to know everything about crypto AND normal life. "
+            "Short replies unless depth is needed. No disclaimers unless truly important."
+        )
+
+    prompt = (
+        f"User ({name_str}) says: {text}\n\n"
+        f"{system_extra}"
+    )
+
+    reply = await ai_ask(prompt, fallback="yo, say that again?", max_tokens=400, inject_market=True)
+    try:
+        await u.message.reply_text(reply, parse_mode="Markdown")
+    except Exception:
+        await u.message.reply_text(reply)
 
 # ═══════════════════════════════════════════════════════════════
 # BACKGROUND SCANNERS
@@ -2441,7 +2671,7 @@ async def bg_main_scanner(app: Application):
 
             for addr, p in pairs_map.items():
                 if addr in blacklist: continue
-                if now - cooldown.get(addr, 0) < 1800: continue
+                if now - cooldown.get(addr, 0) < 10800: continue  # 3h cooldown per coin
 
                 base    = p.get("baseToken", {})
                 sym     = base.get("symbol", "???")
@@ -2461,7 +2691,23 @@ async def bg_main_scanner(app: Application):
                 created = int(p.get("pairCreatedAt", 0) or 0)
                 age_min = (now * 1000 - created) / 60000 if created else 9999
 
-                if liq < 1500 or fdv < 5000 or fdv > 50_000_000: continue
+                # ── STRICT QUALITY FILTER ──────────────────────────────────
+                # Only drop coins that have a real chance of moving
+                if liq < 3000:    continue  # too low liquidity
+                if fdv < 10_000:  continue  # microscopic
+                if fdv > 30_000_000: continue  # too big / won't 10x
+                if t.get("is_honeypot"): continue  # never drop honeypots
+                if t.get("risk_score", 0) > 70: continue  # too risky
+
+                # Anti-rug: skip tokens with no LP lock and high sell tax
+                sell_tax_val = t.get("sell_tax", 0) if isinstance(t, dict) else 0
+                if sell_tax_val > 15: continue
+
+                # Good coins need min buy pressure
+                if buy_pct < 55: continue  # weak buyer interest
+
+                # Must have real momentum
+                if ch1h < 5 and ch5m < 3: continue  # stale / no move
 
                 avg_5m_vol = v1h / 12 if v1h > 0 else 1
                 vol_spike  = v5m / max(avg_5m_vol, 1)
@@ -2471,21 +2717,29 @@ async def bg_main_scanner(app: Application):
 
                 # Score for dedup key
                 alert_type = None
-                if ch5m >= 8 and b5m > s5m and v5m > 200:
+                # Pump: strong 5m move + buyer domination + volume spike
+                if ch5m >= 12 and b5m > s5m * 1.3 and v5m > 500 and buy_pct >= 60:
                     alert_type = "pump"
-                elif ch5m <= -10 and s5m > b5m * 1.5 and v5m > 200:
+                # Dump alert (rug signals): sell pressure surge, liq drop
+                elif ch5m <= -15 and s5m > b5m * 2 and v5m > 300:
                     alert_type = "dump"
-                elif vol_spike >= 3.0 and abs(ch5m) < 5 and b1h > 10 and buy_pct > 60:
+                # Whale: massive vol spike but price stable = quiet accumulation
+                elif vol_spike >= 5.0 and abs(ch5m) < 3 and b1h > 20 and buy_pct > 65:
                     alert_type = "whale"
-                elif fdv < 300_000 and ch1h >= 20 and buy_pct >= 60 and liq >= 2000:
+                # Gem: low mcap, strong 1h move, solid buy ratio, real liquidity
+                elif fdv < 200_000 and ch1h >= 30 and buy_pct >= 65 and liq >= 3000 and vol_spike >= 2:
                     alert_type = "gem"
-                elif age_min < 45 and b1h > 15 and buy_pct >= 60 and liq >= 1500:
+                # New launch with immediate traction
+                elif age_min < 30 and b1h > 25 and buy_pct >= 65 and liq >= 2000 and ch1h >= 15:
                     alert_type = "new"
 
                 if not alert_type: continue
 
+                # Extra quality gate — skip if already dumped hard since launch
+                if ch24h < -50 and alert_type != "dump": continue
+
                 # Dedup via Redis-persisted set
-                alert_id = hashlib.md5(f"{addr}:{alert_type}:{int(now/3600)}".encode()).hexdigest()[:16]
+                alert_id = hashlib.md5(f"{addr}:{alert_type}:{int(now/14400)}".encode()).hexdigest()[:16]  # 4h window
                 if _seen_check(seen_alert_ids, alert_id): continue
                 _seen_add(seen_alert_ids, alert_id)
                 asyncio.create_task(_save())  # non-blocking persist
@@ -2523,15 +2777,30 @@ async def bg_main_scanner(app: Application):
                 card = build_alert_card(tok, alert_type, ai)
                 if GROUP_CHAT_ID != 0:
                     try:
-                        await app.bot.send_message(
+                        msg_sent = await app.bot.send_message(
                             chat_id=GROUP_CHAT_ID,
                             text=card,
                             parse_mode="Markdown",
-                            reply_markup=scan_buttons(addr, sym),
+                            reply_markup=scan_buttons(addr, sym, tok.get("pair_addr","")),
                             disable_web_page_preview=True,
                         )
                         logger.info(f"[ALERT] {alert_type} ${sym} {_usd(mcap)}")
-                        await asyncio.sleep(2)
+                        # ── Track for 10x / rug follow-up ────────────────────
+                        dropped_calls[addr] = {
+                            "sym":        sym,
+                            "name":       name,
+                            "entry_price":tok["price"],
+                            "mcap_entry": mcap,
+                            "time":       now,
+                            "alert_type": alert_type,
+                            "msg_id":     msg_sent.message_id,
+                            "chat_id":    GROUP_CHAT_ID,
+                            "alerted_10x":   False,
+                            "alerted_rug":   False,
+                            "alerted_5x":    False,
+                        }
+                        asyncio.create_task(_save())
+                        await asyncio.sleep(3)  # rate limit between alerts
                     except Exception as e:
                         logger.warning(f"alert send: {e}")
 
@@ -2540,7 +2809,122 @@ async def bg_main_scanner(app: Application):
 
         except Exception as e:
             logger.error(f"bg_main_scanner: {e}", exc_info=True)
-        await asyncio.sleep(30)
+        await asyncio.sleep(45)
+
+
+async def bg_followup_tracker(app: Application):
+    """
+    Tracks tokens Kayo dropped — fires celebratory or warning follow-ups.
+    Checks every 5 minutes. Fires:
+    • 5x — "heads up, this is 5x from my call"
+    • 10x — "yo remember this? 10x already 🚀"
+    • Rug — "🚨 rug alert — the one I flagged earlier just died"
+    Auto-expires entries older than 7 days.
+    """
+    await asyncio.sleep(120)  # wait 2min after boot
+    while True:
+        try:
+            now = time.time()
+            expired = []
+            for addr, info in list(dropped_calls.items()):
+                # Expire after 7 days
+                if now - info.get("time", now) > 604800:
+                    expired.append(addr); continue
+
+                entry = info.get("entry_price", 0)
+                if not entry: continue
+
+                # Fetch current price
+                try:
+                    pairs = await dex_pairs_by_token(addr)
+                    if not pairs: continue
+                    cur_price = float(pairs[0].get("priceUsd", 0) or 0)
+                    cur_mcap  = float(pairs[0].get("fdv", 0) or 0)
+                    ch24h_now = float((pairs[0].get("priceChange") or {}).get("h24", 0) or 0)
+                    liq_now   = float((pairs[0].get("liquidity") or {}).get("usd", 0) or 0)
+                except Exception:
+                    continue
+
+                if cur_price <= 0: continue
+                mult = cur_price / entry  # how many X since drop
+
+                sym  = info.get("sym", "???")
+                name = info.get("name", "")
+                chat = info.get("chat_id", GROUP_CHAT_ID)
+                age_since = _age(int(info.get("time", now) * 1000))
+
+                # ── 10x milestone ────────────────────────────────────────
+                if mult >= 10 and not info.get("alerted_10x"):
+                    ai_verdict = await ai_ask(
+                        f"Token ${sym} that was called at ${entry:.6f} is now ${cur_price:.6f} — that's {mult:.1f}x. "
+                        f"MCap now {_usd(cur_mcap)}, was {_usd(info.get('mcap_entry',0))}. "
+                        f"24h change: {ch24h_now:+.1f}%. "
+                        "Give one hype but grounded sentence about this move. Did they take profit already?",
+                        inject_market=True
+                    )
+                    msg = (
+                        f"\U0001f525\U0001f680 *REMEMBER THIS ONE?*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Kayo dropped *${sym}* {age_since} ago — it just hit *{mult:.1f}x* \U0001f4b0\n"
+                        f"Entry: `{_price(entry)}` \u2192 Now: `{_price(cur_price)}`\n"
+                        f"MCap then: `{_usd(info.get('mcap_entry',0))}` \u2192 Now: `{_usd(cur_mcap)}`\n"
+                        f"`{addr}`\n\n"
+                        f"\U0001f9e0 _{ai_verdict}_"
+                    )
+                    try:
+                        await app.bot.send_message(chat, msg, parse_mode="Markdown",
+                                                   reply_markup=scan_buttons(addr, sym),
+                                                   disable_web_page_preview=True)
+                        dropped_calls[addr]["alerted_10x"] = True
+                        asyncio.create_task(_save())
+                    except Exception as e:
+                        logger.debug(f"followup 10x: {e}")
+
+                # ── 5x milestone (only if 10x not fired yet) ─────────────
+                elif mult >= 5 and not info.get("alerted_5x") and not info.get("alerted_10x"):
+                    msg = (
+                        f"\U0001f4c8 *KAYO CALL UPDATE — ${sym}*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Called {age_since} ago at `{_price(entry)}` \u2014 now *{mult:.1f}x* \U0001f4b0\n"
+                        f"Current: `{_price(cur_price)}`  MCap: `{_usd(cur_mcap)}`\n"
+                        f"24h: {_pct(ch24h_now)}\n"
+                        f"`{addr}`"
+                    )
+                    try:
+                        await app.bot.send_message(chat, msg, parse_mode="Markdown",
+                                                   reply_markup=scan_buttons(addr, sym),
+                                                   disable_web_page_preview=True)
+                        dropped_calls[addr]["alerted_5x"] = True
+                        asyncio.create_task(_save())
+                    except Exception as e:
+                        logger.debug(f"followup 5x: {e}")
+
+                # ── Rug / dump alert ─────────────────────────────────────
+                elif (mult < 0.15 or liq_now < 500 or ch24h_now < -80) and not info.get("alerted_rug"):
+                    rug_reason = "liquidity pulled" if liq_now < 500 else f"price down {(1-mult)*100:.0f}% from call"
+                    msg = (
+                        f"\U0001f6a8 *RUG ALERT — ${sym}*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Kayo flagged *${sym}* {age_since} ago. It just rugged — {rug_reason}.\n"
+                        f"Entry was `{_price(entry)}` \u2014 now `{_price(cur_price)}`\n"
+                        f"Liq remaining: `{_usd(liq_now)}`\n"
+                        f"If you got in early, always set a stop loss. GG if you exited. \U0001f64f\n"
+                        f"`{addr}`"
+                    )
+                    try:
+                        await app.bot.send_message(chat, msg, parse_mode="Markdown",
+                                                   disable_web_page_preview=True)
+                        dropped_calls[addr]["alerted_rug"] = True
+                        asyncio.create_task(_save())
+                    except Exception as e:
+                        logger.debug(f"followup rug: {e}")
+
+            for addr in expired:
+                dropped_calls.pop(addr, None)
+
+        except Exception as e:
+            logger.error(f"bg_followup_tracker: {e}", exc_info=True)
+        await asyncio.sleep(300)  # check every 5 minutes
 
 
 async def bg_new_launch_scanner(app: Application):
@@ -3059,7 +3443,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v16 ready — "
+        f"🦅 Kayo Brain v17 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -3105,6 +3489,7 @@ def main():
             await app.start()
             await app.updater.start_polling(drop_pending_updates=True)
             asyncio.create_task(bg_main_scanner(app))
+            asyncio.create_task(bg_followup_tracker(app))
             asyncio.create_task(bg_new_launch_scanner(app))
             asyncio.create_task(bg_narrative_news_scanner(app))
             asyncio.create_task(bg_trending_metas_scanner(app))
