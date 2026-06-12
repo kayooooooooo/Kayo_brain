@@ -101,6 +101,7 @@ group_messages:  list            = []
 # the OLDEST entries (not random ones like plain set).
 seen_alert_ids:  "OrderedDict[str, int]" = OrderedDict()  # key=id, value=timestamp
 dropped_calls:   Dict[str, dict]         = {}  # addr -> {sym,entry_price,time,alert_type,...} for follow-ups
+pattern_memory: Dict[str, dict]         = {}  # alert_type+nar -> {wins,losses,total,avg_mult} for self-learning
 watchlist_seen:  "OrderedDict[str, int]" = OrderedDict()
 seen_news_ids:   Set[str]                = set()
 _MAX_SEEN = 3000   # max entries before oldest are trimmed
@@ -133,6 +134,7 @@ async def _save():
             "reminders": reminders,
             "seen_alert_ids": list(seen_alert_ids.keys())[-3000:],
             "dropped_calls":  dropped_calls,
+            "pattern_memory": pattern_memory,
         }
         raw = json.dumps(data)
         try:
@@ -168,8 +170,9 @@ async def _load():
         knowledge_base  = d.get("knowledge_base", [])
         reminders       = d.get("reminders", [])
         seen_alert_ids  = OrderedDict((k, 0) for k in d.get("seen_alert_ids", []))
-        global dropped_calls
+        global dropped_calls, pattern_memory
         dropped_calls   = d.get("dropped_calls", {})
+        pattern_memory  = d.get("pattern_memory", {})
         logger.info(f"✅ State loaded — {len(watchlist)} watched, {len(active_calls)} calls, {len(seen_alert_ids)} seen alerts, {len(dropped_calls)} tracked drops")
     except Exception as e:
         logger.warning(f"load_state: {e}")
@@ -910,13 +913,15 @@ def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
     """
     icons = {
         "pump":      "\U0001f680 *PUMP ALERT*",
-        "dump":      "\U0001f480 *DUMP ALERT*",
+        "dump":      "\U0001f480 *DUMP ALERT*",       # only from followup tracker
         "whale":     "\U0001f433 *WHALE ACCUMULATION*",
-        "gem":       "\U0001f48e *GEM SPOTTED*",
+        "gem":       "\U0001f48e *HIDDEN GEM*",
         "new":       "\U0001f195 *NEW LAUNCH*",
         "narrative": "\U0001f4d6 *NARRATIVE PLAY*",
         "rug":       "\U000026a0\ufe0f *RUG ALERT*",
         "unusual":   "\U000026a1 *UNUSUAL ACTIVITY*",
+        "migration": "\U0001f504 *MIGRATION ALERT*",   # pump.fun -> Raydium
+        "rebrand":   "\U0001f3f7 *REBRAND ALERT*",     # renamed to trending narrative
     }
     header = icons.get(alert_type, "\u26a1 *KAYO ALERT*")
     age    = _age(t["created"])
@@ -1474,25 +1479,68 @@ async def news_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         lines.append(f"\n🧠 *Kayo AI Summary:*\n_{ai_sum}_")
     await msg.edit_text("\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True)
 
+# ── Smart crypto vs casual detector — used in ask_cmd + handle_message ──
+_CRYPTO_KWS = frozenset([
+    "price","mcap","market cap","btc","bitcoin","sol","solana","eth","ethereum",
+    "bnb","token","coin","pump","dump","chart","wallet","defi","nft","dao",
+    "alpha","buy","sell","trade","ape","degen","rug","honeypot","liq","liquidity",
+    "fdv","volume","candle","narrative","trending","gem","launch","migrate",
+    "raydium","jupiter","dexscreener","birdeye","gmgn","bullx","whale","kol",
+    "call","entry","exit","fear","greed","dominance","airdrop","staking","yield",
+    "1h","5m","24h","10x","100x","rekt","ngmi","wagmi","memecoin","web3",
+    "blockchain","contract","ca","address","photon","trojan","banana","snipe",
+])
+_CASUAL_KWS = frozenset([
+    "sup","gm","gn","hi","hello","hey","yo","wassup","lol","haha","hahaha",
+    "how are you","how r u","you good","bored","hungry","tired","what time",
+    "joke","funny","mood","vibe","chill","love","miss","feel","today","tomorrow",
+    "weather","sports","game","movie","music","food","drink","sleep","wake",
+    "morning","night","evening","afternoon","weekend","busy","free","work",
+])
+
+def _is_crypto_q(text: str) -> bool:
+    tl = text.lower()
+    return any(kw in tl for kw in _CRYPTO_KWS)
+
+def _is_casual_q(text: str) -> bool:
+    tl = text.lower()
+    if len(text.split()) <= 4 and not _is_crypto_q(text): return True
+    return any(kw in tl for kw in _CASUAL_KWS) and not _is_crypto_q(text)
+
 async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
         await u.message.reply_text("Usage: `/ask <question>`", parse_mode="Markdown"); return
     q   = " ".join(c.args)
-    msg = await u.message.reply_text("🧠 *Kayo thinking...*", parse_mode="Markdown")
+    msg = await u.message.reply_text("\U0001f9e0 *Kayo thinking...*", parse_mode="Markdown")
     add_xp(u.effective_user.id, 2)
-    ans = await ai_ask(
-        f"Trader question: {q}\n"
-        "Answer using the live market data provided in your context. "
-        "Be sharp, cite exact numbers, and drop alpha like a pro trader would. "
-        "If the question is about price, ALWAYS use the live prices above.",
-        max_tokens=420,
-        inject_market=True
-    )
-    ts = datetime.utcnow().strftime("%H:%M UTC")
-    await msg.edit_text(
-        f"\U0001f9e0 *Kayo AI*\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{ans}\n\n_Live data as of {ts}_",
-        parse_mode="Markdown"
-    )
+    is_crypto = _is_crypto_q(q)
+    is_casual = _is_casual_q(q)
+
+    if is_casual:
+        prompt = f"The user said: {q}\n\nReply like a chill, witty friend. Short (1-2 sentences). No crypto unless asked."
+        ans = await ai_ask(prompt, max_tokens=160, inject_market=False)
+        footer = ""
+    elif is_crypto:
+        prompt = (
+            f"Trader question: {q}\n\n"
+            "Use the LIVE market data above. Be sharp, cite exact numbers. "
+            "Drop alpha like a degen pro. If about price: ONLY use live prices."
+        )
+        ans = await ai_ask(prompt, max_tokens=450, inject_market=True)
+        ts = datetime.utcnow().strftime("%H:%M UTC")
+        footer = f"\n\n_Live data as of {ts}_"
+    else:
+        prompt = f"User asks: {q}\n\nAnswer like a knowledgeable friend. Helpful, direct, no disclaimers."
+        ans = await ai_ask(prompt, max_tokens=400, inject_market=False)
+        footer = ""
+
+    try:
+        await msg.edit_text(
+            f"\U0001f9e0 *Kayo*\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{ans}{footer}",
+            parse_mode="Markdown"
+        )
+    except Exception:
+        await msg.edit_text(f"{ans}{footer}")
 
 async def sentiment_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     msg = await u.message.reply_text("📊 *Reading market sentiment...*", parse_mode="Markdown")
@@ -2601,48 +2649,46 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     add_xp(uid, 1)
 
-    # ── 3. Build smart AI prompt based on message type ────────
-    text_lower = text.lower()
+    # ── 3. Smart routing — casual vs crypto vs general ──────────
+    name_str  = u.effective_user.first_name or "fren"
+    is_crypto = _is_crypto_q(text)
+    is_casual = _is_casual_q(text)
 
-    # Detect web3 term explanation requests
-    is_web3_explain = any(
-        kw in text_lower for kw in ["what is", "what's", "explain", "define", "meaning of", "how does", "how do"]
-    )
-
-    # Detect price query
-    is_price_query = any(kw in text_lower for kw in [
-        "price of", "price", "how much", "value", "worth", "market cap", "mcap"
-    ])
-
-    # Build prompt
-    name_str = u.effective_user.first_name or "fren"
-
-    if is_web3_explain:
-        system_extra = (
-            "You are Kayo — a web3 expert and degen pro. Explain terms clearly but with personality. "
-            "Use examples, analogies, and real Solana/Crypto context. Keep it under 4 sentences. "
-            "If it's a web3/crypto term, add a pro trader tip at the end."
+    if is_casual:
+        # Small talk — reply like a human, no price data
+        prompt = (
+            f"{name_str} says: {text}\n\n"
+            "Reply like a chill friend. Short, warm, maybe funny. "
+            "1-2 sentences max. Zero crypto unless they bring it up."
         )
-    elif is_price_query:
-        system_extra = (
-            "You are Kayo — use the LIVE prices from your context. "
-            "Give the exact price, 24h change, and a one-sentence market read. "
-            "NEVER make up prices — only use what's in the live context."
-        )
+        reply = await ai_ask(prompt, fallback="lol say that again?", max_tokens=150, inject_market=False)
+
+    elif is_crypto:
+        # Web3 / trading question — full alpha mode with live prices
+        is_explain = any(kw in text.lower() for kw in ["what is","what's","explain","define","how does","how do","meaning"])
+        if is_explain:
+            prompt = (
+                f"{name_str} asks: {text}\n\n"
+                "Explain it like a web3 pro — clear, with examples and a real trader tip. "
+                "Max 4 sentences. Use live market context if relevant."
+            )
+        else:
+            prompt = (
+                f"{name_str} says: {text}\n\n"
+                "You are Kayo — degen expert. Use LIVE prices from your context. "
+                "Sharp, cite numbers, drop real alpha. No fluff."
+            )
+        reply = await ai_ask(prompt, fallback="ser, run that by me again?", max_tokens=420, inject_market=True)
+
     else:
-        system_extra = (
-            "You are Kayo — sharp, witty, knowledgeable. You can talk about anything: "
-            "crypto, web3, life, sports, random stuff. Be real, not robotic. "
-            "Answer like a smart friend who happens to know everything about crypto AND normal life. "
-            "Short replies unless depth is needed. No disclaimers unless truly important."
+        # General question — helpful, no market data
+        prompt = (
+            f"{name_str} says: {text}\n\n"
+            "Answer like a smart, helpful friend. Direct, no disclaimers. "
+            "Keep it short unless it needs depth."
         )
+        reply = await ai_ask(prompt, fallback="hmm, say more?", max_tokens=380, inject_market=False)
 
-    prompt = (
-        f"User ({name_str}) says: {text}\n\n"
-        f"{system_extra}"
-    )
-
-    reply = await ai_ask(prompt, fallback="yo, say that again?", max_tokens=400, inject_market=True)
     try:
         await u.message.reply_text(reply, parse_mode="Markdown")
     except Exception:
@@ -2698,7 +2744,7 @@ async def bg_main_scanner(app: Application):
                 # Only drop coins with real signal — no rugs, no duds
                 if liq < 3000:       continue  # too thin — easy to rug
                 if fdv < 10_000:     continue  # microscopic ghost token
-                if fdv > 30_000_000: continue  # too big to 10x from here
+                if fdv > 500_000: continue   # hard cap $500k — pure degen zone only
 
                 # Compute derived stats needed for filters
                 avg_5m_vol = v1h / 12 if v1h > 0 else 1
@@ -2715,6 +2761,23 @@ async def bg_main_scanner(app: Application):
                 if v1h < 500: continue
 
                 nar        = detect_narrative(f"{name} {sym}")
+                # ── Migration / rename detection ──────────────────────
+                # Migrated: very new pair but token has trading history (high b24h/s24h ratio)
+                b24h_sc = int(((p.get("txns") or {}).get("h24") or {}).get("buys",  0) or 0)
+                s24h_sc = int(((p.get("txns") or {}).get("h24") or {}).get("sells", 0) or 0)
+                is_migrated = (
+                    age_min < 120 and          # pair is "new"
+                    (b24h_sc + s24h_sc) > 200  # but 24h txn count is high = token existed elsewhere
+                )
+                # Renamed: ticker doesn't match trending narrative but name does
+                name_lower = name.lower()
+                sym_lower  = sym.lower()
+                trending_kws = ["trump","maga","ai","agent","dog","cat","frog","ape","pepe","pump"]
+                is_rebranded = (
+                    any(kw in name_lower for kw in trending_kws) and
+                    not any(kw in sym_lower for kw in trending_kws) and
+                    age_min < 360  # rebrands usually recent
+                )
                 is_boosted = addr in boosted_addrs
 
                 # ── DETECT ALERT TYPE ──────────────────────────────────
@@ -2725,12 +2788,20 @@ async def bg_main_scanner(app: Application):
                     alert_type = "pump"
 
                 # 💎 GEM — low cap hidden gem with strong momentum
-                elif fdv < 250_000 and ch1h >= 25 and buy_pct >= 62 and liq >= 2500 and vol_spike >= 1.8:
+                elif fdv < 500_000 and ch1h >= 25 and buy_pct >= 62 and liq >= 2500 and vol_spike >= 1.8:
                     alert_type = "gem"
 
                 # 🆕 NEW LAUNCH — fresh token with immediate real traction
                 elif age_min < 45 and b1h > 20 and buy_pct >= 60 and liq >= 1500 and ch1h >= 12:
                     alert_type = "new"
+
+                # 🔀 MIGRATION — pump.fun → Raydium or chain migration with traction
+                elif is_migrated and buy_pct >= 60 and ch1h >= 10 and liq >= 2000:
+                    alert_type = "migration"
+
+                # 🔄 REBRAND / RENAME — token riding a trending narrative after rename
+                elif is_rebranded and buy_pct >= 58 and ch1h >= 8 and liq >= 1500:
+                    alert_type = "rebrand"
 
                 # 🐳 WHALE ACCUMULATION — big vol spike, price barely moved (stealth buy)
                 elif vol_spike >= 4.0 and abs(ch5m) < 4 and b1h > 15 and buy_pct > 62:
@@ -2747,17 +2818,27 @@ async def bg_main_scanner(app: Application):
                 elif ch1h >= 15 and ch5m >= 5 and vol_spike >= 2.5 and buy_pct >= 60:
                     alert_type = "unusual"
 
-                # 💀 DUMP / RUG — heavy sell pressure, bad signal
-                elif ch5m <= -15 and s5m > b5m * 2 and v5m > 200:
-                    alert_type = "dump"
+                # NOTE: No dump alerts — degen bots only drop BUY signals.
+                # Rug/dump info comes from bg_followup_tracker when a dropped coin tanks.
 
                 if not alert_type: continue
 
                 # Extra quality gates
-                if ch24h < -60 and alert_type not in ("dump",): continue  # already dead
-                if fdv > 0 and liq / fdv < 0.005 and alert_type != "dump": continue  # liq < 0.5% of fdv = rug risk
+                # Note: ch24h gate removed — migrated/recovered coins often show big 24h dip
+                if fdv > 0 and liq / fdv < 0.005: continue  # liq < 0.5% of fdv = rug risk
+                # Buy-only policy: never alert if sells dominate (except followup tracker)
+                if buy_pct < 50: continue
 
                 # ── NEVER SPAM THE SAME COIN ──────────────────────────────
+                # ── PATTERN MEMORY GATE — skip bad-performing patterns ────────
+                pm_check_key = f"{alert_type}:{nar}"
+                pm_check = pattern_memory.get(pm_check_key, {})
+                if pm_check.get("total", 0) >= 5:  # enough data
+                    win_rate = pm_check["wins"] / max(pm_check["total"], 1)
+                    if win_rate < 0.25:  # <25% win rate — this pattern keeps rugging, skip
+                        logger.info(f"[PATTERN SKIP] {pm_check_key} wr={win_rate:.0%}")
+                        continue
+
                 # Per-addr global cooldown stored in dropped_calls
                 if addr in dropped_calls:
                     last_dropped = dropped_calls[addr].get("time", 0)
@@ -2794,13 +2875,19 @@ async def bg_main_scanner(app: Application):
                     "has_profile": False, "has_ad": False, "pair_addr": "",
                     "mscore": min(100, int(abs(ch1h) + buy_pct/2 + vol_spike*10)),
                 }
+                pm_info = pattern_memory.get(f"{alert_type}:{nar}", {})
+                pm_hint = ""
+                if pm_info.get("total", 0) >= 3:
+                    wr = pm_info["wins"] / max(pm_info["total"], 1)
+                    pm_hint = f" My historical win rate on {alert_type} + #{nar} calls: {wr:.0%} ({pm_info['wins']}W/{pm_info['losses']}L, avg {pm_info.get('avg_mult',0):.1f}x)."
+
                 ai = await ai_ask(
-                    f"Solana alert — ${sym} ({alert_type.upper()}): MCap {_usd(mcap)}, "
+                    f"Solana {alert_type.upper()} — *${sym}*: MCap {_usd(mcap)}, "
                     f"liq {_usd(liq)}, 5m {_pct(ch5m)}, 1h {_pct(ch1h)}, "
-                    f"buys/sells {b1h}/{s1h}, vol spike {vol_spike:.1f}x. "
-                    f"Narrative: #{nar}. "
-                    "Given current market conditions, is this worth acting on NOW? "
-                    "1 razor-sharp sentence — entry thesis or stay away.",
+                    f"buys/sells (1h): {b1h}/{s1h}, buy%: {buy_pct:.0f}%, vol spike: {vol_spike:.1f}x. "
+                    f"Narrative: #{nar}.{pm_hint} "
+                    "Is this worth aping RIGHT NOW? Give 1 razor-sharp degen sentence. "
+                    "If you would fade it, say why. If you would ape, say what the play is.",
                     fallback="",
                     inject_market=True
                 )
@@ -2839,7 +2926,7 @@ async def bg_main_scanner(app: Application):
 
         except Exception as e:
             logger.error(f"bg_main_scanner: {e}", exc_info=True)
-        await asyncio.sleep(45)
+        await asyncio.sleep(60)
 
 
 async def bg_followup_tracker(app: Application):
@@ -2906,6 +2993,13 @@ async def bg_followup_tracker(app: Application):
                                                    reply_markup=scan_buttons(addr, sym),
                                                    disable_web_page_preview=True)
                         dropped_calls[addr]["alerted_10x"] = True
+                        # ── Feed pattern memory (win) ───────────────
+                        pm_key = f"{info.get('alert_type','?')}:{info.get('narrative','?')}"
+                        pm = pattern_memory.setdefault(pm_key, {"wins":0,"losses":0,"total":0,"avg_mult":0.0,"last_updated":0})
+                        pm["wins"]  += 1
+                        pm["total"] += 1
+                        pm["avg_mult"] = (pm["avg_mult"] * (pm["total"]-1) + mult) / pm["total"]
+                        pm["last_updated"] = time.time()
                         asyncio.create_task(_save())
                     except Exception as e:
                         logger.debug(f"followup 10x: {e}")
@@ -2945,6 +3039,12 @@ async def bg_followup_tracker(app: Application):
                         await app.bot.send_message(chat, msg, parse_mode="Markdown",
                                                    disable_web_page_preview=True)
                         dropped_calls[addr]["alerted_rug"] = True
+                        # ── Feed pattern memory (loss) ──────────────
+                        pm_key2 = f"{info.get('alert_type','?')}:{info.get('narrative','?')}"
+                        pm2 = pattern_memory.setdefault(pm_key2, {"wins":0,"losses":0,"total":0,"avg_mult":0.0,"last_updated":0})
+                        pm2["losses"] += 1
+                        pm2["total"]  += 1
+                        pm2["last_updated"] = time.time()
                         asyncio.create_task(_save())
                     except Exception as e:
                         logger.debug(f"followup rug: {e}")
@@ -3011,7 +3111,7 @@ async def bg_new_launch_scanner(app: Application):
                 boost   = boost_map.get(addr, 0)
                 buy_pct = b1h / max(b1h + s1h, 1) * 100
 
-                if liq < 800 or fdv < 3000: continue
+                if liq < 800 or fdv < 3000 or fdv > 500_000: continue  # hard $500k cap
 
                 # Scoring
                 score = 0
@@ -3125,7 +3225,167 @@ async def bg_new_launch_scanner(app: Application):
 
         except Exception as e:
             logger.error(f"bg_new_launch_scanner: {e}", exc_info=True)
-        await asyncio.sleep(60)
+        await asyncio.sleep(90)
+
+
+async def bg_established_scanner(app: Application):
+    """
+    Scans for ESTABLISHED coins (age >2h, mcap <$500k) that are
+    suddenly pumping again — catches rebounded coins, reactivated old gems,
+    and migrated tokens that weren't new when they moved.
+    Runs every 3 minutes.
+    """
+    await asyncio.sleep(180)
+    seen_est: dict = {}  # addr -> last_alert_time
+
+    while True:
+        try:
+            now = time.time()
+            QUERIES = [
+                "solana meme", "solana ai", "solana dog", "solana cat",
+                "solana gaming", "solana pump", "solana pepe", "solana frog"
+            ]
+            pairs_map = await dex_multi_search(QUERIES)
+
+            for addr, p in pairs_map.items():
+                if addr in blacklist: continue
+                if now - seen_est.get(addr, 0) < 10800: continue  # 3h per coin
+
+                base    = p.get("baseToken", {})
+                sym     = base.get("symbol", "???")
+                name    = base.get("name", "")
+                fdv     = float(p.get("fdv", 0) or 0)
+                mcap    = float(p.get("marketCap", 0) or fdv)
+                liq     = float((p.get("liquidity") or {}).get("usd", 0) or 0)
+                ch5m    = float((p.get("priceChange") or {}).get("m5", 0) or 0)
+                ch1h    = float((p.get("priceChange") or {}).get("h1", 0) or 0)
+                ch6h    = float((p.get("priceChange") or {}).get("h6", 0) or 0)
+                ch24h   = float((p.get("priceChange") or {}).get("h24", 0) or 0)
+                v5m     = float((p.get("volume") or {}).get("m5", 0) or 0)
+                v1h     = float((p.get("volume") or {}).get("h1", 0) or 0)
+                v24h    = float((p.get("volume") or {}).get("h24", 0) or 0)
+                b1h     = int(((p.get("txns") or {}).get("h1") or {}).get("buys",  0) or 0)
+                s1h     = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
+                b5m     = int(((p.get("txns") or {}).get("m5") or {}).get("buys",  0) or 0)
+                s5m     = int(((p.get("txns") or {}).get("m5") or {}).get("sells", 0) or 0)
+                created = int(p.get("pairCreatedAt", 0) or 0)
+                age_min = (now * 1000 - created) / 60000 if created else 9999
+
+                # Only ESTABLISHED coins: >2 hours old, sub $500k, real liq
+                if age_min < 120:   continue  # too new — main scanner handles those
+                if fdv > 500_000:   continue  # above our cap
+                if fdv < 5_000:     continue  # ghost token
+                if liq < 2000:      continue  # too thin
+
+                avg_5m_vol = v1h / 12 if v1h > 0 else 1
+                vol_spike  = v5m / max(avg_5m_vol, 1)
+                buy_pct    = b1h / max(b1h + s1h, 1) * 100
+
+                # Must be buying, not selling
+                if buy_pct < 55: continue
+
+                # Must have a real move — not just noise
+                qualifies = False
+                est_type  = None
+
+                # Pattern 1: Old coin suddenly pumping hard — classic "second wind"
+                if ch1h >= 20 and ch5m >= 5 and buy_pct >= 60 and vol_spike >= 2:
+                    qualifies = True; est_type = "pump"
+
+                # Pattern 2: Volume explosion on quiet coin (possible manipulation or kol call)
+                elif vol_spike >= 8 and abs(ch5m) < 5 and b1h > 15 and buy_pct > 60:
+                    qualifies = True; est_type = "whale"
+
+                # Pattern 3: Consistent 6h grind — real accumulation in progress
+                elif ch6h >= 30 and ch1h >= 8 and buy_pct >= 60 and b1h > 20:
+                    qualifies = True; est_type = "gem"
+
+                # Pattern 4: Rebound after dump — was down 24h but now recovering
+                elif ch24h < -30 and ch1h >= 15 and ch5m >= 5 and buy_pct >= 60:
+                    qualifies = True; est_type = "unusual"
+
+                if not qualifies: continue
+
+                # Anti-spam: never re-alert same coin from here if main scanner already got it
+                alert_id_est = re.sub(r"[^a-z0-9]","",sym.lower())[:8] + f":{est_type}:{int(now/10800)}"
+                alert_id_est = hashlib.md5(alert_id_est.encode()).hexdigest()[:16]
+                if _seen_check(seen_alert_ids, alert_id_est): continue
+                _seen_add(seen_alert_ids, alert_id_est)
+
+                seen_est[addr] = now
+
+                nar    = detect_narrative(f"{name} {sym}")
+                info   = p.get("info") or {}
+                links  = info.get("socials") or []
+                tw_lnk = next((s.get("url","") for s in links if s.get("type","") in ("twitter","x")), "")
+                tg_lnk = next((s.get("url","") for s in links if s.get("type","") == "telegram"), "")
+                liq_ratio = liq / max(fdv, 1) * 100
+                mscore = min(100, int(abs(ch1h) + buy_pct/2 + vol_spike*10))
+
+                tok_est = {
+                    "address": addr, "sym": sym, "name": name,
+                    "price": float(p.get("priceUsd", 0) or 0),
+                    "fdv": fdv, "mcap": mcap, "liq": liq, "liq_ratio": liq_ratio,
+                    "ch5m": ch5m, "ch1h": ch1h, "ch6h": ch6h, "ch24h": ch24h,
+                    "v5m": v5m, "v1h": v1h, "v24h": v24h,
+                    "b5m": b5m, "s5m": s5m, "b1h": b1h, "s1h": s1h, "b24h": 0, "s24h": 0,
+                    "buy_pct": buy_pct, "vol_spike": vol_spike,
+                    "risk_score": 35, "red_flags": [], "green_flags": [],
+                    "sell_tax": 0, "buy_tax": 0, "is_honeypot": False,
+                    "lp_locked": liq_ratio > 8,
+                    "is_renounced": False,
+                    "created": created, "narrative": nar,
+                    "tw_link": tw_lnk, "tg_link": tg_lnk, "web_link": "",
+                    "boost_active": 0, "has_profile": False, "has_ad": False,
+                    "pair_addr": p.get("pairAddress", ""),
+                    "mscore": mscore,
+                }
+
+                ai_est = await ai_ask(
+                    f"Established Solana token ${sym} (age {int(age_min)}min, ${_usd(fdv)} mcap) "
+                    f"just lit up: 1h {_pct(ch1h)}, 5m {_pct(ch5m)}, 6h {_pct(ch6h)}, "
+                    f"24h {_pct(ch24h)}, buy% {buy_pct:.0f}%, vol spike {vol_spike:.1f}x. "
+                    f"This is an older coin picking up steam again — #{nar} narrative. "
+                    "Is this a real second wind or a dead cat bounce? "
+                    "1 sharp degen sentence — ape or skip?",
+                    fallback="",
+                    inject_market=True
+                )
+                # Prefix to show this is an ESTABLISHED coin (not new)
+                age_label = f"{int(age_min//60)}h{int(age_min%60)}m" if age_min > 60 else f"{int(age_min)}m"
+                ai_est_full = f"[Aged {age_label} — not new] {ai_est}"
+
+                card_est = build_alert_card(tok_est, est_type, ai_est_full)
+                if GROUP_CHAT_ID != 0:
+                    try:
+                        msg_est = await app.bot.send_message(
+                            chat_id=GROUP_CHAT_ID,
+                            text=card_est,
+                            parse_mode="Markdown",
+                            reply_markup=scan_buttons(addr, sym, tok_est.get("pair_addr","")),
+                            disable_web_page_preview=True,
+                        )
+                        dropped_calls[addr] = {
+                            "sym": sym, "name": name,
+                            "entry_price": tok_est["price"],
+                            "mcap_entry": mcap,
+                            "time": now,
+                            "alert_type": est_type,
+                            "msg_id": msg_est.message_id,
+                            "chat_id": GROUP_CHAT_ID,
+                            "alerted_10x": False,
+                            "alerted_5x":  False,
+                            "alerted_rug": False,
+                        }
+                        asyncio.create_task(_save())
+                        logger.info(f"[ESTABLISHED] {est_type} ${sym} age={age_label} {_usd(mcap)}")
+                        await asyncio.sleep(4)
+                    except Exception as e:
+                        logger.warning(f"established alert: {e}")
+
+        except Exception as e:
+            logger.error(f"bg_established_scanner: {e}", exc_info=True)
+        await asyncio.sleep(180)  # run every 3 minutes
 
 
 async def bg_narrative_news_scanner(app: Application):
@@ -3571,6 +3831,7 @@ def main():
             await app.updater.start_polling(drop_pending_updates=True)
             asyncio.create_task(bg_main_scanner(app))
             asyncio.create_task(bg_followup_tracker(app))
+            asyncio.create_task(bg_established_scanner(app))
             asyncio.create_task(bg_new_launch_scanner(app))
             asyncio.create_task(bg_narrative_news_scanner(app))
             asyncio.create_task(bg_trending_metas_scanner(app))
