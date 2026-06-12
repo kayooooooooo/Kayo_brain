@@ -132,7 +132,7 @@ async def _save():
             "knowledge_base": knowledge_base,
             "reminders": reminders,
             "seen_alert_ids": list(seen_alert_ids.keys())[-3000:],
-        "dropped_calls":  dropped_calls,
+            "dropped_calls":  dropped_calls,
         }
         raw = json.dumps(data)
         try:
@@ -168,7 +168,9 @@ async def _load():
         knowledge_base  = d.get("knowledge_base", [])
         reminders       = d.get("reminders", [])
         seen_alert_ids  = OrderedDict((k, 0) for k in d.get("seen_alert_ids", []))
-        logger.info(f"✅ State loaded — {len(watchlist)} watched, {len(active_calls)} calls, {len(seen_alert_ids)} seen alerts")
+        global dropped_calls
+        dropped_calls   = d.get("dropped_calls", {})
+        logger.info(f"✅ State loaded — {len(watchlist)} watched, {len(active_calls)} calls, {len(seen_alert_ids)} seen alerts, {len(dropped_calls)} tracked drops")
     except Exception as e:
         logger.warning(f"load_state: {e}")
 
@@ -914,6 +916,7 @@ def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
         "new":       "\U0001f195 *NEW LAUNCH*",
         "narrative": "\U0001f4d6 *NARRATIVE PLAY*",
         "rug":       "\U000026a0\ufe0f *RUG ALERT*",
+        "unusual":   "\U000026a1 *UNUSUAL ACTIVITY*",
     }
     header = icons.get(alert_type, "\u26a1 *KAYO ALERT*")
     age    = _age(t["created"])
@@ -2218,7 +2221,7 @@ HELP_PAGES = {
     "scan": (
         "\U0001f52c *SCAN & ANALYZE*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "`/scan <CA>` — Full token deep scan + AI verdict\n"
+        "`/scan <CA>` — Full token deep scan + AI verdict\n"        "_(Bot auto-drops: pumps, gems, new launches, whale moves, unusual activity)_\n"
         "`/c <CA>` — Quick price snapshot\n"
         "`/chart <CA>` — In-app chart image (no DexScreener needed)\n"
         "`/price btc` — Live price for any coin (btc, sol, eth, bnb...)\n"
@@ -2692,51 +2695,78 @@ async def bg_main_scanner(app: Application):
                 age_min = (now * 1000 - created) / 60000 if created else 9999
 
                 # ── STRICT QUALITY FILTER ──────────────────────────────────
-                # Only drop coins that have a real chance of moving
-                if liq < 3000:    continue  # too low liquidity
-                if fdv < 10_000:  continue  # microscopic
-                if fdv > 30_000_000: continue  # too big / won't 10x
-                if t.get("is_honeypot"): continue  # never drop honeypots
-                if t.get("risk_score", 0) > 70: continue  # too risky
+                # Only drop coins with real signal — no rugs, no duds
+                if liq < 3000:       continue  # too thin — easy to rug
+                if fdv < 10_000:     continue  # microscopic ghost token
+                if fdv > 30_000_000: continue  # too big to 10x from here
 
-                # Anti-rug: skip tokens with no LP lock and high sell tax
-                sell_tax_val = t.get("sell_tax", 0) if isinstance(t, dict) else 0
-                if sell_tax_val > 15: continue
-
-                # Good coins need min buy pressure
-                if buy_pct < 55: continue  # weak buyer interest
-
-                # Must have real momentum
-                if ch1h < 5 and ch5m < 3: continue  # stale / no move
-
+                # Compute derived stats needed for filters
                 avg_5m_vol = v1h / 12 if v1h > 0 else 1
                 vol_spike  = v5m / max(avg_5m_vol, 1)
                 buy_pct    = b1h / max(b1h + s1h, 1) * 100
+
+                # Weak buy interest = not ready yet
+                if buy_pct < 52: continue
+
+                # Must have SOME momentum — prevent dead/stale coins
+                if ch1h < 4 and ch5m < 2 and vol_spike < 2: continue
+
+                # Skip if volume is suspiciously low (no real trading)
+                if v1h < 500: continue
+
                 nar        = detect_narrative(f"{name} {sym}")
                 is_boosted = addr in boosted_addrs
 
-                # Score for dedup key
+                # ── DETECT ALERT TYPE ──────────────────────────────────
                 alert_type = None
-                # Pump: strong 5m move + buyer domination + volume spike
-                if ch5m >= 12 and b5m > s5m * 1.3 and v5m > 500 and buy_pct >= 60:
+
+                # 🚀 PUMP — strong 5m breakout with buyer pressure
+                if ch5m >= 10 and b5m > s5m and v5m > 300 and buy_pct >= 58:
                     alert_type = "pump"
-                # Dump alert (rug signals): sell pressure surge, liq drop
-                elif ch5m <= -15 and s5m > b5m * 2 and v5m > 300:
-                    alert_type = "dump"
-                # Whale: massive vol spike but price stable = quiet accumulation
-                elif vol_spike >= 5.0 and abs(ch5m) < 3 and b1h > 20 and buy_pct > 65:
-                    alert_type = "whale"
-                # Gem: low mcap, strong 1h move, solid buy ratio, real liquidity
-                elif fdv < 200_000 and ch1h >= 30 and buy_pct >= 65 and liq >= 3000 and vol_spike >= 2:
+
+                # 💎 GEM — low cap hidden gem with strong momentum
+                elif fdv < 250_000 and ch1h >= 25 and buy_pct >= 62 and liq >= 2500 and vol_spike >= 1.8:
                     alert_type = "gem"
-                # New launch with immediate traction
-                elif age_min < 30 and b1h > 25 and buy_pct >= 65 and liq >= 2000 and ch1h >= 15:
+
+                # 🆕 NEW LAUNCH — fresh token with immediate real traction
+                elif age_min < 45 and b1h > 20 and buy_pct >= 60 and liq >= 1500 and ch1h >= 12:
                     alert_type = "new"
+
+                # 🐳 WHALE ACCUMULATION — big vol spike, price barely moved (stealth buy)
+                elif vol_spike >= 4.0 and abs(ch5m) < 4 and b1h > 15 and buy_pct > 62:
+                    alert_type = "whale"
+
+                # ⚠️ UNUSUAL ACTIVITY — anomalies that don't fit normal patterns
+                # Pattern A: Volume spike with no price move = possible coordinated buy before pump
+                elif vol_spike >= 6.0 and abs(ch5m) < 2 and abs(ch1h) < 8 and b1h > 10:
+                    alert_type = "unusual"
+                # Pattern B: Tiny mcap token suddenly getting heavy buys — early ape zone
+                elif fdv < 100_000 and b1h > b1h * 0 and b1h >= 40 and buy_pct >= 70 and v1h > 2000:
+                    alert_type = "unusual"
+                # Pattern C: 1h momentum building with accelerating 5m (breakout incoming)
+                elif ch1h >= 15 and ch5m >= 5 and vol_spike >= 2.5 and buy_pct >= 60:
+                    alert_type = "unusual"
+
+                # 💀 DUMP / RUG — heavy sell pressure, bad signal
+                elif ch5m <= -15 and s5m > b5m * 2 and v5m > 200:
+                    alert_type = "dump"
 
                 if not alert_type: continue
 
-                # Extra quality gate — skip if already dumped hard since launch
-                if ch24h < -50 and alert_type != "dump": continue
+                # Extra quality gates
+                if ch24h < -60 and alert_type not in ("dump",): continue  # already dead
+                if fdv > 0 and liq / fdv < 0.005 and alert_type != "dump": continue  # liq < 0.5% of fdv = rug risk
+
+                # ── NEVER SPAM THE SAME COIN ──────────────────────────────
+                # Per-addr global cooldown stored in dropped_calls
+                if addr in dropped_calls:
+                    last_dropped = dropped_calls[addr].get("time", 0)
+                    # Only re-drop same coin after 6h AND if price has moved ≥20% since last drop
+                    last_price = dropped_calls[addr].get("entry_price", 0)
+                    cur_price_now = float(p.get("priceUsd", 0) or 0)
+                    price_change_since = abs(cur_price_now - last_price) / max(last_price, 1e-12) * 100
+                    if now - last_dropped < 21600: continue        # 6h hard cooldown
+                    if price_change_since < 20: continue           # must have moved 20%+ to re-drop
 
                 # Dedup via Redis-persisted set
                 alert_id = hashlib.md5(f"{addr}:{alert_type}:{int(now/14400)}".encode()).hexdigest()[:16]  # 4h window
@@ -2805,7 +2835,7 @@ async def bg_main_scanner(app: Application):
                         logger.warning(f"alert send: {e}")
 
             # Trim cooldown
-            cooldown = {k: v for k, v in cooldown.items() if now - v < 7200}
+            cooldown = {k: v for k, v in cooldown.items() if now - v < 14400}  # keep 4h
 
         except Exception as e:
             logger.error(f"bg_main_scanner: {e}", exc_info=True)
@@ -2999,45 +3029,96 @@ async def bg_new_launch_scanner(app: Application):
                 if liq / max(fdv, 1) > 0.05: score += 10
                 if b1h > 20: score += 10
 
-                if score < 38: continue
+                if score < 35: continue
                 if GROUP_CHAT_ID == 0: continue
+
+                # ── Anti-spam: never re-drop the same coin ─────────────
+                if addr in dropped_calls:
+                    last_drop = dropped_calls[addr].get("time", 0)
+                    last_price = dropped_calls[addr].get("entry_price", 0)
+                    cur_p = float(pd.get("priceUsd", 0) or 0)
+                    price_change_since = abs(cur_p - last_price) / max(last_price, 1e-12) * 100
+                    if time.time() - last_drop < 21600: continue   # 6h hard cooldown
+                    if price_change_since < 20: continue            # 20%+ move required
 
                 _seen_add(seen_alert_ids, alert_id)
                 asyncio.create_task(_save())
 
-                tw_link = next((l.get("url", "") for l in links if l.get("type") == "twitter"), "")
-                tg_link = next((l.get("url", "") for l in links if l.get("type") == "telegram"), "")
-                soc_str = ("🐦 " if tw_link else "") + ("💬 " if tg_link else "")
+                tw_link = next((lk.get("url", "") for lk in links if lk.get("type") == "twitter"), "")
+                tg_link = next((lk.get("url", "") for lk in links if lk.get("type") == "telegram"), "")
+                web_link= next((lk.get("url", "") for lk in links if lk.get("type") == "website"), "")
                 nar     = detect_narrative(f"{name} {sym}")
+                v5m_new = float((pd.get("volume") or {}).get("m5", 0) or 0)
+                v1h_new = float((pd.get("volume") or {}).get("h1", 0) or 0)
+                v24h_new= float((pd.get("volume") or {}).get("h24", 0) or 0)
+                ch5m_new= float((pd.get("priceChange") or {}).get("m5", 0) or 0)
+                ch6h_new= float((pd.get("priceChange") or {}).get("h6", 0) or 0)
+                ch24h_new=float((pd.get("priceChange") or {}).get("h24", 0) or 0)
+                b5m_new = int(((pd.get("txns") or {}).get("m5") or {}).get("buys", 0) or 0)
+                s5m_new = int(((pd.get("txns") or {}).get("m5") or {}).get("sells", 0) or 0)
+                avg_5m  = v1h_new / 12 if v1h_new > 0 else 1
+                vs_new  = v5m_new / max(avg_5m, 1)
+                cur_price_nl = float(pd.get("priceUsd", 0) or 0)
+                mscore_nl = min(100, int(abs(ch1h) + buy_pct/2 + vs_new*10))
+
+                tok_nl = {
+                    "address": addr, "sym": sym, "name": name,
+                    "price": cur_price_nl, "fdv": fdv, "mcap": fdv,
+                    "liq": liq, "liq_ratio": liq/max(fdv,1)*100,
+                    "ch5m": ch5m_new, "ch1h": ch1h, "ch6h": ch6h_new, "ch24h": ch24h_new,
+                    "v5m": v5m_new, "v1h": v1h_new, "v24h": v24h_new,
+                    "b5m": b5m_new, "s5m": s5m_new, "b1h": b1h, "s1h": s1h, "b24h": 0, "s24h": 0,
+                    "buy_pct": buy_pct, "vol_spike": vs_new,
+                    "risk_score": max(0, 70 - score),
+                    "red_flags": [], "green_flags": [],
+                    "sell_tax": 0, "buy_tax": 0, "is_honeypot": False,
+                    "lp_locked": liq/max(fdv,1) > 0.08,
+                    "is_renounced": False,
+                    "created": created, "narrative": nar,
+                    "tw_link": tw_link, "tg_link": tg_link, "web_link": web_link,
+                    "boost_active": boost, "has_profile": True, "has_ad": boost > 0,
+                    "pair_addr": pd.get("pairAddress", ""),
+                    "mscore": mscore_nl,
+                }
+                if boost > 0:  tok_nl["green_flags"].append(f"\U0001f4b0 Boosted ({boost} pts)")
+                if tw_link:    tok_nl["green_flags"].append("\U0001f426 Twitter active")
+                if tg_link:    tok_nl["green_flags"].append("\U0001f4e8 Telegram community")
+
+                # Determine display type — new vs unusual
+                nl_type = "new" if age_min < 60 else ("unusual" if vs_new >= 3 else "gem")
 
                 ai = await ai_ask(
-                    f"New Solana token ${sym} — Age {int(age_min)}min, "
+                    f"Solana token ${sym} (age {int(age_min)}min, score {score}/100): "
                     f"MCap {_usd(fdv)}, liq {_usd(liq)}, 1h {_pct(ch1h)}, "
-                    f"buys/sells {b1h}/{s1h}, score {score}/100. "
-                    "Worth watching? 1 honest sentence.",
-                    fallback=""
+                    f"buys {b1h} / sells {s1h}, buy% {buy_pct:.0f}%, vol spike {vs_new:.1f}x. "
+                    f"Narrative: #{nar}. Boosted: {boost > 0}. Has Twitter: {bool(tw_link)}. "
+                    "Is this worth aping? 1 sharp sentence — what's the play.",
+                    fallback="",
+                    inject_market=True
                 )
-                msg_text = (
-                    f"🆕 *NEW LAUNCH ALERT* [Score: {score}]\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"*${sym}* — _{name}_ {soc_str}#{nar.upper()}\n"
-                    f"Age: {int(age_min)}m  MCap: `{_usd(fdv)}`  Liq: `{_usd(liq)}`\n"
-                    f"1h: {_pct(ch1h)}  Buys/Sells: {b1h}/{s1h}  Buy%: {buy_pct:.0f}%\n"
-                    + (f"Boost: {boost}  " if boost else "")
-                    + (f"[Twitter]({tw_link})  " if tw_link else "")
-                    + (f"[Telegram]({tg_link})" if tg_link else "")
-                    + f"\n`{addr}`"
-                )
-                if ai: msg_text += f"\n\n🧠 _{ai}_"
+                card_nl = build_alert_card(tok_nl, nl_type, ai)
                 try:
-                    await app.bot.send_message(
+                    msg_sent_nl = await app.bot.send_message(
                         chat_id=GROUP_CHAT_ID,
-                        text=msg_text,
+                        text=card_nl,
                         parse_mode="Markdown",
-                        reply_markup=scan_buttons(addr, sym),
+                        reply_markup=scan_buttons(addr, sym, tok_nl.get("pair_addr","")),
                         disable_web_page_preview=True,
                     )
-                    logger.info(f"[NEW LAUNCH] ${sym} score={score}")
+                    dropped_calls[addr] = {
+                        "sym": sym, "name": name,
+                        "entry_price": cur_price_nl,
+                        "mcap_entry": fdv,
+                        "time": time.time(),
+                        "alert_type": nl_type,
+                        "msg_id": msg_sent_nl.message_id,
+                        "chat_id": GROUP_CHAT_ID,
+                        "alerted_10x": False,
+                        "alerted_5x":  False,
+                        "alerted_rug": False,
+                    }
+                    asyncio.create_task(_save())
+                    logger.info(f"[NEW LAUNCH] ${sym} score={score} type={nl_type}")
                     await asyncio.sleep(3)
                 except Exception as e:
                     logger.warning(f"new launch send: {e}")
