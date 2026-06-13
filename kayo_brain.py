@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v19 — PRO REBUILD                     ║
+║                    KAYO BRAIN v19b — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v19", 200
+def _root(): return "🦅 Kayo Brain v19b", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -194,7 +194,7 @@ def set_setting(uid, key, val):
 # Fetches BTC/SOL/ETH real-time prices so AI never hallucinates
 # ═══════════════════════════════════════════════════════════════
 _market_ctx_cache: Dict = {"data": None, "ts": 0}
-_MARKET_CTX_TTL = 60   # seconds between refreshes
+_MARKET_CTX_TTL = 120   # seconds between refreshes
 
 async def get_live_market_context() -> str:
     """
@@ -241,24 +241,8 @@ async def get_live_market_context() -> str:
                     except Exception:
                         pass
 
-                    # Grab top Solana gainers from DexScreener
+                    # (Solana gainers removed — was adding 5-10s latency to every AI call)
                     sol_gainers = ""
-                    try:
-                        gmap = await dex_multi_search(["solana meme", "solana ai"])
-                        top_g = sorted(
-                            gmap.values(),
-                            key=lambda x: float((x.get("priceChange") or {}).get("h1", 0) or 0),
-                            reverse=True
-                        )[:3]
-                        if top_g:
-                            g_parts = []
-                            for gp in top_g:
-                                gs  = gp.get("baseToken",{}).get("symbol","?")
-                                gch = float((gp.get("priceChange") or {}).get("h1", 0) or 0)
-                                g_parts.append(f"${gs} {gch:+.0f}%")
-                            sol_gainers = f"Top Solana movers (1h): {', '.join(g_parts)}\n"
-                    except Exception:
-                        pass
 
                     ctx = (
                         f"[LIVE MARKET DATA - {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}]\n"
@@ -347,16 +331,25 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
                             "max_tokens": max_tokens,
                             "temperature": 0.65,
                         },
-                        timeout=aiohttp.ClientTimeout(total=14),
+                        timeout=aiohttp.ClientTimeout(total=20),
                     ) as r:
                         if r.status == 200:
                             d = await r.json()
-                            return d["choices"][0]["message"]["content"].strip()
+                            text_out = d["choices"][0]["message"]["content"].strip()
+                            if text_out:
+                                return text_out
                         elif r.status == 429:
-                            await asyncio.sleep(1.5)
+                            logger.warning(f"Groq 429 rate-limit on {model} — waiting 2s")
+                            await asyncio.sleep(2)
                             continue
+                        else:
+                            err_body = await r.text()
+                            logger.error(f"Groq {model} HTTP {r.status}: {err_body[:200]}")
+                            # Don't break — try next model
+            except asyncio.TimeoutError:
+                logger.warning(f"Groq {model} timed out — trying next model")
             except Exception as e:
-                logger.debug(f"Groq {model}: {e}")
+                logger.error(f"Groq {model} exception: {e}")
 
     if GEMINI_API_KEY:
         try:
@@ -366,14 +359,22 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
                     f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
                     json={"contents": [{"parts": [{"text": full_prompt}]}],
                           "generationConfig": {"maxOutputTokens": max_tokens}},
-                    timeout=aiohttp.ClientTimeout(total=18),
+                    timeout=aiohttp.ClientTimeout(total=22),
                 ) as r:
                     if r.status == 200:
                         d = await r.json()
-                        return d["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        text_out = d["candidates"][0]["content"]["parts"][0]["text"].strip()
+                        if text_out:
+                            return text_out
+                    else:
+                        err_body = await r.text()
+                        logger.error(f"Gemini HTTP {r.status}: {err_body[:200]}")
+        except asyncio.TimeoutError:
+            logger.warning("Gemini timed out")
         except Exception as e:
-            logger.debug(f"Gemini: {e}")
+            logger.error(f"Gemini exception: {e}")
 
+    logger.error(f"ai_ask: ALL backends failed. Groq key set={bool(GROQ_API_KEY)}, Gemini key set={bool(GEMINI_API_KEY)}")
     return fallback
 
 # ═══════════════════════════════════════════════════════════════
@@ -733,10 +734,21 @@ def narrative_from_news(headlines: List[str]) -> List[str]:
 # FULL TOKEN SCAN
 # ═══════════════════════════════════════════════════════════════
 async def full_token_scan(address: str) -> Dict:
+    # Use gather with individual timeouts so GoPlus/orders can't block the whole scan
+    async def _safe(coro, default, name=""):
+        try:
+            return await asyncio.wait_for(coro, timeout=12)
+        except asyncio.TimeoutError:
+            logger.warning(f"full_token_scan: {name} timed out — using default")
+            return default
+        except Exception as e:
+            logger.warning(f"full_token_scan: {name} failed: {e}")
+            return default
+
     pairs, sec, orders = await asyncio.gather(
-        dex_pairs_by_token(address),
-        goplus_check(address),
-        dex_token_orders(address),
+        _safe(dex_pairs_by_token(address), [],  "dex_pairs"),
+        _safe(goplus_check(address),        {},  "goplus"),
+        _safe(dex_token_orders(address),    [],  "dex_orders"),
     )
     if not pairs:
         result = await dex_search_pairs(address)
@@ -1062,7 +1074,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v19*\n"
+        f"\U0001f985 *KAYO BRAIN v19b*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1099,7 +1111,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v19 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v19b — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -1533,9 +1545,23 @@ async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     is_crypto = _is_crypto_q(q)
     is_casual = _is_casual_q(q)
 
+    import random as _rand
+    _CASUAL_FALLBACKS = [
+        "haha yeah that checks out 😂",
+        "lol true dat",
+        "gm ser 🌅 market's wild today",
+        "vibing — what's good?",
+        "haha yeah same energy over here",
+        "lol no cap 😭",
+        "yo 👋 what's the move?",
+        "facts 🤝",
+        "based ngl",
+        "haha 💀 real ones know",
+    ]
     if is_casual:
-        prompt = f"The user said: {q}\n\nReply like a chill, witty friend. Short (1-2 sentences). No crypto unless asked."
-        ans = await ai_ask(prompt, max_tokens=160, inject_market=False)
+        prompt = f"The user said: {q}\n\nReply like a chill, witty friend. Short (1-2 sentences). No crypto unless asked. Plain text only, no markdown."
+        ans = await ai_ask(prompt, max_tokens=160, inject_market=False,
+                           fallback=_rand.choice(_CASUAL_FALLBACKS))
         footer = ""
     elif is_crypto:
         prompt = (
@@ -2031,7 +2057,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v19 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v19b alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2266,7 +2292,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v19 STATUS*\n"
+        f"⚙️ *KAYO BRAIN v19b STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -2610,7 +2636,13 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                 )
                 add_xp(uid, 5)
             except Exception as _ca_err:
-                logger.warning(f"CA auto-scan error: {_ca_err}")
+                logger.error(f"CA auto-scan error for {ca}: {_ca_err}", exc_info=True)
+                try:
+                    await scanning_msg.edit_text(
+                        f"\u274c Scan failed for this token. Try `/scan {ca}` instead."
+                    )
+                except Exception:
+                    pass
             return
 
     # ── 2. Only reply in private chat or if bot is mentioned in group ──
@@ -3840,7 +3872,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v19 ready — "
+        f"🦅 Kayo Brain v19b ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
