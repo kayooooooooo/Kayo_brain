@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v17 — PRO REBUILD                     ║
+║                    KAYO BRAIN v18b — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v17", 200
+def _root(): return "🦅 Kayo Brain v18b", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -309,22 +309,27 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         "You are Kayo, a sharp Solana alpha intelligence bot. Be direct, professional, "
         "and data-driven. No fluff, no disclaimers."
     )
-    system_msg = {
-        "role": "system",
-        "content": (
+    # Build a context-aware system message
+    # When inject_market=True: full degen alpha mode with live prices
+    # When inject_market=False: casual/general mode — no price rules to avoid confusion
+    if inject_market:
+        system_content = (
             f"{system_ctx}\n\n"
-            "IDENTITY: You are Kayo — a sharp, witty Solana alpha intelligence and web3 expert. "
-            "You are NOT a generic AI. You have personality: degen energy, pro knowledge, real talk.\n\n"
-            "RULES:\n"
-            "- For prices: ALWAYS use the live data in your context. Never hallucinate.\n"
-            "- For web3 terms: explain clearly with examples and a trader tip.\n"
-            "- For casual talk: be real, funny, helpful — like a smart friend. Not robotic.\n"
-            "- For alpha/calls: be sharp, cite numbers, give a verdict. No disclaimers.\n"
-            "- For non-crypto questions: answer them well — you know everything like ChatGPT.\n"
-            "- Style: concise, punchy, Telegram-optimized. Use markdown bold/italic.\n"
-            "- Tone: confident, knowledgeable, occasionally degen. Never sycophantic."
+            "You are Kayo — degen Solana alpha bot. Sharp, witty, real.\n"
+            "RULES: Use ONLY the live prices above. Never hallucinate prices. "
+            "Be direct, cite numbers, drop alpha like a pro trader. "
+            "Use markdown *bold* and _italic_ sparingly."
         )
-    }
+    else:
+        system_content = (
+            "You are Kayo — a sharp, funny, knowledgeable friend on Telegram. "
+            "You know everything: crypto, web3, sports, life, pop culture. "
+            "When talking casually: be warm, human, short. "
+            "When explaining things: be clear and helpful. "
+            "Never be robotic. Never pad replies. "
+            "Use plain text — avoid heavy markdown unless needed."
+        )
+    system_msg = {"role": "system", "content": system_content}
 
     if GROQ_API_KEY:
         for model in GROQ_MODELS:
@@ -1060,7 +1065,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v17*\n"
+        f"\U0001f985 *KAYO BRAIN v18b*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1097,7 +1102,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v17 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v18b — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -1534,13 +1539,18 @@ async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ans = await ai_ask(prompt, max_tokens=400, inject_market=False)
         footer = ""
 
+    if not ans or not ans.strip():
+        ans = "Hmm, brain froze. Try again?"
     try:
         await msg.edit_text(
             f"\U0001f9e0 *Kayo*\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{ans}{footer}",
-            parse_mode="Markdown"
+            parse_mode="Markdown",
+            disable_web_page_preview=True
         )
     except Exception:
-        await msg.edit_text(f"{ans}{footer}")
+        import re as _re2
+        plain_ans = _re2.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', ans)
+        await msg.edit_text(f"{plain_ans.strip() or ans}{footer}")
 
 async def sentiment_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     msg = await u.message.reply_text("📊 *Reading market sentiment...*", parse_mode="Markdown")
@@ -2247,7 +2257,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v17 STATUS*\n"
+        f"⚙️ *KAYO BRAIN v18b STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -2624,7 +2634,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     # ── 2. Only reply in private chat or if bot is mentioned in group ──
     is_private = chat.type == "private"
-    bot_username = (await u.get_bot().get_me()).username if hasattr(u, 'get_bot') else ""
+    bot_username = c.bot.username if c.bot else ""
     is_mentioned = f"@{bot_username}" in text if bot_username else False
     is_reply_to_bot = (
         u.message.reply_to_message and
@@ -2689,10 +2699,18 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
         )
         reply = await ai_ask(prompt, fallback="hmm, say more?", max_tokens=380, inject_market=False)
 
+    if not reply or not reply.strip():
+        await u.message.reply_text("yo, say that again? 🤔")
+        return
+    # Try markdown; if Telegram rejects it (parse error), send as plain text
     try:
-        await u.message.reply_text(reply, parse_mode="Markdown")
+        await u.message.reply_text(reply, parse_mode="Markdown",
+                                   disable_web_page_preview=True)
     except Exception:
-        await u.message.reply_text(reply)
+        # Strip markdown and send plain
+        import re as _re
+        plain = _re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', reply)
+        await u.message.reply_text(plain.strip() or reply)
 
 # ═══════════════════════════════════════════════════════════════
 # BACKGROUND SCANNERS
@@ -3448,7 +3466,7 @@ async def bg_narrative_news_scanner(app: Application):
                     b1h   = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
                     s1h   = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
                     v24h  = float((p.get("volume") or {}).get("h24", 0) or 0)
-                    if liq < 3000 or fdv < 10_000 or fdv > 20_000_000: continue
+                    if liq < 3000 or fdv < 10_000 or fdv > 500_000: continue  # hard $500k cap
                     buy_pct = b1h / max(b1h + s1h, 1) * 100
                     # Score: narrative momentum
                     score = 0
@@ -3457,6 +3475,8 @@ async def bg_narrative_news_scanner(app: Application):
                     if ch6h > 50:  score += 25
                     if buy_pct > 65: score += 20
                     if v24h > 50_000: score += 15
+                    # Buy-only: skip if sell pressure dominant
+                    if buy_pct < 52: continue
                     if score >= 35:
                         candidates.append((score, addr, p))
 
@@ -3489,22 +3509,26 @@ async def bg_narrative_news_scanner(app: Application):
                         fallback=""
                     )
 
+                    # Skip if anti-spam cooldown
+                    if addr in dropped_calls and time.time() - dropped_calls[addr].get("time",0) < 21600:
+                        continue
+                    bp_arrow = "\U0001f7e2" if buy_pct > 60 else "\U0001f534" if buy_pct < 40 else "\u26aa"
                     msg_text = (
-                        f"📖 *NARRATIVE ALERT — #{nar.upper()}*\n"
+                        f"\U0001f4d6 *NARRATIVE ALERT — #{nar.upper()}*\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"*${sym}* — _{name}_\n"
-                        f"MCap: `{_usd(fdv)}`  Liq: `{_usd(liq)}`\n"
+                        f"\U0001f4a0 MCap: `{_usd(fdv)}`  Liq: `{_usd(liq)}`\n"
                         f"1h: {_pct(ch1h)}  6h: {_pct(ch6h)}\n"
-                        f"Buys/Sells: {b1h}/{s1h}  →  {buy_pct:.0f}% buys\n\n"
-                        f"📰 *Trending news:*\n"
+                        f"{bp_arrow} Buys/Sells: {b1h}/{s1h}  →  {buy_pct:.0f}% buys\n\n"
+                        f"\U0001f4f0 *Trending news:*\n"
                         + "\n".join([f"  • _{h[:70]}_" for h in rel_headlines[:2]])
                         + f"\n\n`{addr}`"
                     )
-                    if ai: msg_text += f"\n\n🧠 _{ai}_"
+                    if ai: msg_text += f"\n\n\U0001f9e0 _{ai}_"
 
                     if GROUP_CHAT_ID != 0:
                         try:
-                            await app.bot.send_message(
+                            nar_msg_sent = await app.bot.send_message(
                                 chat_id=GROUP_CHAT_ID,
                                 text=msg_text,
                                 parse_mode="Markdown",
@@ -3512,6 +3536,17 @@ async def bg_narrative_news_scanner(app: Application):
                                 disable_web_page_preview=True,
                             )
                             logger.info(f"[NARRATIVE] ${sym} #{nar}")
+                            dropped_calls[addr] = {
+                                "sym": sym, "name": name,
+                                "entry_price": float(p.get("priceUsd",0) or 0),
+                                "mcap_entry": fdv,
+                                "time": time.time(),
+                                "alert_type": "narrative",
+                                "msg_id": nar_msg_sent.message_id,
+                                "chat_id": GROUP_CHAT_ID,
+                                "alerted_10x": False, "alerted_5x": False, "alerted_rug": False,
+                            }
+                            asyncio.create_task(_save())
                             await asyncio.sleep(3)
                         except Exception as e:
                             logger.warning(f"narrative alert: {e}")
@@ -3534,33 +3569,59 @@ async def bg_trending_metas_scanner(app: Application):
                 await asyncio.sleep(60); continue
             last_run = now
 
+            # Get trending metas narrative names — used to find sub-$500k tokens IN those metas
             metas = await dex_trending_metas()
-            if metas and GROUP_CHAT_ID != 0:
-                top5  = metas[:5]
-                lines = ["🔥 *TRENDING METAS UPDATE*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
-                for m in top5:
-                    name  = m.get("name", "?")
-                    mcap  = float(m.get("marketCap", 0) or 0)
-                    c1h   = float((m.get("marketCapChange") or {}).get("h1", 0) or 0)
-                    c24h  = float((m.get("marketCapChange") or {}).get("h24", 0) or 0)
-                    lines.append(f"• *{name}*  MCap: `{_usd(mcap)}`  1h: {_pct(c1h)}  24h: {_pct(c24h)}")
-                nar_names = [m.get("name", "") for m in top5]
-                ai = await ai_ask(
-                    f"Top trending metas right now: {nar_names}. "
-                    "With the current market conditions (live data in context), "
-                    "which meta has the strongest momentum, what's driving it, "
-                    "and what specific type of Solana token should a degen be hunting in it? "
-                    "3 sentences max, be precise.",
-                    fallback="",
-                    inject_market=True
+            if not metas or GROUP_CHAT_ID == 0:
+                await asyncio.sleep(60); continue
+
+            # Only post metas digest if we have actionable tokens under $500k in the meta
+            # (The trending digest of $36B coins is useless for degen trading — skip it)
+            meta_names = [m.get("name","?") for m in metas[:6]]
+            nar_slugs  = [m.get("slug", m.get("name","")).lower() for m in metas[:6]]
+
+            # Search for sub-$500k tokens in each trending meta
+            meta_finds = []
+            for slug in nar_slugs[:4]:
+                kws_meta = NARRATIVES.get(slug, [slug])
+                pairs_m  = await dex_multi_search([f"solana {kw}" for kw in kws_meta[:2]])
+                for addr_m, p_m in pairs_m.items():
+                    fdv_m  = float(p_m.get("fdv", 0) or 0)
+                    liq_m  = float((p_m.get("liquidity") or {}).get("usd", 0) or 0)
+                    ch1h_m = float((p_m.get("priceChange") or {}).get("h1", 0) or 0)
+                    b1h_m  = int(((p_m.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
+                    s1h_m  = int(((p_m.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
+                    bp_m   = b1h_m / max(b1h_m + s1h_m, 1) * 100
+                    sym_m  = (p_m.get("baseToken") or {}).get("symbol","?")
+                    if fdv_m > 500_000 or fdv_m < 5_000: continue  # HARD $500k cap
+                    if liq_m < 2000: continue
+                    if bp_m < 55: continue  # buy-only
+                    if ch1h_m < 5: continue
+                    meta_finds.append((ch1h_m, slug, sym_m, fdv_m, liq_m, bp_m))
+
+            if not meta_finds:
+                # No actionable sub-$500k tokens in trending metas — skip posting
+                logger.info("[METAS] No sub-$500k tokens found in trending metas this run")
+            else:
+                meta_finds.sort(reverse=True)
+                ai_meta = await ai_ask(
+                    f"Trending metas: {meta_names[:4]}. "
+                    f"Sub-$500k degen plays in these metas: "
+                    + ", ".join(f"${s[2]} (#{s[1]}, 1h {s[0]:+.0f}%)" for s in meta_finds[:3])
+                    + ". Which meta/token has the best momentum for a quick degen flip? "
+                    "2 sentences, be direct.",
+                    fallback="", inject_market=True
                 )
-                if ai: lines.append(f"\n🧠 _{ai}_")
+                meta_lines = ["\U0001f525 *TRENDING META — DEGEN PLAYS* _(sub-$500k only)_\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+                for ch, slug_l, sym_l, fdv_l, liq_l, bp_l in meta_finds[:4]:
+                    meta_lines.append(f"• *${sym_l}* #{slug_l.upper()}  MCap:`{_usd(fdv_l)}`  1h:{_pct(ch)}  Buy:{bp_l:.0f}%")
+                if ai_meta: meta_lines.append(f"\n\U0001f9e0 _{ai_meta}_")
                 try:
                     await app.bot.send_message(
                         chat_id=GROUP_CHAT_ID,
-                        text="\n".join(lines),
+                        text="\n".join(meta_lines),
                         parse_mode="Markdown",
                     )
+                    logger.info(f"[METAS] Posted {len(meta_finds)} sub-$500k meta plays")
                 except Exception as e:
                     logger.warning(f"metas post: {e}")
         except Exception as e:
@@ -3784,7 +3845,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v17 ready — "
+        f"🦅 Kayo Brain v18b ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
