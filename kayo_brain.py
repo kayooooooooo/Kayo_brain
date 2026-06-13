@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v18d — PRO REBUILD                     ║
+║                    KAYO BRAIN v19 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v18d", 200
+def _root(): return "🦅 Kayo Brain v19", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -990,32 +990,29 @@ def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
 
 def scan_buttons(addr: str, sym: str = "", pair_addr: str = "") -> InlineKeyboardMarkup:
     """
-    All trading links open as Telegram DApps (t.me webview links where available).
-    Chart opens inline — no DexScreener redirect needed.
+    Row 1 — Charts: DexScreener DApp (main) + GMGN chart DApp
+    Row 2 — Trade: BullX Neo DApp + Photon DApp
+    Row 3 — Trade: Banana Gun DApp + Trojan DApp
+    All links are Telegram DApp (t.me) or Telegram WebApp — no plain browser links.
     """
-    label = f"\U0001f4ca {sym} Chart" if sym else "\U0001f4ca Chart"
     dex_pair = pair_addr or addr
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton(label, callback_data=f"chart:{addr}"),
-            InlineKeyboardButton("\U0001f30e DexScreener", url=f"https://dexscreener.com/solana/{dex_pair}"),
+            # DexScreener — opens as Telegram DApp/WebApp (main chart)
+            InlineKeyboardButton("\U0001f4ca DexScreener", url=f"https://t.me/dexscreener_bot?start={addr}"),
+            # GMGN chart — Telegram Mini App
+            InlineKeyboardButton("\U0001f438 GMGN Chart", url=f"https://t.me/gmgn_ai_sol_bot?start=chart_sol_{addr}"),
         ],
         [
-            # BullX Neo — native Telegram DApp
-            InlineKeyboardButton("\U0001f319 BullX", url=f"https://t.me/BullxNeoBot?start=access_ref_YourRef_snipe_{addr}"),
-            # Photon — Telegram DApp version
+            # BullX Neo — native Telegram DApp (clean link, no placeholder ref)
+            InlineKeyboardButton("\U0001f319 BullX", url=f"https://t.me/BullxNeoBot?start=snipe_{addr}"),
+            # Photon — Telegram DApp
             InlineKeyboardButton("\U0001f52b Photon", url=f"https://t.me/PhotonSolBot?start={addr}"),
         ],
         [
-            # Banana Gun — native Telegram bot, DApp-style
+            # Banana Gun — native Telegram bot
             InlineKeyboardButton("\U0001f34c Banana", url=f"https://t.me/BananaGunSolana_bot?start=snipe_{addr}"),
-            # GMGN — Telegram Mini App
-            InlineKeyboardButton("\U0001f438 GMGN", url=f"https://t.me/GMGN_sol_bot?start={addr}"),
-        ],
-        [
-            # Birdeye — web but best chart data
-            InlineKeyboardButton("\U0001f985 Birdeye", url=f"https://birdeye.so/token/{addr}?chain=solana"),
-            # DEX trade via Trojan (Telegram DApp)
+            # Trojan — Telegram DApp
             InlineKeyboardButton("\U0001f5e1 Trojan", url=f"https://t.me/hector_trojanbot?start=snipe-SOL-{addr}"),
         ],
     ])
@@ -1065,7 +1062,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v18d*\n"
+        f"\U0001f985 *KAYO BRAIN v19*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1102,7 +1099,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v18d — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v19 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -1201,9 +1198,13 @@ async def runners_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         and float((p.get("liquidity") or {}).get("usd", 0) or 0) >= 1500
     ]
     pairs.sort(key=lambda p: float((p.get("priceChange") or {}).get("h1", 0) or 0), reverse=True)
-    top   = [p for p in pairs if float((p.get("priceChange") or {}).get("h1", 0) or 0) > 5][:10]
+    top   = [
+        p for p in pairs
+        if float((p.get("priceChange") or {}).get("h1", 0) or 0) > 5
+        and float(p.get("fdv", 0) or 0) > 0   # skip ghost/zero-mcap entries
+    ][:10]
     if not top:
-        await msg.edit_text("😴 No significant runners right now."); return
+        await msg.edit_text("😴 No sub-$500k runners right now."); return
     add_xp(u.effective_user.id, 3)
     lines = ["🏃 *TOP SOLANA RUNNERS — 1H*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
     for i, p in enumerate(top, 1):
@@ -2030,7 +2031,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v15 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v19 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2221,17 +2222,8 @@ async def chart_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if chart_source:
         caption += f"\n\n_Chart via {chart_source}_"
 
-    # Buttons
-    markup = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🌐 DexScreener", url=dex_url),
-            InlineKeyboardButton("🦅 Birdeye", url=f"https://birdeye.so/token/{addr}?chain=solana"),
-        ],
-        [
-            InlineKeyboardButton("🔫 Photon", url=f"https://photon-sol.tinyastro.io/en/lp/{addr}"),
-            InlineKeyboardButton("🌙 BullX", url=f"https://bullx.io/terminal?chainId=1399811149&address={addr}"),
-        ],
-    ])
+    # Buttons — DApp only (DexScreener DApp + GMGN chart + all trading DApps)
+    markup = scan_buttons(addr, sym, pair_addr)
 
     add_xp(u.effective_user.id, 2)
 
@@ -2274,7 +2266,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v18d STATUS*\n"
+        f"⚙️ *KAYO BRAIN v19 STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -2546,50 +2538,15 @@ async def handle_chart_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
         f"`{addr}`"
     )
 
-    markup = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("🌐 DexScreener", url=dex_url),
-            InlineKeyboardButton("🦅 Birdeye", url=f"https://birdeye.so/token/{addr}?chain=solana"),
-        ],
-        [
-            InlineKeyboardButton("🔫 Photon", url=f"https://photon-sol.tinyastro.io/en/lp/{addr}"),
-            InlineKeyboardButton("🌙 BullX", url=f"https://bullx.io/terminal?chainId=1399811149&address={addr}"),
-        ],
-    ])
+    # Use the unified scan_buttons which has DexScreener DApp + GMGN chart + all DApp trading links
+    markup = scan_buttons(addr, sym, pair_addr)
 
-    # Try chart images
-    chart_url = None
-    chart_source = ""
-    chart_candidates = [
-        (f"https://io.dexscreener.com/dex/chart/amm/v3/solana/{pair_addr}?theme=dark&interval=15&baseToken={addr}", "DexScreener"),
-        (f"https://io.dexscreener.com/dex/chart/amm/v2/solana/{pair_addr}?theme=dark&interval=15&baseToken={addr}", "DexScreener"),
-        (f"https://cache.defined.fi/charts/{addr}?resolution=15&networkId=1399811149", "Defined.fi"),
-    ]
-    async with aiohttp.ClientSession() as s:
-        for url, src in chart_candidates:
-            try:
-                async with s.head(url, timeout=aiohttp.ClientTimeout(total=5),
-                                  headers={"User-Agent": "Mozilla/5.0"}) as r:
-                    ct = r.headers.get("content-type", "")
-                    if r.status == 200 and "image" in ct:
-                        chart_url = url; chart_source = src; break
-            except Exception:
-                continue
-
-    if chart_url:
-        cap = caption + f"\n\n_Chart via {chart_source}_"
-        try:
-            await query.message.reply_photo(photo=chart_url, caption=cap,
-                                            parse_mode="Markdown", reply_markup=markup)
-            return
-        except Exception as e:
-            logger.debug(f"chart photo: {e}")
-
-    # Fallback: stats card with links
+    # Send stats card — tap DexScreener or GMGN Chart button to open chart in Telegram DApp
     await query.message.reply_text(
-        f"📊 *${sym} CHART*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"_Image not available — open chart via links below._\n\n" + caption,
-        parse_mode="Markdown", reply_markup=markup, disable_web_page_preview=True
+        caption,
+        parse_mode="Markdown",
+        reply_markup=markup,
+        disable_web_page_preview=True,
     )
 
 
@@ -2621,33 +2578,40 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     group_messages.append({"uid": uid, "text": text, "time": time.time()})
     if len(group_messages) > 300: group_messages.pop(0)
 
-    # ── 1. CA auto-scan ───────────────────────────────────────
+    # ── 1. CA auto-scan — full deep scan (same as /scan command) ────
     if get_setting(uid, "autoresponder", True):
         for ca in extract_cas(text)[:1]:
-            pairs = await dex_pairs_by_token(ca)
-            if pairs:
-                p     = pairs[0]
-                sym   = p.get("baseToken", {}).get("symbol", "???")
-                price = float(p.get("priceUsd", 0) or 0)
-                fdv   = float(p.get("fdv", 0) or 0)
-                liq   = float((p.get("liquidity") or {}).get("usd", 0) or 0)
-                ch1h  = float((p.get("priceChange") or {}).get("h1", 0) or 0)
-                ch5m  = float((p.get("priceChange") or {}).get("m5", 0) or 0)
-                b1h   = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
-                s1h   = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
-                bp    = b1h / max(b1h + s1h, 1) * 100
-                press = "\U0001f7e2 BUYING" if bp > 60 else "\U0001f534 SELLING" if bp < 40 else "\u2696\ufe0f MIXED"
-                await u.message.reply_text(
-                    f"\u26a1 *${sym}*  {press}\n"
-                    f"\U0001f4b5 Price: {_price(price)}  MCap: `{_usd(fdv)}`\n"
-                    f"\U0001f30a Liq: `{_usd(liq)}`  1h: {_pct(ch1h)}  5m: {_pct(ch5m)}\n"
-                    f"\U0001f504 Buys/Sells (1h): {b1h} / {s1h}\n"
-                    f"`{ca}`",
-                    parse_mode="Markdown",
-                    reply_markup=scan_buttons(ca, sym),
+            try:
+                scanning_msg = await u.message.reply_text(
+                    "\U0001f50d *Scanning...*", parse_mode="Markdown"
                 )
-                add_xp(uid, 1)
-                return
+                t = await full_token_scan(ca)
+                if t.get("error"):
+                    await scanning_msg.edit_text(f"\u274c {t['error']}")
+                    return
+                # AI verdict — same as /scan
+                ai_verdict = await ai_ask(
+                    f"Solana token ${t['sym']} — MCap {_usd(t['mcap'])}, liq {_usd(t['liq'])}, "
+                    f"age {_age(t['created'])}, 5m {_pct(t['ch5m'])}, 1h {_pct(t['ch1h'])}, "
+                    f"24h {_pct(t['ch24h'])}, buy ratio {t['buy_pct']:.0f}%, vol spike {t['vol_spike']:.1f}x, "
+                    f"momentum {t['mscore']}/100, risk {t['risk_score']}/100, "
+                    f"narrative #{t['narrative']}, honeypot={t['is_honeypot']}, lp_locked={t['lp_locked']}. "
+                    "Give a sharp alpha verdict: is this worth aping right now? "
+                    "Call out any red flags. 2-3 direct sentences.",
+                    fallback="",
+                    inject_market=True
+                )
+                await scanning_msg.delete()
+                await u.message.reply_text(
+                    build_scan_card(t, ai_verdict),
+                    parse_mode="Markdown",
+                    reply_markup=scan_buttons(ca, t["sym"]),
+                    disable_web_page_preview=True,
+                )
+                add_xp(uid, 5)
+            except Exception as _ca_err:
+                logger.warning(f"CA auto-scan error: {_ca_err}")
+            return
 
     # ── 2. Only reply in private chat or if bot is mentioned in group ──
     is_private = chat.type == "private"
@@ -3065,13 +3029,23 @@ async def bg_followup_tracker(app: Application):
                 # ── Rug / dump alert ─────────────────────────────────────
                 elif (mult < 0.15 or liq_now < 500 or ch24h_now < -80) and not info.get("alerted_rug"):
                     rug_reason = "liquidity pulled" if liq_now < 500 else f"price down {(1-mult)*100:.0f}% from call"
+                    mcap_entry = info.get("mcap_entry", 0)
+                    # Estimate current mcap from price multiple × entry mcap
+                    mcap_now   = mcap_entry * mult if mcap_entry > 0 else 0
+                    mcap_drop_pct = (1 - mult) * 100 if mult < 1 else 0
+                    liq_ratio_now = (liq_now / max(mcap_now, 1) * 100) if mcap_now > 0 else 0
                     msg = (
                         f"\U0001f6a8 *RUG ALERT — ${sym}*\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"Kayo flagged *${sym}* {age_since} ago. It just rugged — {rug_reason}.\n"
-                        f"Entry was `{_price(entry)}` \u2014 now `{_price(cur_price)}`\n"
-                        f"Liq remaining: `{_usd(liq_now)}`\n"
-                        f"If you got in early, always set a stop loss. GG if you exited. \U0001f64f\n"
+                        f"Kayo flagged *${sym}* {age_since} ago — {rug_reason}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"\U0001f4b5 Price:  `{_price(entry)}` \u2192 `{_price(cur_price)}`  ({_pct((mult-1)*100)})\n"
+                        + (f"\U0001f4a0 MCap:   `{_usd(mcap_entry)}` \u2192 `{_usd(mcap_now)}`  (\u2193{mcap_drop_pct:.0f}%)\n" if mcap_entry > 0 else "")
+                        + f"\U0001f30a Liq:    `{_usd(liq_now)}`"
+                        + (f"  ({liq_ratio_now:.1f}% of MCap)" if mcap_now > 0 else "")
+                        + f"\n\U0001f4c8 24h:    {_pct(ch24h_now)}\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"\U0001f64f GG if you exited early. Always set a stop loss.\n"
                         f"`{addr}`"
                     )
                     try:
@@ -3866,7 +3840,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v18d ready — "
+        f"🦅 Kayo Brain v19 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
