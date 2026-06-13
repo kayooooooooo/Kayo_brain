@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v18c — PRO REBUILD                     ║
+║                    KAYO BRAIN v18d — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v18c", 200
+def _root(): return "🦅 Kayo Brain v18d", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1065,7 +1065,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v18c*\n"
+        f"\U0001f985 *KAYO BRAIN v18d*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1102,7 +1102,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v18c — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v18d — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -1193,7 +1193,13 @@ async def runners_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     msg = await u.message.reply_text("🏃 *Finding top runners...*", parse_mode="Markdown")
     QUERIES = ["solana meme", "solana ai", "solana new", "solana gaming", "solana pump", "solana defi"]
     pairs_map = await dex_multi_search(QUERIES)
-    pairs = [p for addr, p in pairs_map.items() if addr not in blacklist]
+    pairs = [
+        p for addr, p in pairs_map.items()
+        if addr not in blacklist
+        and float(p.get("fdv", 0) or 0) <= 500_000   # hard $500k cap
+        and float(p.get("fdv", 0) or 0) >= 5_000     # no ghost tokens
+        and float((p.get("liquidity") or {}).get("usd", 0) or 0) >= 1500
+    ]
     pairs.sort(key=lambda p: float((p.get("priceChange") or {}).get("h1", 0) or 0), reverse=True)
     top   = [p for p in pairs if float((p.get("priceChange") or {}).get("h1", 0) or 0) > 5][:10]
     if not top:
@@ -1342,7 +1348,7 @@ async def trending_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not metas:
         await msg.edit_text("❌ Could not fetch trending metas."); return
     add_xp(u.effective_user.id, 2)
-    lines = ["🔥 *TRENDING METAS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    lines = ["🔥 *TRENDING METAS* _(narrative categories, not coins)_\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n_Use /gems or /runners for sub-$500k degen plays_"]
     for m in metas[:8]:
         name   = m.get("name", "?")
         mcap   = float(m.get("marketCap", 0) or 0)
@@ -1366,8 +1372,13 @@ async def narrative_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     pairs = await dex_meta_tokens(slug)
     if not pairs:
         pairs = await dex_search_pairs(f"solana {slug}")
-    pairs = [p for p in pairs if p.get("chainId") == "solana"
-             and float((p.get("liquidity") or {}).get("usd", 0) or 0) > 2000]
+    pairs = [
+        p for p in pairs
+        if p.get("chainId") == "solana"
+        and float((p.get("liquidity") or {}).get("usd", 0) or 0) > 2000
+        and float(p.get("fdv", 0) or 0) <= 500_000   # hard $500k cap
+        and float(p.get("fdv", 0) or 0) >= 3_000
+    ]
     pairs.sort(key=lambda p: float((p.get("volume") or {}).get("h24", 0) or 0), reverse=True)
     if not pairs:
         await msg.edit_text(f"❌ No coins found for #{slug}."); return
@@ -2263,7 +2274,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v18c STATUS*\n"
+        f"⚙️ *KAYO BRAIN v18d STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -3855,7 +3866,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v18c ready — "
+        f"🦅 Kayo Brain v18d ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
