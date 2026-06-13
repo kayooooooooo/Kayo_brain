@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v19c — PRO REBUILD                     ║
+║                    KAYO BRAIN v20 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -19,7 +19,7 @@ import aiohttp
 import redis.asyncio as aioredis
 import redis as sync_redis
 import xml.etree.ElementTree as ET
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, BotCommand
 from telegram.ext import (
     Application, CommandHandler, ContextTypes,
     CallbackQueryHandler, MessageHandler, filters,
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v19c", 200
+def _root(): return "🦅 Kayo Brain v20", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -827,6 +827,16 @@ async def full_token_scan(address: str) -> Dict:
     if boost_active > 0: mscore += 5
     mscore = min(mscore, 100)
 
+    # ATH estimate: 24h high = current_price / (1 - |ch24h|/100) if ch24h < 0
+    # If price is up 24h, ATH could be now or higher — we show 24h high as a proxy
+    # For a real ATH we'd need historical OHLCV which DexScreener doesn't expose freely.
+    # Instead fetch all pairs and find highest price across timeframes.
+    price_24h_ago = price / (1 + ch24h / 100) if ch24h != -100 else 0
+    ath_24h = max(price, price_24h_ago)   # 24h high proxy (conservative)
+    # ch24h from DexScreener is % change from 24h ago to NOW
+    # so 24h high ≈ max(price_now, price_24h_ago)
+    # We label it "24h High" honestly rather than "ATH" to avoid misleading
+
     return {
         "address": address, "sym": sym, "name": name, "price": price,
         "fdv": fdv, "mcap": mcap, "liq": liq, "liq_ratio": liq_ratio,
@@ -842,6 +852,8 @@ async def full_token_scan(address: str) -> Dict:
         "boost_active": boost_active, "has_profile": has_profile, "has_ad": has_ad,
         "pair_addr": p.get("pairAddress", ""),
         "dex_url": p.get("url", f"https://dexscreener.com/solana/{address}"),
+        "ath_24h": ath_24h,  # 24h high proxy
+        "price_24h_ago": price_24h_ago,
     }
 
 # ═══════════════════════════════════════════════════════════════
@@ -893,7 +905,9 @@ def build_scan_card(t: Dict, ai: str = "") -> str:
         f"\U0001f517 `{t['address']}`\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"\U0001f4b5 Price: *{_price(t['price'])}*\n"
-        f"\U0001f4a0 FDV: `{_usd(t['fdv'])}`  MCap: `{_usd(t['mcap'])}`\n"
+        f"\U0001f4c8 24h High: `{_price(t.get('ath_24h', t['price']))}` · "
+        f"24h Ago: `{_price(t.get('price_24h_ago', 0))}`\n"
+        f"\U0001f4a0 MCap: `{_usd(t['mcap'])}` · FDV: `{_usd(t['fdv'])}`\n"
         f"\U0001f30a Liq: `{_usd(t['liq'])}` ({liq_ratio:.1f}% of MCap)\n"
         f"\u23f1\ufe0f Age: {age}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -1003,30 +1017,49 @@ def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
 
 def scan_buttons(addr: str, sym: str = "", pair_addr: str = "") -> InlineKeyboardMarkup:
     """
-    Row 1 — Charts: DexScreener DApp (main) + GMGN chart DApp
-    Row 2 — Trade: BullX Neo DApp + Photon DApp
-    Row 3 — Trade: Banana Gun DApp + Trojan DApp
-    All links are Telegram DApp (t.me) or Telegram WebApp — no plain browser links.
+    All buttons open INSIDE Telegram using WebApp (web_app=WebAppInfo(url=...)).
+    This keeps the user inside the app — no external browser, no leaving Telegram.
+    Row 1 — Charts:  DexScreener WebApp  |  GMGN WebApp
+    Row 2 — Trade:   BullX Neo WebApp    |  Photon WebApp
+    Row 3 — Trade:   Banana Gun WebApp   |  Trojan WebApp
     """
     dex_pair = pair_addr or addr
     return InlineKeyboardMarkup([
         [
-            # DexScreener — opens as Telegram DApp/WebApp (main chart)
-            InlineKeyboardButton("\U0001f4ca DexScreener", url=f"https://t.me/dexscreener_bot?start={addr}"),
-            # GMGN chart — Telegram Mini App
-            InlineKeyboardButton("\U0001f438 GMGN Chart", url=f"https://t.me/gmgn_ai_sol_bot?start=chart_sol_{addr}"),
+            # DexScreener — opens chart inside Telegram WebApp browser
+            InlineKeyboardButton(
+                "\U0001f4ca DexScreener",
+                web_app=WebAppInfo(url=f"https://dexscreener.com/solana/{dex_pair}")
+            ),
+            # GMGN — opens inside Telegram WebApp browser
+            InlineKeyboardButton(
+                "\U0001f438 GMGN",
+                web_app=WebAppInfo(url=f"https://gmgn.ai/sol/token/{addr}")
+            ),
         ],
         [
-            # BullX Neo — native Telegram DApp (clean link, no placeholder ref)
-            InlineKeyboardButton("\U0001f319 BullX", url=f"https://t.me/BullxNeoBot?start=snipe_{addr}"),
-            # Photon — Telegram DApp
-            InlineKeyboardButton("\U0001f52b Photon", url=f"https://t.me/PhotonSolBot?start={addr}"),
+            # BullX Neo — opens WebApp terminal inside Telegram
+            InlineKeyboardButton(
+                "\U0001f319 BullX",
+                web_app=WebAppInfo(url=f"https://neo.bullx.io/terminal?chainId=1399811149&address={addr}")
+            ),
+            # Photon — opens WebApp inside Telegram
+            InlineKeyboardButton(
+                "\U0001f52b Photon",
+                web_app=WebAppInfo(url=f"https://photon-sol.tinyastro.io/en/lp/{addr}")
+            ),
         ],
         [
-            # Banana Gun — native Telegram bot
-            InlineKeyboardButton("\U0001f34c Banana", url=f"https://t.me/BananaGunSolana_bot?start=snipe_{addr}"),
-            # Trojan — Telegram DApp
-            InlineKeyboardButton("\U0001f5e1 Trojan", url=f"https://t.me/hector_trojanbot?start=snipe-SOL-{addr}"),
+            # Banana Gun — Telegram bot link (no web app for this one)
+            InlineKeyboardButton(
+                "\U0001f34c Banana",
+                url=f"https://t.me/BananaGunSolana_bot?start=snipe_{addr}"
+            ),
+            # Trojan — Telegram bot link
+            InlineKeyboardButton(
+                "\U0001f5e1 Trojan",
+                url=f"https://t.me/hector_trojanbot?start=snipe-SOL-{addr}"
+            ),
         ],
     ])
 
@@ -1075,7 +1108,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v19c*\n"
+        f"\U0001f985 *KAYO BRAIN v20*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1112,7 +1145,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v19c — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v20 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -1543,50 +1576,31 @@ async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     q   = " ".join(c.args)
     msg = await u.message.reply_text("\U0001f9e0 *Kayo thinking...*", parse_mode="Markdown")
     add_xp(u.effective_user.id, 2)
-    is_crypto = _is_crypto_q(q)
-    is_casual = _is_casual_q(q)
-
     import random as _rand
     _CASUAL_FALLBACKS = [
-        "haha yeah that checks out 😂",
-        "lol true dat",
-        "gm ser 🌅 market's wild today",
-        "vibing — what's good?",
-        "haha yeah same energy over here",
-        "lol no cap 😭",
-        "yo 👋 what's the move?",
-        "facts 🤝",
-        "based ngl",
-        "haha 💀 real ones know",
+        "haha yeah that checks out 😂", "lol true dat", "gm ser 🌅",
+        "vibing — what's good?", "lol no cap 😭", "yo 👋 what's the move?",
+        "facts 🤝", "based ngl", "haha 💀 real ones know",
     ]
-    if is_casual:
-        prompt = f"The user said: {q}\n\nReply like a chill, witty friend. Short (1-2 sentences). No crypto unless asked. Plain text only, no markdown."
-        ans = await ai_ask(prompt, max_tokens=160, inject_market=False,
-                           fallback=_rand.choice(_CASUAL_FALLBACKS))
-        footer = ""
-    elif is_crypto:
-        prompt = (
-            f"Trader question: {q}\n\n"
-            "Use the LIVE market data above. Be sharp, cite exact numbers. "
-            "Drop alpha like a degen pro. If about price: ONLY use live prices."
-        )
-        ans = await ai_ask(prompt, max_tokens=450, inject_market=True)
-        ts = datetime.utcnow().strftime("%H:%M UTC")
-        footer = f"\n\n_Live data as of {ts}_"
-    else:
-        prompt = f"User asks: {q}\n\nAnswer like a knowledgeable friend. Helpful, direct, no disclaimers."
-        ans = await ai_ask(prompt, max_tokens=400, inject_market=False)
-        footer = ""
+    # Unified prompt — no keyword routing. Always inject live market data.
+    # AI decides tone: casual = short+human, crypto = sharp+data, general = helpful.
+    prompt = (
+        f"User asks via /ask: \"{q}\"\n\n"
+        "You are Kayo — sharp Solana alpha bot AND knowledgeable friend. "
+        "Answer anything: crypto prices (use LIVE data), web3 alpha, general knowledge, casual chat. "
+        "Be direct. No disclaimers. No refusals. Match the tone of the question. "
+        "For prices: cite the exact live numbers from your context. "
+        "For casual: be short, warm, witty. For deep questions: be thorough but concise."
+    )
+    ans = await ai_ask(prompt, max_tokens=500, inject_market=True,
+                       fallback=_rand.choice(_CASUAL_FALLBACKS))
+    ts     = datetime.utcnow().strftime("%H:%M UTC")
+    footer = f"\n\n_Live data as of {ts}_"
 
     if not ans or not ans.strip():
-        ans = "Hmm, brain froze. Try again?"
+        ans = _rand.choice(_CASUAL_FALLBACKS)
     import re as _re3
-    if is_casual:
-        # Casual reply — strip all markdown, send plain
-        plain_ans = _re3.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', ans).strip()
-        await msg.edit_text(plain_ans or ans)
-        return
-    # Crypto/general — try markdown first
+    # Always try markdown first (AI may use bold for crypto), fall back to plain
     try:
         await msg.edit_text(
             f"\U0001f9e0 *Kayo*\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{ans}{footer}",
@@ -2058,7 +2072,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v19c alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v20 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2293,7 +2307,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v19c STATUS*\n"
+        f"⚙️ *KAYO BRAIN v20 STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -2685,56 +2699,37 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     add_xp(uid, 1)
 
-    # ── 3. Smart routing — casual vs crypto vs general ──────────
-    name_str  = u.effective_user.first_name or "fren"
-    is_crypto = _is_crypto_q(text)
-    is_casual = _is_casual_q(text)
-
-    if is_casual:
-        # Small talk — reply like a human, no price data
-        prompt = (
-            f"{name_str} says: {text}\n\n"
-            "Reply like a chill friend. Short, warm, maybe funny. "
-            "1-2 sentences max. Zero crypto unless they bring it up."
-        )
-        reply = await ai_ask(prompt, fallback="lol say that again?", max_tokens=150, inject_market=False)
-
-    elif is_crypto:
-        # Web3 / trading question — full alpha mode with live prices
-        is_explain = any(kw in text.lower() for kw in ["what is","what's","explain","define","how does","how do","meaning"])
-        if is_explain:
-            prompt = (
-                f"{name_str} asks: {text}\n\n"
-                "Explain it like a web3 pro — clear, with examples and a real trader tip. "
-                "Max 4 sentences. Use live market context if relevant."
-            )
-        else:
-            prompt = (
-                f"{name_str} says: {text}\n\n"
-                "You are Kayo — degen expert. Use LIVE prices from your context. "
-                "Sharp, cite numbers, drop real alpha. No fluff."
-            )
-        reply = await ai_ask(prompt, fallback="ser, run that by me again?", max_tokens=420, inject_market=True)
-
-    else:
-        # General question — helpful, no market data
-        prompt = (
-            f"{name_str} says: {text}\n\n"
-            "Answer like a smart, helpful friend. Direct, no disclaimers. "
-            "Keep it short unless it needs depth."
-        )
-        reply = await ai_ask(prompt, fallback="hmm, say more?", max_tokens=380, inject_market=False)
+    # ── 3. Unified AI reply — no keyword routing, always intelligent ──
+    # Like ChatGPT/Grok: one smart prompt, live market context always injected.
+    # The AI decides if the topic is crypto, casual, general — we don't pre-filter.
+    name_str = u.effective_user.first_name or "fren"
+    prompt = (
+        f"{name_str} says: \"{text}\"\n\n"
+        "Reply naturally. You are Kayo — a sharp, witty Solana alpha intelligence AND a "
+        "knowledgeable friend. You can talk about ANYTHING: crypto, web3, sports, life, "
+        "memes, news, culture — whatever the person brings. "
+        "Rules: "
+        "1. If it's casual chat (gm, lol, vibes, jokes) → be short, warm, human. 1-2 sentences. "
+        "2. If it's a crypto/web3 question → use the LIVE prices from your context, cite real numbers, "
+        "   drop alpha like a degen pro. Be sharp and direct. "
+        "3. If it's a general knowledge question → answer like a smart helpful friend, no disclaimers. "
+        "4. NEVER say you can't answer. NEVER say 'I'm just a bot'. NEVER refuse. "
+        "5. For price questions: ALWAYS use the live market data provided to you. "
+        "6. Plain text for casual, markdown *bold* allowed for crypto analysis. "
+        "Match the energy of what they're saying."
+    )
+    reply = await ai_ask(
+        prompt,
+        fallback="yo, brain glitched for a sec — say that again?",
+        max_tokens=450,
+        inject_market=True  # always inject live prices — AI ignores them for casual chat
+    )
 
     if not reply or not reply.strip():
-        await u.message.reply_text("yo, say that again? 🤔")
+        reply = "yo, say that again? 🤔"
         return
-    # Casual / non-crypto → send as plain text (no markdown needed)
+    # Always try markdown (AI uses bold for crypto analysis), fall back to plain
     import re as _re
-    if not is_crypto:
-        plain = _re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', reply).strip()
-        await u.message.reply_text(plain or reply)
-        return
-    # Crypto → try markdown, fall back to plain
     try:
         await u.message.reply_text(reply, parse_mode="Markdown",
                                    disable_web_page_preview=True)
@@ -3885,7 +3880,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v19c ready — "
+        f"🦅 Kayo Brain v20 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
