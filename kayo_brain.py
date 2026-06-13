@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v20 — PRO REBUILD                     ║
+║                    KAYO BRAIN v21 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v20", 200
+def _root(): return "🦅 Kayo Brain v21", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -297,23 +297,24 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
     # Build a context-aware system message
     # When inject_market=True: full degen alpha mode with live prices
     # When inject_market=False: casual/general mode — no price rules to avoid confusion
-    if inject_market:
-        system_content = (
-            f"{system_ctx}\n\n"
-            "You are Kayo — degen Solana alpha bot. Sharp, witty, real.\n"
-            "RULES: Use ONLY the live prices above. Never hallucinate prices. "
-            "Be direct, cite numbers, drop alpha like a pro trader. "
-            "Use markdown *bold* and _italic_ sparingly."
-        )
-    else:
-        system_content = (
-            "You are Kayo — a sharp, funny, knowledgeable friend on Telegram. "
-            "You know everything: crypto, web3, sports, life, pop culture. "
-            "For casual chat: be warm, human, short (1-2 sentences max). "
-            "For general questions: be clear, helpful, no disclaimers. "
-            "IMPORTANT: Use PLAIN TEXT ONLY — no asterisks, no underscores, no backticks, no markdown. "
-            "Just regular sentences like a human texting. Never be robotic."
-        )
+    # Single unified system prompt regardless of inject_market
+    # inject_market just controls whether live price data is prepended
+    market_block = f"{system_ctx}\n\n" if inject_market else ""
+    system_content = (
+        f"{market_block}"
+        "You are Kayo — an intelligent, witty AI living inside a Telegram group. \n"
+        "You are BOTH a Web3 alpha expert AND a knowledgeable friend. \n"
+        "PERSONALITY: Sharp, warm, real. Talks like a smart person texting — not a bot. \n"
+        "CAPABILITIES: You know crypto, DeFi, Solana, NFTs, live prices, AND sports, "
+        "pop culture, news, science, history, coding, life advice — everything. \n"
+        "TONE RULES: \n"
+        "- Casual messages (gm, vibes, jokes) → short, human, maybe funny. 1-2 sentences. \n"
+        "- Crypto/trading questions → use LIVE price data above, be sharp and cite numbers. \n"
+        "- General questions → be helpful, smart, direct. No disclaimers. \n"
+        "- NEVER say you cannot answer. NEVER say you are just a bot. NEVER refuse. \n"
+        "- Match the person's energy — if they're hyped, be hyped. If chill, be chill. \n"
+        "FORMAT: Plain text for casual. Use *bold* sparingly for crypto key numbers only."
+    )
     system_msg = {"role": "system", "content": system_content}
 
     if GROQ_API_KEY:
@@ -1108,7 +1109,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v20*\n"
+        f"\U0001f985 *KAYO BRAIN v21*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1145,7 +1146,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v20 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v21 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2072,7 +2073,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v20 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v21 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2307,7 +2308,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v20 STATUS*\n"
+        f"⚙️ *KAYO BRAIN v21 STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -2727,7 +2728,6 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     if not reply or not reply.strip():
         reply = "yo, say that again? 🤔"
-        return
     # Always try markdown (AI uses bold for crypto analysis), fall back to plain
     import re as _re
     try:
@@ -2783,25 +2783,24 @@ async def bg_main_scanner(app: Application):
                 created = int(p.get("pairCreatedAt", 0) or 0)
                 age_min = (now * 1000 - created) / 60000 if created else 9999
 
-                # ── STRICT QUALITY FILTER ──────────────────────────────────
-                # Only drop coins with real signal — no rugs, no duds
-                if liq < 3000:       continue  # too thin — easy to rug
-                if fdv < 10_000:     continue  # microscopic ghost token
-                if fdv > 500_000: continue   # hard cap $500k — pure degen zone only
+                # ── QUALITY FILTER — degen-tuned ──────────────────────────
+                if liq < 2000:    continue  # absolute floor — below this is a ghost
+                if fdv < 5_000:   continue  # microscopic ghost token
+                if fdv > 500_000: continue  # hard cap $500k
 
-                # Compute derived stats needed for filters
+                # Compute derived stats
                 avg_5m_vol = v1h / 12 if v1h > 0 else 1
                 vol_spike  = v5m / max(avg_5m_vol, 1)
                 buy_pct    = b1h / max(b1h + s1h, 1) * 100
 
-                # Weak buy interest = not ready yet
-                if buy_pct < 52: continue
+                # Need at least some buyers
+                if buy_pct < 48: continue
 
-                # Must have SOME momentum — prevent dead/stale coins
-                if ch1h < 4 and ch5m < 2 and vol_spike < 2: continue
+                # Must have ANY signal — price move OR volume spike
+                if ch1h < 3 and ch5m < 1 and vol_spike < 1.5: continue
 
-                # Skip if volume is suspiciously low (no real trading)
-                if v1h < 500: continue
+                # Skip pure ghost tokens with zero activity
+                if v1h < 200 and b1h < 5: continue
 
                 nar        = detect_narrative(f"{name} {sym}")
                 # ── Migration / rename detection ──────────────────────
@@ -2826,39 +2825,39 @@ async def bg_main_scanner(app: Application):
                 # ── DETECT ALERT TYPE ──────────────────────────────────
                 alert_type = None
 
-                # 🚀 PUMP — strong 5m breakout with buyer pressure
-                if ch5m >= 10 and b5m > s5m and v5m > 300 and buy_pct >= 58:
+                # 🚀 PUMP — 5m breakout with buyer pressure (lowered from 10% → 5%)
+                if ch5m >= 5 and b5m > s5m and v5m > 100 and buy_pct >= 55:
                     alert_type = "pump"
 
-                # 💎 GEM — low cap hidden gem with strong momentum
-                elif fdv < 500_000 and ch1h >= 25 and buy_pct >= 62 and liq >= 2500 and vol_spike >= 1.8:
+                # 💎 GEM — low cap hidden gem with momentum (lowered from 25% → 15%)
+                elif fdv < 500_000 and ch1h >= 15 and buy_pct >= 58 and liq >= 2000 and vol_spike >= 1.5:
                     alert_type = "gem"
 
-                # 🆕 NEW LAUNCH — fresh token with immediate real traction
-                elif age_min < 45 and b1h > 20 and buy_pct >= 60 and liq >= 1500 and ch1h >= 12:
+                # 🆕 NEW LAUNCH — fresh token with real traction (loosened thresholds)
+                elif age_min < 60 and b1h > 10 and buy_pct >= 55 and liq >= 1000 and ch1h >= 8:
                     alert_type = "new"
 
-                # 🔀 MIGRATION — pump.fun → Raydium or chain migration with traction
-                elif is_migrated and buy_pct >= 60 and ch1h >= 10 and liq >= 2000:
+                # 🔀 MIGRATION — pump.fun → Raydium migration with traction
+                elif is_migrated and buy_pct >= 55 and ch1h >= 8 and liq >= 1500:
                     alert_type = "migration"
 
-                # 🔄 REBRAND / RENAME — token riding a trending narrative after rename
-                elif is_rebranded and buy_pct >= 58 and ch1h >= 8 and liq >= 1500:
+                # 🔄 REBRAND — token riding trending narrative after rename
+                elif is_rebranded and buy_pct >= 55 and ch1h >= 6 and liq >= 1000:
                     alert_type = "rebrand"
 
-                # 🐳 WHALE ACCUMULATION — big vol spike, price barely moved (stealth buy)
-                elif vol_spike >= 4.0 and abs(ch5m) < 4 and b1h > 15 and buy_pct > 62:
+                # 🐳 WHALE — big vol spike, price flat (stealth accumulation)
+                elif vol_spike >= 3.0 and abs(ch5m) < 5 and b1h > 10 and buy_pct > 58:
                     alert_type = "whale"
 
-                # ⚠️ UNUSUAL ACTIVITY — anomalies that don't fit normal patterns
-                # Pattern A: Volume spike with no price move = possible coordinated buy before pump
-                elif vol_spike >= 6.0 and abs(ch5m) < 2 and abs(ch1h) < 8 and b1h > 10:
+                # ⚡ MOMENTUM — general strong momentum that doesn't fit other categories
+                elif ch1h >= 12 and ch5m >= 3 and buy_pct >= 55 and vol_spike >= 1.5:
+                    alert_type = "pump"  # label as pump — strong momentum
+
+                # ⚠️ UNUSUAL — coordinated buy before pump
+                elif vol_spike >= 4.0 and abs(ch5m) < 3 and abs(ch1h) < 10 and b1h > 8:
                     alert_type = "unusual"
-                # Pattern B: Tiny mcap token suddenly getting heavy buys — early ape zone
-                elif fdv < 100_000 and b1h > b1h * 0 and b1h >= 40 and buy_pct >= 70 and v1h > 2000:
-                    alert_type = "unusual"
-                # Pattern C: 1h momentum building with accelerating 5m (breakout incoming)
-                elif ch1h >= 15 and ch5m >= 5 and vol_spike >= 2.5 and buy_pct >= 60:
+                # Pattern B: Tiny mcap, lots of buys — early ape zone (FIXED: was `b1h > b1h*0` bug)
+                elif fdv < 100_000 and b1h >= 25 and buy_pct >= 65 and v1h > 1000:
                     alert_type = "unusual"
 
                 # NOTE: No dump alerts — degen bots only drop BUY signals.
@@ -2889,8 +2888,8 @@ async def bg_main_scanner(app: Application):
                     last_price = dropped_calls[addr].get("entry_price", 0)
                     cur_price_now = float(p.get("priceUsd", 0) or 0)
                     price_change_since = abs(cur_price_now - last_price) / max(last_price, 1e-12) * 100
-                    if now - last_dropped < 21600: continue        # 6h hard cooldown
-                    if price_change_since < 20: continue           # must have moved 20%+ to re-drop
+                    if now - last_dropped < 10800: continue        # 3h hard cooldown
+                    if price_change_since < 15: continue           # must have moved 15%+ to re-drop
 
                 # Dedup via Redis-persisted set
                 alert_id = hashlib.md5(f"{addr}:{alert_type}:{int(now/14400)}".encode()).hexdigest()[:16]  # 4h window
@@ -3164,7 +3163,7 @@ async def bg_new_launch_scanner(app: Application):
                 boost   = boost_map.get(addr, 0)
                 buy_pct = b1h / max(b1h + s1h, 1) * 100
 
-                if liq < 800 or fdv < 3000 or fdv > 500_000: continue  # hard $500k cap
+                if liq < 500 or fdv < 2000 or fdv > 500_000: continue  # hard $500k cap
 
                 # Scoring
                 score = 0
@@ -3182,7 +3181,7 @@ async def bg_new_launch_scanner(app: Application):
                 if liq / max(fdv, 1) > 0.05: score += 10
                 if b1h > 20: score += 10
 
-                if score < 35: continue
+                if score < 25: continue  # lowered threshold — more gems get through
                 if GROUP_CHAT_ID == 0: continue
 
                 # ── Anti-spam: never re-drop the same coin ─────────────
@@ -3335,14 +3334,14 @@ async def bg_established_scanner(app: Application):
                 buy_pct    = b1h / max(b1h + s1h, 1) * 100
 
                 # Must be buying, not selling
-                if buy_pct < 55: continue
+                if buy_pct < 50: continue
 
                 # Must have a real move — not just noise
                 qualifies = False
                 est_type  = None
 
                 # Pattern 1: Old coin suddenly pumping hard — classic "second wind"
-                if ch1h >= 20 and ch5m >= 5 and buy_pct >= 60 and vol_spike >= 2:
+                if ch1h >= 12 and ch5m >= 3 and buy_pct >= 55 and vol_spike >= 1.5:
                     qualifies = True; est_type = "pump"
 
                 # Pattern 2: Volume explosion on quiet coin (possible manipulation or kol call)
@@ -3880,7 +3879,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v20 ready — "
+        f"🦅 Kayo Brain v21 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
