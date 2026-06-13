@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v19b — PRO REBUILD                     ║
+║                    KAYO BRAIN v19c — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v19b", 200
+def _root(): return "🦅 Kayo Brain v19c", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -97,6 +97,7 @@ tracked_wallets: Dict[str, dict] = {}
 knowledge_base:  List[str]       = []
 reminders:       List[dict]      = []
 group_messages:  list            = []
+_ai_reply_cooldown: dict           = {}  # uid → last AI reply ts (group rate-limit)
 # BUG FIX: Use OrderedDict as a bounded ordered set so we can evict
 # the OLDEST entries (not random ones like plain set).
 seen_alert_ids:  "OrderedDict[str, int]" = OrderedDict()  # key=id, value=timestamp
@@ -1074,7 +1075,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v19b*\n"
+        f"\U0001f985 *KAYO BRAIN v19c*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1111,7 +1112,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v19b — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v19c — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2057,7 +2058,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v19b alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v19c alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2292,7 +2293,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v19b STATUS*\n"
+        f"⚙️ *KAYO BRAIN v19c STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -2645,24 +2646,36 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                     pass
             return
 
-    # ── 2. Only reply in private chat or if bot is mentioned in group ──
+    # ── 2. Smart reply gate ──────────────────────────────────────
+    # Reply to EVERYTHING — private chats, group messages, mentions.
+    # Like ChatGPT/Grok: smart enough to handle any text, no keyword gating.
+    # Skip only: other bot commands (/command) not meant for us, and very short
+    # gibberish (single chars). Apply a light rate-limit to avoid flooding groups.
     is_private = chat.type == "private"
     bot_username = c.bot.username if c.bot else ""
-    is_mentioned = (f"@{bot_username}" in text or f"@{(bot_username or '').lower()}" in text.lower()) if bot_username else False
-    is_reply_to_bot = (
-        u.message.reply_to_message and
-        u.message.reply_to_message.from_user and
-        u.message.reply_to_message.from_user.is_bot
-    )
 
-    if not is_private and not is_mentioned and not is_reply_to_bot:
-        return  # don't spam the group with AI replies to every message
-
-    # Strip bot mention from text
+    # Strip bot mention if present
     if bot_username and f"@{bot_username}" in text:
         text = text.replace(f"@{bot_username}", "").strip()
-
     if not text: return
+
+    # Skip commands that start with / — those are handled by command handlers
+    if text.startswith("/"):
+        return
+
+    # Skip single characters or pure punctuation (emoji-only reactions are fine though)
+    clean_text = text.strip()
+    if len(clean_text) < 2:
+        return
+
+    # Per-user rate limit in groups: max 1 AI reply per 6 seconds
+    # (private chats are unlimited — it's 1-on-1)
+    _now = time.time()
+    if not is_private:
+        _last = _ai_reply_cooldown.get(uid, 0)
+        if _now - _last < 6:
+            return  # silently skip — don't spam
+        _ai_reply_cooldown[uid] = _now
 
     # Show typing indicator
     try:
@@ -3872,7 +3885,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v19b ready — "
+        f"🦅 Kayo Brain v19c ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
