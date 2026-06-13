@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v18b — PRO REBUILD                     ║
+║                    KAYO BRAIN v18c — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v18b", 200
+def _root(): return "🦅 Kayo Brain v18c", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -324,10 +324,10 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         system_content = (
             "You are Kayo — a sharp, funny, knowledgeable friend on Telegram. "
             "You know everything: crypto, web3, sports, life, pop culture. "
-            "When talking casually: be warm, human, short. "
-            "When explaining things: be clear and helpful. "
-            "Never be robotic. Never pad replies. "
-            "Use plain text — avoid heavy markdown unless needed."
+            "For casual chat: be warm, human, short (1-2 sentences max). "
+            "For general questions: be clear, helpful, no disclaimers. "
+            "IMPORTANT: Use PLAIN TEXT ONLY — no asterisks, no underscores, no backticks, no markdown. "
+            "Just regular sentences like a human texting. Never be robotic."
         )
     system_msg = {"role": "system", "content": system_content}
 
@@ -1065,7 +1065,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v18b*\n"
+        f"\U0001f985 *KAYO BRAIN v18c*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1102,7 +1102,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v18b — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v18c — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -1305,7 +1305,7 @@ async def gems_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ch1h = float((p.get("priceChange") or {}).get("h1", 0) or 0)
         b1h  = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
         s1h  = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
-        if fdv > 2_000_000 or fdv < 10_000: continue
+        if fdv > 500_000 or fdv < 5_000: continue   # hard $500k cap
         if liq < 3000 or liq / max(fdv, 1) < 0.03: continue
         if ch1h < 10 or b1h < s1h: continue
         gems.append(p)
@@ -1541,6 +1541,13 @@ async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     if not ans or not ans.strip():
         ans = "Hmm, brain froze. Try again?"
+    import re as _re3
+    if is_casual:
+        # Casual reply — strip all markdown, send plain
+        plain_ans = _re3.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', ans).strip()
+        await msg.edit_text(plain_ans or ans)
+        return
+    # Crypto/general — try markdown first
     try:
         await msg.edit_text(
             f"\U0001f9e0 *Kayo*\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{ans}{footer}",
@@ -1548,8 +1555,7 @@ async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
             disable_web_page_preview=True
         )
     except Exception:
-        import re as _re2
-        plain_ans = _re2.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', ans)
+        plain_ans = _re3.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', ans)
         await msg.edit_text(f"{plain_ans.strip() or ans}{footer}")
 
 async def sentiment_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -2257,7 +2263,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v18b STATUS*\n"
+        f"⚙️ *KAYO BRAIN v18c STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -2635,7 +2641,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     # ── 2. Only reply in private chat or if bot is mentioned in group ──
     is_private = chat.type == "private"
     bot_username = c.bot.username if c.bot else ""
-    is_mentioned = f"@{bot_username}" in text if bot_username else False
+    is_mentioned = (f"@{bot_username}" in text or f"@{(bot_username or '').lower()}" in text.lower()) if bot_username else False
     is_reply_to_bot = (
         u.message.reply_to_message and
         u.message.reply_to_message.from_user and
@@ -2702,13 +2708,17 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not reply or not reply.strip():
         await u.message.reply_text("yo, say that again? 🤔")
         return
-    # Try markdown; if Telegram rejects it (parse error), send as plain text
+    # Casual / non-crypto → send as plain text (no markdown needed)
+    import re as _re
+    if not is_crypto:
+        plain = _re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', reply).strip()
+        await u.message.reply_text(plain or reply)
+        return
+    # Crypto → try markdown, fall back to plain
     try:
         await u.message.reply_text(reply, parse_mode="Markdown",
                                    disable_web_page_preview=True)
     except Exception:
-        # Strip markdown and send plain
-        import re as _re
         plain = _re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', reply)
         await u.message.reply_text(plain.strip() or reply)
 
@@ -3845,7 +3855,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v18b ready — "
+        f"🦅 Kayo Brain v18c ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
