@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v22 — PRO REBUILD                     ║
+║                    KAYO BRAIN v23 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v22", 200
+def _root(): return "🦅 Kayo Brain v23", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1154,7 +1154,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v22*\n"
+        f"\U0001f985 *KAYO BRAIN v23*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1191,7 +1191,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v22 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v23 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2118,7 +2118,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v22 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v23 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2353,7 +2353,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v22 STATUS*\n"
+        f"⚙️ *KAYO BRAIN v23 STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -3578,154 +3578,244 @@ async def bg_established_scanner(app: Application):
 
 async def bg_narrative_news_scanner(app: Application):
     """
-    Every 10min:
-    1. Fetch latest news headlines
-    2. Extract dominant narratives from headlines
-    3. Find trending metas from DexScreener
-    4. Search for Solana tokens matching those narratives
-    5. Alert on tokens with narrative momentum
-    
-    Example: FIFA World Cup headlines → search "worldcup soccer football solana" 
-             → find tokens playing the narrative → alert before latecomers notice
+    AI-DRIVEN NARRATIVE SCANNER — every 8 minutes.
+
+    The old approach (keyword dict matching) is replaced entirely.
+
+    HOW IT WORKS:
+    1. Fetch latest headlines from 5 crypto/news RSS feeds
+    2. Feed the RAW headlines to the AI — no keyword matching at all
+    3. AI reads them like a human journalist + degen caller combined
+    4. AI generates fresh DexScreener search terms from scratch based on
+       what it actually understands — not what is in a predefined list
+    5. Search DexScreener with AI-generated terms
+    6. Find Solana tokens under $500k matching the live narrative
+    7. AI connects the specific news story to the specific token
+    8. Alert to group with full context + thesis
+
+    Example (no keywords needed):
+    - Headline: "Elon Musk announces SpaceX lands on Mars in 2027"
+    - AI generates: ["mars","space","elon","rocket","spacex","musk"]
+    - Finds $MARS, $SPACE tokens on Solana with buy pressure
+    - Explains: "SpaceX Mars timeline = meme coin catalyst. $MARS at
+      $180k mcap with 67% buys is the play before CT wakes up."
     """
     await asyncio.sleep(90)
-    last_run = 0
+    last_run       = 0
+    last_headlines: List[str] = []
 
     while True:
         try:
             now = time.time()
-            if now - last_run < 600:  # 10 min
+            if now - last_run < 480:  # 8 min
                 await asyncio.sleep(30); continue
             last_run = now
 
-            # Step 1: Fetch news and extract narratives
-            items    = await fetch_news(12)
-            headlines = [i["title"] for i in items]
-            active_narratives = narrative_from_news(headlines)
+            # ── Step 1: Fetch latest news ────────────────────────────────
+            items     = await fetch_news(20)
+            headlines = [f"[{it['source']}] {it['title']}" for it in items]
+            if not headlines:
+                await asyncio.sleep(60); continue
 
-            # Step 2: Get DexScreener trending metas too
-            dex_metas = await dex_trending_metas()
-            dex_nar_names = [m.get("slug", m.get("name", "")).lower() for m in dex_metas[:5]]
-            all_narratives = list(set(active_narratives + [n for n in dex_nar_names if n]))
+            new_headlines = [h for h in headlines if h not in last_headlines]
+            if len(new_headlines) < 2:
+                await asyncio.sleep(60); continue
+            last_headlines = headlines
 
-            if not all_narratives:
-                await asyncio.sleep(30); continue
+            logger.info(f"[NARRATIVE AI] {len(new_headlines)} new headlines to process")
 
-            logger.info(f"[NARRATIVE SCANNER] Active narratives: {all_narratives}")
+            # ── Step 2: AI reads headlines and generates search terms ────
+            # Key change: AI understands the STORY, not a keyword dict
+            headlines_block = "\n".join([f"- {h}" for h in new_headlines[:15]])
 
-            # Step 3: For each narrative, find matching Solana tokens
-            for nar in all_narratives[:5]:
-                kws = NARRATIVES.get(nar, [nar])
+            ai_terms_raw = await ai_ask(
+                f"You are a crypto narrative hunter looking for Solana pump opportunities.\n"
+                f"Latest news headlines:\n{headlines_block}\n\n"
+                "Find headlines that could create a Solana meme coin or token narrative.\n"
+                "A narrative = real-world news (political event, viral moment, celebrity, "
+                "sports result, tech launch, cultural trend) that makes people create or "
+                "buy tokens with related names.\n\n"
+                "For EACH narrative you spot, output EXACTLY (one per line):\n"
+                "NARRATIVE: <short name> | TERMS: <word1>,<word2>,<word3>,<word4>,<word5> | STORY: <one sentence>\n\n"
+                "TERMS must be short words someone would use in a Solana meme coin ticker/name.\n"
+                "Example: Elon Mars news → TERMS: elon,mars,space,rocket,spacex,musk\n"
+                "Output 2-4 narratives max. If none have pump potential output: NONE\n"
+                "Do NOT explain. Output the formatted lines only.",
+                fallback="NONE",
+                max_tokens=350,
+                inject_market=False
+            )
 
-                # Find relevant headlines for this narrative
-                rel_headlines = [h for h in headlines if any(kw in h.lower() for kw in kws)]
-                if not rel_headlines: continue
+            if not ai_terms_raw or ai_terms_raw.strip().upper() == "NONE":
+                logger.info("[NARRATIVE AI] No pump narratives this cycle")
+                await asyncio.sleep(60); continue
 
-                # Search DexScreener for tokens matching this narrative
-                queries = [f"solana {kw}" for kw in kws[:3]]
+            # ── Step 3: Parse AI output ──────────────────────────────────
+            narrative_plays = []
+            for line in ai_terms_raw.strip().split("\n"):
+                line = line.strip()
+                if "NARRATIVE:" not in line: continue
+                try:
+                    parts    = line.split("|")
+                    nar_name = parts[0].replace("NARRATIVE:", "").strip()
+                    terms    = [t.strip().lower() for t in parts[1].replace("TERMS:", "").strip().split(",") if t.strip()][:6]
+                    story    = parts[2].replace("STORY:", "").strip() if len(parts) > 2 else nar_name
+                    if nar_name and terms:
+                        narrative_plays.append({"name": nar_name, "terms": terms, "story": story})
+                except Exception:
+                    continue
+
+            if not narrative_plays:
+                await asyncio.sleep(60); continue
+
+            logger.info(f"[NARRATIVE AI] Narratives found: {[p['name'] for p in narrative_plays]}")
+
+            # ── Step 4: Search DexScreener per narrative ─────────────────
+            for play in narrative_plays[:3]:
+                nar_name = play["name"]
+                terms    = play["terms"]
+                story    = play["story"]
+
+                queries   = [f"solana {t}" for t in terms[:4]]
                 pairs_map = await dex_multi_search(queries)
+                if not pairs_map: continue
 
-                # Filter + score
+                # ── Step 5: Filter — must actually match narrative terms ──
                 candidates = []
                 for addr, p in pairs_map.items():
                     if addr in blacklist: continue
-                    fdv   = float(p.get("fdv", 0) or 0)
-                    liq   = float((p.get("liquidity") or {}).get("usd", 0) or 0)
-                    ch1h  = float((p.get("priceChange") or {}).get("h1", 0) or 0)
-                    ch6h  = float((p.get("priceChange") or {}).get("h6", 0) or 0)
-                    b1h   = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
-                    s1h   = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
-                    v24h  = float((p.get("volume") or {}).get("h24", 0) or 0)
-                    if liq < 3000 or fdv < 10_000 or fdv > 500_000: continue  # hard $500k cap
-                    buy_pct = b1h / max(b1h + s1h, 1) * 100
-                    # Score: narrative momentum
-                    score = 0
-                    if ch1h > 30:  score += 30
-                    elif ch1h > 10: score += 20
-                    if ch6h > 50:  score += 25
-                    if buy_pct > 65: score += 20
-                    if v24h > 50_000: score += 15
-                    # Buy-only: skip if sell pressure dominant
-                    if buy_pct < 52: continue
-                    if score >= 35:
-                        candidates.append((score, addr, p))
+                    base    = p.get("baseToken", {})
+                    sym     = base.get("symbol", "???")
+                    name    = base.get("name", "")
+                    fdv     = float(p.get("fdv", 0) or 0)
+                    mcap    = float(p.get("marketCap", 0) or fdv)
+                    liq     = float((p.get("liquidity") or {}).get("usd", 0) or 0)
+                    ch5m    = float((p.get("priceChange") or {}).get("m5", 0) or 0)
+                    ch1h    = float((p.get("priceChange") or {}).get("h1", 0) or 0)
+                    ch6h    = float((p.get("priceChange") or {}).get("h6", 0) or 0)
+                    ch24h   = float((p.get("priceChange") or {}).get("h24", 0) or 0)
+                    b1h     = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
+                    s1h     = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
+                    v1h     = float((p.get("volume") or {}).get("h1", 0) or 0)
+                    v24h    = float((p.get("volume") or {}).get("h24", 0) or 0)
 
+                    if liq < 1500 or fdv < 5_000 or fdv > 500_000: continue
+                    buy_pct = b1h / max(b1h + s1h, 1) * 100
+                    if buy_pct < 48: continue
+
+                    # Token must actually reference the narrative in name/symbol
+                    token_text = f"{sym} {name}".lower()
+                    term_hits  = sum(1 for t in terms if t in token_text)
+                    if term_hits == 0: continue  # completely unrelated = skip
+
+                    # Score
+                    score = term_hits * 25
+                    if ch1h  > 20:  score += 30
+                    elif ch1h > 5:  score += 15
+                    if ch6h  > 50:  score += 25
+                    if buy_pct > 65: score += 20
+                    elif buy_pct > 55: score += 10
+                    if v24h > 20_000: score += 15
+                    if b1h > 15: score += 10
+                    created = int(p.get("pairCreatedAt", 0) or 0)
+                    age_min = (now * 1000 - created) / 60000 if created else 9999
+                    if age_min < 60:   score += 30  # new token in hot narrative = jackpot
+                    elif age_min < 240: score += 12
+
+                    if score >= 30:
+                        candidates.append((score, addr, p, sym, name, fdv, liq,
+                                           ch1h, ch6h, ch24h, b1h, s1h, buy_pct, age_min))
+
+                if not candidates: continue
                 candidates.sort(reverse=True)
 
-                for score, addr, p in candidates[:2]:
-                    alert_id = hashlib.md5(f"{addr}:nar:{nar}:{int(now/3600)}".encode()).hexdigest()[:16]
+                # ── Step 6 + 7: Alert top 2 with AI thesis ───────────────
+                for (score, addr, p, sym, name, fdv, liq, ch1h, ch6h, ch24h,
+                     b1h, s1h, buy_pct, age_min) in candidates[:2]:
+
+                    # Cooldown — 3h per addr
+                    alert_id = hashlib.md5(
+                        f"{addr}:nar_ai:{nar_name}:{int(now/10800)}".encode()
+                    ).hexdigest()[:16]
                     if _seen_check(seen_alert_ids, alert_id): continue
+                    if addr in dropped_calls and now - dropped_calls[addr].get("time",0) < 10800:
+                        continue
+
                     _seen_add(seen_alert_ids, alert_id)
                     asyncio.create_task(_save())
 
-                    base  = p.get("baseToken", {})
-                    sym   = base.get("symbol", "???")
-                    name  = base.get("name", "")
-                    fdv   = float(p.get("fdv", 0) or 0)
-                    liq   = float((p.get("liquidity") or {}).get("usd", 0) or 0)
-                    ch1h  = float((p.get("priceChange") or {}).get("h1", 0) or 0)
-                    ch6h  = float((p.get("priceChange") or {}).get("h6", 0) or 0)
-                    b1h   = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
-                    s1h   = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
-                    buy_pct = b1h / max(b1h + s1h, 1) * 100
+                    price_now = float(p.get("priceUsd", 0) or 0)
+                    age_str   = f"{age_min:.0f}min" if age_min < 1440 else f"{age_min/1440:.1f}d"
 
-                    # AI explains WHY this narrative is hot right now
-                    ai = await ai_ask(
-                        f"Breaking news context: {'; '.join(rel_headlines[:2])}. "
-                        f"Solana token ${sym} is in the #{nar.upper()} narrative. "
-                        f"MCap {_usd(fdv)}, 1h {_pct(ch1h)}, 6h {_pct(ch6h)}, buy ratio {buy_pct:.0f}%. "
-                        "Explain in 2 sentences why this token could benefit from this news narrative "
-                        "and whether this is worth watching. Be professional and direct.",
-                        fallback=""
+                    # AI writes the thesis connecting THIS news to THIS token
+                    ai_thesis = await ai_ask(
+                        f"NEWS: {story}\n"
+                        f"TOKEN: ${sym} ({name})\n"
+                        f"MCap {_usd(fdv)} | Liq {_usd(liq)} | Age {age_str}\n"
+                        f"1h: {_pct(ch1h)} | 6h: {_pct(ch6h)} | Buys: {b1h} | Buy%: {buy_pct:.0f}%\n\n"
+                        "As a degen alpha caller: 1-2 sharp sentences.\n"
+                        "1) WHY this token fits this specific news narrative\n"
+                        "2) Is it worth aping right now — entry thesis, risk, potential?\n"
+                        "Cite the actual numbers. Be direct.",
+                        fallback="",
+                        inject_market=True
                     )
 
-                    # Skip if anti-spam cooldown
-                    if addr in dropped_calls and time.time() - dropped_calls[addr].get("time",0) < 21600:
-                        continue
                     bp_arrow = "\U0001f7e2" if buy_pct > 60 else "\U0001f534" if buy_pct < 40 else "\u26aa"
                     msg_text = (
-                        f"\U0001f4d6 *NARRATIVE ALERT — #{nar.upper()}*\n"
+                        f"\U0001f4f0 *NARRATIVE PLAY — {nar_name.upper()}*\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"*${sym}* — _{name}_\n"
-                        f"\U0001f4a0 MCap: `{_usd(fdv)}`  Liq: `{_usd(liq)}`\n"
-                        f"1h: {_pct(ch1h)}  6h: {_pct(ch6h)}\n"
-                        f"{bp_arrow} Buys/Sells: {b1h}/{s1h}  →  {buy_pct:.0f}% buys\n\n"
-                        f"\U0001f4f0 *Trending news:*\n"
-                        + "\n".join([f"  • _{h[:70]}_" for h in rel_headlines[:2]])
-                        + f"\n\n`{addr}`"
+                        f"\U0001f4f0 *Story:* _{story[:120]}_\n\n"
+                        f"*${sym}* | _{name}_\n"
+                        f"\U0001f4a0 MCap: `{_usd(fdv)}`  Liq: `{_usd(liq)}`  Age: {age_str}\n"
+                        f"\U0001f4b5 Price: `{_price(price_now)}`\n"
+                        f"1h: {_pct(ch1h)}  6h: {_pct(ch6h)}  24h: {_pct(ch24h)}\n"
+                        f"{bp_arrow} Buys/Sells (1h): {b1h}/{s1h} → *{buy_pct:.0f}% buys*\n"
+                        f"\U0001f511 Matched: {' | '.join(terms[:4])}\n"
+                        f"\n`{addr}`"
                     )
-                    if ai: msg_text += f"\n\n\U0001f9e0 _{ai}_"
+                    if ai_thesis:
+                        msg_text += f"\n\n\U0001f9e0 {ai_thesis}"
 
                     if GROUP_CHAT_ID != 0:
                         try:
-                            nar_msg_sent = await app.bot.send_message(
+                            nar_msg = await app.bot.send_message(
                                 chat_id=GROUP_CHAT_ID,
                                 text=msg_text,
                                 parse_mode="Markdown",
-                                reply_markup=scan_buttons(addr, sym),
+                                reply_markup=scan_buttons(addr, sym, p.get("pairAddress", "")),
                                 disable_web_page_preview=True,
                             )
-                            logger.info(f"[NARRATIVE] ${sym} #{nar}")
+                            logger.info(f"[NARRATIVE AI] Alerted ${sym} | {nar_name} | score={score}")
                             dropped_calls[addr] = {
                                 "sym": sym, "name": name,
-                                "entry_price": float(p.get("priceUsd",0) or 0),
-                                "mcap_entry": fdv,
-                                "time": time.time(),
-                                "alert_type": "narrative",
-                                "msg_id": nar_msg_sent.message_id,
-                                "chat_id": GROUP_CHAT_ID,
+                                "entry_price": price_now,
+                                "mcap_entry":  fdv,
+                                "time":        now,
+                                "alert_type":  "narrative",
+                                "msg_id":      nar_msg.message_id,
+                                "chat_id":     GROUP_CHAT_ID,
                                 "alerted_10x": False, "alerted_5x": False, "alerted_rug": False,
                             }
                             asyncio.create_task(_save())
                             await asyncio.sleep(3)
                         except Exception as e:
-                            logger.warning(f"narrative alert: {e}")
+                            try:
+                                import re as _ren
+                                plain = _ren.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', msg_text)
+                                await app.bot.send_message(
+                                    chat_id=GROUP_CHAT_ID, text=plain,
+                                    reply_markup=scan_buttons(addr, sym),
+                                )
+                            except Exception:
+                                logger.warning(f"narrative alert: {e}")
 
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
 
         except Exception as e:
             logger.error(f"bg_narrative_news_scanner: {e}", exc_info=True)
         await asyncio.sleep(30)
+
 
 
 async def bg_trending_metas_scanner(app: Application):
@@ -4015,7 +4105,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v22 ready — "
+        f"🦅 Kayo Brain v23 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
