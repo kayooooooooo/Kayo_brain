@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v21 — PRO REBUILD                     ║
+║                    KAYO BRAIN v22 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v21", 200
+def _root(): return "🦅 Kayo Brain v22", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -484,6 +484,29 @@ async def dex_batch(addresses: List[str]) -> List[Dict]:
     d = await _get(f"{_DSX}/tokens/v1/solana/{chunk}")
     return d if isinstance(d, list) else []
 
+async def dex_new_pairs(limit: int = 100) -> List[Dict]:
+    """Fetch newest Solana pairs — catches coins in first 5 minutes of trading."""
+    d = await _get(f"{_DSX}/token-pairs/v1/solana/new?limit={limit}")
+    if isinstance(d, list): return [p for p in d if p.get("chainId") == "solana"]
+    # Fallback: search for brand new pairs via trending endpoint
+    d2 = await _get(f"{_DSX}/latest/dex/tokens/solana")
+    if d2 and isinstance(d2, list): return d2[:limit]
+    return []
+
+async def dex_gainers_solana() -> List[Dict]:
+    """Top gaining Solana pairs — sorted by 5m price change."""
+    results = []
+    for q in ["solana pump", "solana moon", "solana 100x", "solana gem", "solana meme coin", "solana dog coin"]:
+        pairs = await dex_search_pairs(q)
+        results.extend(pairs)
+    # Dedup
+    seen = {}
+    for p in results:
+        a = (p.get("baseToken") or {}).get("address", "")
+        if a: seen[a] = p
+    # Sort by 5m gain
+    return sorted(seen.values(), key=lambda p: float((p.get("priceChange") or {}).get("m5", 0) or 0), reverse=True)
+
 async def dex_multi_search(queries: List[str]) -> Dict[str, Dict]:
     """Run multiple queries in parallel, dedup by address."""
     tasks = [dex_search_pairs(q) for q in queries]
@@ -702,18 +725,40 @@ def extract_cas(text: str) -> List[str]:
 
 # Static keyword library — expand over time
 NARRATIVES = {
-    "ai":         ["ai", "agent", "gpt", "intelligence", "neural", "llm", "openai", "deepseek", "groq"],
-    "gaming":     ["game", "gaming", "play", "nft", "quest", "rpg", "metaverse", "gamer"],
-    "defi":       ["defi", "swap", "yield", "lend", "farm", "liquidity", "amm", "dex", "vault"],
-    "meme":       ["dog", "cat", "pepe", "frog", "doge", "shib", "bonk", "wif", "wen", "gm"],
-    "sports":     ["football", "soccer", "fifa", "worldcup", "nba", "sport", "athlete", "fan"],
-    "rwa":        ["rwa", "real", "estate", "bond", "treasury", "commodity", "gold", "asset"],
-    "infra":      ["infra", "layer", "bridge", "zk", "rollup", "validator", "oracle", "chain"],
-    "payments":   ["payment", "pay", "visa", "card", "bank", "fiat", "transfer", "remit"],
-    "social":     ["social", "friend", "community", "dao", "vote", "creator", "tiktok", "twitter"],
-    "health":     ["health", "medical", "bio", "pharma", "longevity", "fitness", "wellness"],
-    "politics":   ["trump", "election", "president", "government", "fed", "reserve", "macro"],
-    "celebrity":  ["elon", "musk", "kanye", "trump", "maga", "celebrity", "viral", "hype"],
+    "ai":         ["ai", "agent", "gpt", "intelligence", "neural", "llm", "openai", "deepseek", "groq",
+                   "agi", "robot", "claude", "gemini", "skynet", "matrix", "hal", "jarvis"],
+    "gaming":     ["game", "gaming", "play", "nft", "quest", "rpg", "metaverse", "gamer",
+                   "chess", "poker", "casino", "arcade", "pixel", "minecraft", "fortnite", "roblox"],
+    "defi":       ["defi", "swap", "yield", "lend", "farm", "liquidity", "amm", "dex", "vault",
+                   "stake", "restake", "lst", "jito", "raydium", "orca", "jupiter"],
+    "meme":       ["dog", "cat", "pepe", "frog", "doge", "shib", "bonk", "wif", "wen", "gm",
+                   "inu", "elon", "moon", "rocket", "ape", "monkey", "gorilla", "bear", "bull",
+                   "chad", "based", "degen", "wagmi", "ngmi", "lol", "lmao", "gigachad",
+                   "wojak", "cope", "seethe", "rekt", "pump", "gg", "ez", "npc",
+                   "shiba", "akita", "floki", "samo", "cheems", "dood", "popcat",
+                   "myro", "bome", "mother", "slerf", "giga", "smol", "retard", "autism",
+                   "bird", "duck", "goat", "hamster", "turtle", "fish", "penguin", "panda",
+                   "jotchua", "michi", "ponke", "bloke", "pnut", "goatseus", "max"],
+    "sports":     ["football", "soccer", "fifa", "worldcup", "nba", "sport", "athlete", "fan",
+                   "f1", "racing", "boxing", "ufc", "mma", "tennis", "golf", "cricket"],
+    "rwa":        ["rwa", "real", "estate", "bond", "treasury", "commodity", "gold", "asset",
+                   "silver", "platinum", "oil", "grain", "carbon", "credit"],
+    "infra":      ["infra", "layer", "bridge", "zk", "rollup", "validator", "oracle", "chain",
+                   "node", "rpc", "sequencer", "prover", "data", "avail", "eigen"],
+    "payments":   ["payment", "pay", "visa", "card", "bank", "fiat", "transfer", "remit",
+                   "cash", "money", "dollar", "peso", "naira", "gbp", "euro"],
+    "social":     ["social", "friend", "community", "dao", "vote", "creator", "tiktok", "twitter",
+                   "instagram", "youtube", "viral", "influencer", "collab", "lens", "farcaster"],
+    "health":     ["health", "medical", "bio", "pharma", "longevity", "fitness", "wellness",
+                   "gym", "protein", "supplement", "brain", "nootropic"],
+    "politics":   ["trump", "election", "president", "government", "fed", "reserve", "macro",
+                   "maga", "democrat", "republican", "senate", "white house", "tariff"],
+    "celebrity":  ["elon", "musk", "kanye", "trump", "maga", "celebrity", "viral", "hype",
+                   "kylie", "kardashian", "drake", "taylor", "swift", "rihanna", "lebron",
+                   "ronaldo", "messi", "obama", "bezos", "zuck"],
+    "animal":     ["cat", "dog", "inu", "shib", "doge", "hamster", "bird", "duck", "frog",
+                   "penguin", "panda", "lion", "tiger", "wolf", "fox", "rabbit", "turtle",
+                   "fish", "shark", "whale", "bear", "bull", "ape", "monkey", "gorilla"],
 }
 
 def detect_narrative(text: str) -> str:
@@ -1109,7 +1154,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v21*\n"
+        f"\U0001f985 *KAYO BRAIN v22*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1146,7 +1191,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v21 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v22 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2073,7 +2118,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v21 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v22 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2308,7 +2353,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v21 STATUS*\n"
+        f"⚙️ *KAYO BRAIN v22 STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -2744,21 +2789,43 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def bg_main_scanner(app: Application):
     """
     PRIMARY SCANNER — every 30s
-    Detects: Pump | Dump | Whale | Gem | New Launch (<30min)
-    Uses all 6 DexScreener query categories + token-profiles endpoint
+    Detects: Pump | Whale | Gem | New Launch | Meme | Unusual | Pattern setups
+    Uses 20+ DexScreener query categories + gainers sweep
+    Finds coins BEFORE they blow up using pattern recognition
     Dedup via Redis-persisted seen_alert_ids
     """
     await asyncio.sleep(20)
     cooldown: Dict[str, float] = {}
 
-    QUERIES = ["solana meme", "solana ai", "solana new", "solana pump", "solana dog", "solana gaming"]
+    QUERIES = [
+        # Meme coins — the biggest category
+        "solana meme", "solana dog", "solana cat", "solana inu", "solana pepe",
+        "solana frog", "solana moon", "solana chad", "solana based", "solana degen",
+        "solana wojak", "solana bonk", "solana wif", "solana goat", "solana pnut",
+        "solana monkey", "solana bear", "solana bull", "solana ape", "solana bird",
+        # Narrative plays
+        "solana ai", "solana gaming", "solana pump", "solana new",
+        # Generic high-signal
+        "solana 1000x", "solana gem", "solana early", "solana launch",
+    ]
 
     while True:
         try:
             now = time.time()
-            # Parallel fetch
-            pairs_map = await dex_multi_search(QUERIES)
-            boosts_top = await dex_boosts_top()
+            # Parallel fetch — main queries + gainers sweep
+            pairs_map, boosts_top = await asyncio.gather(
+                dex_multi_search(QUERIES),
+                dex_boosts_top(),
+            )
+            # Also sweep top gainers for anything we missed
+            try:
+                gainers = await dex_gainers_solana()
+                for p in gainers[:50]:
+                    a = (p.get("baseToken") or {}).get("address", "")
+                    if a and a not in pairs_map:
+                        pairs_map[a] = p
+            except Exception:
+                pass
             boosted_addrs = {b.get("tokenAddress", "") for b in boosts_top if b.get("chainId") == "solana"}
 
             for addr, p in pairs_map.items():
@@ -2825,40 +2892,66 @@ async def bg_main_scanner(app: Application):
                 # ── DETECT ALERT TYPE ──────────────────────────────────
                 alert_type = None
 
-                # 🚀 PUMP — 5m breakout with buyer pressure (lowered from 10% → 5%)
-                if ch5m >= 5 and b5m > s5m and v5m > 100 and buy_pct >= 55:
+                # ═══════════════════════════════════════════════════
+                # DEGEN PATTERN RECOGNITION ENGINE
+                # Each pattern is a known pre-pump or alpha signal
+                # ═══════════════════════════════════════════════════
+
+                # 🚀 PUMP — breaking out RIGHT NOW (5m candle)
+                if ch5m >= 5 and b5m > s5m and v5m > 80 and buy_pct >= 53:
                     alert_type = "pump"
+                    pattern_desc = f"5m breakout +{ch5m:.1f}%, {b5m}B/{s5m}S buys dominating"
 
-                # 💎 GEM — low cap hidden gem with momentum (lowered from 25% → 15%)
-                elif fdv < 500_000 and ch1h >= 15 and buy_pct >= 58 and liq >= 2000 and vol_spike >= 1.5:
-                    alert_type = "gem"
-
-                # 🆕 NEW LAUNCH — fresh token with real traction (loosened thresholds)
-                elif age_min < 60 and b1h > 10 and buy_pct >= 55 and liq >= 1000 and ch1h >= 8:
+                # 🔥 EARLY MEME — brand new meme coin getting traction before anyone notices
+                elif nar in ("meme", "animal", "celebrity") and age_min < 90 and buy_pct >= 52 and liq >= 1000 and (ch5m >= 3 or ch1h >= 10):
                     alert_type = "new"
+                    pattern_desc = f"New meme #{nar} — {age_min:.0f}min old, {buy_pct:.0f}% buy pressure"
 
-                # 🔀 MIGRATION — pump.fun → Raydium migration with traction
-                elif is_migrated and buy_pct >= 55 and ch1h >= 8 and liq >= 1500:
-                    alert_type = "migration"
+                # 💎 GEM — sub-$500k coin with sustained buyer demand
+                elif fdv < 500_000 and ch1h >= 12 and buy_pct >= 56 and liq >= 1500 and vol_spike >= 1.3:
+                    alert_type = "gem"
+                    pattern_desc = f"Hidden gem: +{ch1h:.0f}% 1h, {vol_spike:.1f}x vol, {buy_pct:.0f}% buy ratio"
 
-                # 🔄 REBRAND — token riding trending narrative after rename
-                elif is_rebranded and buy_pct >= 55 and ch1h >= 6 and liq >= 1000:
-                    alert_type = "rebrand"
+                # 🆕 NEW LAUNCH — fresh token with immediate real interest
+                elif age_min < 60 and b1h > 8 and buy_pct >= 52 and liq >= 800 and (ch1h >= 6 or ch5m >= 4):
+                    alert_type = "new"
+                    pattern_desc = f"New launch {age_min:.0f}min — {b1h} buys, liq ${liq:,.0f}"
 
-                # 🐳 WHALE — big vol spike, price flat (stealth accumulation)
-                elif vol_spike >= 3.0 and abs(ch5m) < 5 and b1h > 10 and buy_pct > 58:
+                # 🐳 STEALTH WHALE — vol spike but price barely moved (smart money accumulating quietly)
+                elif vol_spike >= 2.5 and abs(ch5m) < 4 and b1h > 8 and buy_pct > 55:
                     alert_type = "whale"
+                    pattern_desc = f"Stealth buy: {vol_spike:.1f}x vol spike, price flat — smart money loading"
 
-                # ⚡ MOMENTUM — general strong momentum that doesn't fit other categories
-                elif ch1h >= 12 and ch5m >= 3 and buy_pct >= 55 and vol_spike >= 1.5:
-                    alert_type = "pump"  # label as pump — strong momentum
+                # 🔀 MIGRATION — moved from pump.fun to Raydium (new pair, but coin has history)
+                elif is_migrated and buy_pct >= 52 and ch1h >= 5 and liq >= 1200:
+                    alert_type = "migration"
+                    pattern_desc = f"Migration: high txn history on new pair, {buy_pct:.0f}% buy pressure"
 
-                # ⚠️ UNUSUAL — coordinated buy before pump
-                elif vol_spike >= 4.0 and abs(ch5m) < 3 and abs(ch1h) < 10 and b1h > 8:
+                # 🔄 REBRAND — riding trending narrative after rename
+                elif is_rebranded and buy_pct >= 52 and ch1h >= 5 and liq >= 800:
+                    alert_type = "rebrand"
+                    pattern_desc = f"Rebrand to trending narrative #{nar}, {buy_pct:.0f}% buys"
+
+                # ⚡ MOMENTUM SURGE — building fast across 5m and 1h simultaneously
+                elif ch1h >= 10 and ch5m >= 3 and buy_pct >= 53 and vol_spike >= 1.3:
+                    alert_type = "pump"
+                    pattern_desc = f"Momentum building: +{ch5m:.1f}% 5m / +{ch1h:.0f}% 1h, {vol_spike:.1f}x vol"
+
+                # ⚠️ UNUSUAL — pre-pump signal (coordinated quiet accumulation)
+                # Pattern A: volume exploding, price not yet moved = big players loading before announcement
+                elif vol_spike >= 3.5 and abs(ch5m) < 3 and abs(ch1h) < 8 and b1h > 6:
                     alert_type = "unusual"
-                # Pattern B: Tiny mcap, lots of buys — early ape zone (FIXED: was `b1h > b1h*0` bug)
-                elif fdv < 100_000 and b1h >= 25 and buy_pct >= 65 and v1h > 1000:
+                    pattern_desc = f"Vol spike {vol_spike:.1f}x with flat price — possible coordinated pre-pump"
+                # Pattern B: tiny mcap, sudden buyer surge — early ape zone (pre-100x setup)
+                elif fdv < 100_000 and b1h >= 20 and buy_pct >= 62 and v1h > 500:
                     alert_type = "unusual"
+                    pattern_desc = f"Tiny mcap ${fdv:,.0f} suddenly getting {b1h} buys — early ape signal"
+                # Pattern C: low-cap meme with zero sells — someone locked in before announcement
+                elif nar in ("meme","animal","celebrity") and fdv < 200_000 and s5m == 0 and b5m >= 5 and liq >= 500:
+                    alert_type = "unusual"
+                    pattern_desc = f"Meme coin: {b5m} buys ZERO sells in 5m — locked loading before blast"
+                else:
+                    pattern_desc = ""
 
                 # NOTE: No dump alerts — degen bots only drop BUY signals.
                 # Rug/dump info comes from bg_followup_tracker when a dropped coin tanks.
@@ -2924,12 +3017,20 @@ async def bg_main_scanner(app: Application):
                     pm_hint = f" My historical win rate on {alert_type} + #{nar} calls: {wr:.0%} ({pm_info['wins']}W/{pm_info['losses']}L, avg {pm_info.get('avg_mult',0):.1f}x)."
 
                 ai = await ai_ask(
-                    f"Solana {alert_type.upper()} — *${sym}*: MCap {_usd(mcap)}, "
-                    f"liq {_usd(liq)}, 5m {_pct(ch5m)}, 1h {_pct(ch1h)}, "
-                    f"buys/sells (1h): {b1h}/{s1h}, buy%: {buy_pct:.0f}%, vol spike: {vol_spike:.1f}x. "
-                    f"Narrative: #{nar}.{pm_hint} "
-                    "Is this worth aping RIGHT NOW? Give 1 razor-sharp degen sentence. "
-                    "If you would fade it, say why. If you would ape, say what the play is.",
+                    f"Solana {alert_type.upper()} ALERT — *${sym}* ({name}):\n"
+                    f"Signal: {pattern_desc}\n"
+                    f"MCap {_usd(mcap)} | Liq {_usd(liq)} | Age {age_min:.0f}min\n"
+                    f"5m: {_pct(ch5m)} | 1h: {_pct(ch1h)} | Buys/Sells: {b1h}/{s1h}\n"
+                    f"Buy%: {buy_pct:.0f}% | Vol spike: {vol_spike:.1f}x | Narrative: #{nar}\n"
+                    f"{pm_hint}\n\n"
+                    "You are a degen alpha caller with deep knowledge of Solana meme cycles, "
+                    "pump patterns, and on-chain signals. Apply this knowledge:\n"
+                    "- Pre-pump signals: volume dry-up before blast, zero-sell windows, wallet concentration\n"
+                    "- Meme cycle stages: launch → first pump → consolidation → second pump (main event) → dump\n"
+                    "- Red flags: 1 wallet = 30%+, sell tax >5%, LP not locked, dev wallet moving\n"
+                    "- Green flags: LP locked, renounced, organic buy pressure, narrative alignment\n"
+                    "Give ONE sharp sentence: would you ape this RIGHT NOW and why? "
+                    "What is the specific play (entry zone, risk, potential)? Be direct, cite the numbers.",
                     fallback="",
                     inject_market=True
                 )
@@ -2968,7 +3069,7 @@ async def bg_main_scanner(app: Application):
 
         except Exception as e:
             logger.error(f"bg_main_scanner: {e}", exc_info=True)
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)  # v22: every 30s for faster detection
 
 
 async def bg_followup_tracker(app: Application):
@@ -3121,10 +3222,13 @@ async def bg_new_launch_scanner(app: Application):
         try:
             now_ms = time.time() * 1000
 
-            profiles, boosts = await asyncio.gather(
+            # Fetch from multiple sources simultaneously — cast a wider net
+            profiles, boosts, recent_profiles = await asyncio.gather(
                 dex_token_profiles_latest(),
                 dex_boosts_latest(),
+                dex_token_profiles_recent(),
             )
+            profiles = list({p.get("tokenAddress",""): p for p in (profiles + recent_profiles) if p.get("chainId") == "solana"}.values())
             sol_prof  = [p for p in profiles if p.get("chainId") == "solana"]
             sol_boost = [b for b in boosts   if b.get("chainId") == "solana"]
 
@@ -3165,23 +3269,44 @@ async def bg_new_launch_scanner(app: Application):
 
                 if liq < 500 or fdv < 2000 or fdv > 500_000: continue  # hard $500k cap
 
-                # Scoring
+                # Scoring — tuned to catch pre-pump coins early
                 score = 0
-                if age_min < 30:   score += 40
-                elif age_min < 90:  score += 25
-                elif age_min < 240: score += 10
-                if ch1h > 100: score += 35
-                elif ch1h > 50: score += 25
-                elif ch1h > 15: score += 15
-                if buy_pct > 65: score += 20
+                # Age — younger = more potential, bonus for brand new
+                if age_min < 5:    score += 60  # ULTRA EARLY — first 5 minutes
+                elif age_min < 15:  score += 50  # very early
+                elif age_min < 30:  score += 40  # early
+                elif age_min < 90:  score += 25  # medium
+                elif age_min < 240: score += 10  # older but can still pump
+                # Price momentum
+                if ch1h > 200: score += 45
+                elif ch1h > 100: score += 35
+                elif ch1h > 50:  score += 25
+                elif ch1h > 20:  score += 15
+                elif ch1h > 5:   score += 8
+                # Buy pressure
+                if buy_pct > 75: score += 25
+                elif buy_pct > 65: score += 18
                 elif buy_pct > 55: score += 10
-                if any(l.get("type") == "twitter" for l in links):  score += 15
-                if any(l.get("type") == "telegram" for l in links): score += 10
+                elif buy_pct > 50: score += 5
+                # Socials (organic community signal)
+                if any(lk.get("type") == "twitter"  for lk in links): score += 15
+                if any(lk.get("type") == "telegram" for lk in links): score += 10
+                if any(lk.get("type") == "website"  for lk in links): score += 5
+                # Boost = team spent money on it
                 if boost > 0: score += min(20, boost)
-                if liq / max(fdv, 1) > 0.05: score += 10
-                if b1h > 20: score += 10
+                # Liquidity health
+                if liq / max(fdv, 1) > 0.08: score += 15
+                elif liq / max(fdv, 1) > 0.04: score += 8
+                # Activity
+                if b1h > 50: score += 15
+                elif b1h > 20: score += 10
+                elif b1h > 8:  score += 5
+                # Meme bonus — meme coins have the biggest multipliers
+                nm_combined = f"{name} {sym}".lower()
+                is_meme = any(kw in nm_combined for kw in NARRATIVES["meme"] + NARRATIVES["animal"])
+                if is_meme: score += 10
 
-                if score < 25: continue  # lowered threshold — more gems get through
+                if score < 20: continue  # low bar — we want to see everything with any signal
                 if GROUP_CHAT_ID == 0: continue
 
                 # ── Anti-spam: never re-drop the same coin ─────────────
@@ -3190,8 +3315,8 @@ async def bg_new_launch_scanner(app: Application):
                     last_price = dropped_calls[addr].get("entry_price", 0)
                     cur_p = float(pd.get("priceUsd", 0) or 0)
                     price_change_since = abs(cur_p - last_price) / max(last_price, 1e-12) * 100
-                    if time.time() - last_drop < 21600: continue   # 6h hard cooldown
-                    if price_change_since < 20: continue            # 20%+ move required
+                    if time.time() - last_drop < 10800: continue   # 3h hard cooldown
+                    if price_change_since < 15: continue            # 15%+ move required
 
                 _seen_add(seen_alert_ids, alert_id)
                 asyncio.create_task(_save())
@@ -3239,12 +3364,19 @@ async def bg_new_launch_scanner(app: Application):
                 # Determine display type — new vs unusual
                 nl_type = "new" if age_min < 60 else ("unusual" if vs_new >= 3 else "gem")
 
+                nm_combined_nl = f"{name} {sym}".lower()
+                is_meme_nl = any(kw in nm_combined_nl for kw in NARRATIVES["meme"] + NARRATIVES["animal"])
+                meme_tag_nl = "🐸 MEME COIN" if is_meme_nl else f"#{nar.upper()}"
                 ai = await ai_ask(
-                    f"Solana token ${sym} (age {int(age_min)}min, score {score}/100): "
-                    f"MCap {_usd(fdv)}, liq {_usd(liq)}, 1h {_pct(ch1h)}, "
-                    f"buys {b1h} / sells {s1h}, buy% {buy_pct:.0f}%, vol spike {vs_new:.1f}x. "
-                    f"Narrative: #{nar}. Boosted: {boost > 0}. Has Twitter: {bool(tw_link)}. "
-                    "Is this worth aping? 1 sharp sentence — what's the play.",
+                    f"NEW LAUNCH ALERT {meme_tag_nl} — ${sym} ({name}):\n"
+                    f"Age: {int(age_min)} min | MCap: {_usd(fdv)} | Liq: {_usd(liq)} | Score: {score}/100\n"
+                    f"1h: {_pct(ch1h)} | Buy%: {buy_pct:.0f}% | Buys: {b1h} | Vol spike: {vs_new:.1f}x\n"
+                    f"Boosted: {boost > 0} | Twitter: {bool(tw_link)} | Telegram: {bool(tg_link)}\n\n"
+                    "You are a degen alpha caller who has caught coins like JOTCHUA at launch "
+                    "(which did 700x). You know: first 30 mins = the highest risk/reward window. "
+                    "Evaluate using meme coin pattern knowledge: launch momentum, community signals, "
+                    "narrative fit, buy pressure vs liq ratio. "
+                    "1-2 sentences: is this worth an early ape? What\'s the specific thesis?",
                     fallback="",
                     inject_market=True
                 )
@@ -3295,7 +3427,11 @@ async def bg_established_scanner(app: Application):
             now = time.time()
             QUERIES = [
                 "solana meme", "solana ai", "solana dog", "solana cat",
-                "solana gaming", "solana pump", "solana pepe", "solana frog"
+                "solana gaming", "solana pump", "solana pepe", "solana frog",
+                "solana inu", "solana bonk", "solana moon", "solana gem",
+                "solana chad", "solana based", "solana degen", "solana wif",
+                "solana goat", "solana pnut", "solana bird", "solana ape",
+                "solana new coin", "solana launch", "solana early",
             ]
             pairs_map = await dex_multi_search(QUERIES)
 
@@ -3879,7 +4015,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v21 ready — "
+        f"🦅 Kayo Brain v22 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
