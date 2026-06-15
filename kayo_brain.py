@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v29 — PRO REBUILD                     ║
+║                    KAYO BRAIN v29b — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v29", 200
+def _root(): return "🦅 Kayo Brain v29b", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1223,7 +1223,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v29*\n"
+        f"\U0001f985 *KAYO BRAIN v29b*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1260,7 +1260,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v29 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v29b — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2201,7 +2201,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v29 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v29b alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2475,7 +2475,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v29 STATUS*\n"
+        f"⚙️ *KAYO BRAIN v29b STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -3747,7 +3747,7 @@ async def bg_narrative_news_scanner(app: Application):
     while True:
         try:
             now = time.time()
-            if now - last_run < 480:  # 8 min
+            if now - last_run < 1800:  # 30 min
                 await asyncio.sleep(30); continue
             last_run = now
 
@@ -3959,74 +3959,135 @@ async def bg_narrative_news_scanner(app: Application):
 
 
 async def bg_trending_metas_scanner(app: Application):
-    """Every 20min: post trending metas digest to group."""
-    await asyncio.sleep(180)
-    last_run = 0
+    """
+    Every 2h: post a TRENDING METAS digest with DIFFERENT coins.
+    Sources GeckoTerminal trending (not keyword search) so same coin
+    can't spam. Each coin only appears ONCE. Min 3 unique coins to post.
+    """
+    await asyncio.sleep(300)  # wait 5min after startup
+    last_run     = 0
+    posted_addrs: Dict[str, float] = {}  # addr → timestamp, 6h cooldown
+
     while True:
         try:
             now = time.time()
-            if now - last_run < 1200:
-                await asyncio.sleep(60); continue
+            # Only run every 2 hours
+            if now - last_run < 7200:
+                await asyncio.sleep(120)
+                continue
             last_run = now
 
-            # Get trending metas narrative names — used to find sub-$500k tokens IN those metas
-            metas = await dex_trending_metas()
-            if not metas or GROUP_CHAT_ID == 0:
-                await asyncio.sleep(60); continue
+            if GROUP_CHAT_ID == 0:
+                await asyncio.sleep(120)
+                continue
 
-            # Only post metas digest if we have actionable tokens under $500k in the meta
-            # (The trending digest of $36B coins is useless for degen trading — skip it)
-            meta_names = [m.get("name","?") for m in metas[:6]]
-            nar_slugs  = [m.get("slug", m.get("name","")).lower() for m in metas[:6]]
+            # ── Pull from GeckoTerminal trending (real coins, no keyword search) ──
+            gt_trend_pools: List[Dict] = []
+            try:
+                async with aiohttp.ClientSession() as s:
+                    for pg in [1, 2]:
+                        async with s.get(
+                            f"https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page={pg}",
+                            timeout=aiohttp.ClientTimeout(total=10)
+                        ) as r:
+                            d = await r.json()
+                            gt_trend_pools += d.get("data", [])
+                        await asyncio.sleep(0.3)
+            except Exception as e:
+                logger.debug(f"metas GT fetch: {e}")
 
-            # Search for sub-$500k tokens in each trending meta
-            meta_finds = []
-            for slug in nar_slugs[:4]:
-                kws_meta = NARRATIVES.get(slug, [slug])
-                pairs_m  = await dex_multi_search([f"solana {kw}" for kw in kws_meta[:2]])
-                for addr_m, p_m in pairs_m.items():
-                    fdv_m  = float(p_m.get("fdv", 0) or 0)
-                    liq_m  = float((p_m.get("liquidity") or {}).get("usd", 0) or 0)
-                    ch1h_m = float((p_m.get("priceChange") or {}).get("h1", 0) or 0)
-                    b1h_m  = int(((p_m.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
-                    s1h_m  = int(((p_m.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
-                    bp_m   = b1h_m / max(b1h_m + s1h_m, 1) * 100
-                    sym_m  = (p_m.get("baseToken") or {}).get("symbol","?")
-                    if fdv_m > 500_000 or fdv_m < 5_000: continue  # HARD $500k cap
-                    if liq_m < 2000: continue
-                    if bp_m < 55: continue  # buy-only
-                    if ch1h_m < 5: continue
-                    meta_finds.append((ch1h_m, slug, sym_m, fdv_m, liq_m, bp_m))
+            if not gt_trend_pools:
+                await asyncio.sleep(120)
+                continue
 
-            if not meta_finds:
-                # No actionable sub-$500k tokens in trending metas — skip posting
-                logger.info("[METAS] No sub-$500k tokens found in trending metas this run")
-            else:
-                meta_finds.sort(reverse=True)
-                ai_meta = await ai_ask(
-                    f"Trending metas: {meta_names[:4]}. "
-                    f"Sub-$500k degen plays in these metas: "
-                    + ", ".join(f"${s[2]} (#{s[1]}, 1h {s[0]:+.0f}%)" for s in meta_finds[:3])
-                    + ". Which meta/token has the best momentum for a quick degen flip? "
-                    "2 sentences, be direct.",
-                    fallback="", inject_market=True
+            # ── Filter: sub-$500k, real buyers, positive momentum ──
+            candidates = []
+            seen_in_this_run: set = set()
+
+            for pool in gt_trend_pools:
+                tok = gt_parse_pool(pool)
+                if not tok:
+                    continue
+                addr = tok["address"]
+                # Skip duplicates within this run
+                if addr in seen_in_this_run:
+                    continue
+                seen_in_this_run.add(addr)
+                # Skip recently posted coins (6h cooldown per coin)
+                if now - posted_addrs.get(addr, 0) < 21600:
+                    continue
+                if addr in blacklist:
+                    continue
+
+                fdv     = float(tok.get("fdv", 0) or 0)
+                liq     = float(tok.get("liq", 0) or 0)
+                ch1h    = float(tok.get("ch1h", 0) or 0)
+                b1h     = int(tok.get("b1h", 0) or 0)
+                s1h     = int(tok.get("s1h", 0) or 0)
+                buy_pct = b1h / max(b1h + s1h, 1) * 100
+                sym     = tok.get("sym", "?")
+                nar     = detect_narrative(f"{tok.get('name','')} {sym}")
+
+                if not (1_000 < fdv <= 500_000):  continue
+                if liq < 500:                      continue
+                if buy_pct < 52:                   continue
+                if ch1h < 3:                       continue
+                if b1h < 3:                        continue
+
+                candidates.append((ch1h, addr, sym, fdv, liq, buy_pct, nar))
+
+            # Need at least 3 DIFFERENT coins to be worth posting
+            if len(candidates) < 3:
+                logger.info(f"[METAS] Only {len(candidates)} unique coins — skipping post")
+                await asyncio.sleep(120)
+                continue
+
+            candidates.sort(reverse=True)
+            top = candidates[:6]  # max 6 coins per digest
+
+            # ── AI summary of what's hot ──
+            coin_desc = ", ".join(
+                f"${s[2]} {s[6]} +{s[0]:.0f}% buy%={s[5]:.0f}%"
+                for s in top[:4]
+            )
+            ai_summary = await ai_ask(
+                f"Solana degen plays right now: {coin_desc}. "
+                "Which 1-2 have the best momentum? 2 sentences max, be sharp.",
+                fallback="",
+                inject_market=False,
+            )
+
+            # ── Build and send the card ──
+            lines_out = [
+                "\U0001f525 *TRENDING META — DEGEN PLAYS* _(sub-$500k only)_",
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            ]
+            for ch, addr, sym, fdv, liq, bp, nar in top:
+                emoji = "🟢" if ch >= 10 else "🟡"
+                lines_out.append(
+                    f"• *${sym}* #{nar.upper()}  MCap:`{_usd(fdv)}`  "
+                    f"1h:{emoji} {ch:+.1f}%  Buy:{bp:.0f}%"
                 )
-                meta_lines = ["\U0001f525 *TRENDING META — DEGEN PLAYS* _(sub-$500k only)_\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
-                for ch, slug_l, sym_l, fdv_l, liq_l, bp_l in meta_finds[:4]:
-                    meta_lines.append(f"• *${sym_l}* #{slug_l.upper()}  MCap:`{_usd(fdv_l)}`  1h:{_pct(ch)}  Buy:{bp_l:.0f}%")
-                if ai_meta: meta_lines.append(f"\n\U0001f9e0 _{ai_meta}_")
-                try:
-                    await app.bot.send_message(
-                        chat_id=GROUP_CHAT_ID,
-                        text="\n".join(meta_lines),
-                        parse_mode="Markdown",
-                    )
-                    logger.info(f"[METAS] Posted {len(meta_finds)} sub-$500k meta plays")
-                except Exception as e:
-                    logger.warning(f"metas post: {e}")
+                posted_addrs[addr] = now  # mark as posted
+
+            if ai_summary:
+                lines_out.append(f"\n🧠 _{ai_summary}_")
+
+            try:
+                await app.bot.send_message(
+                    chat_id=GROUP_CHAT_ID,
+                    text="\n".join(lines_out),
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True,
+                )
+                logger.info(f"[METAS] Posted {len(top)} unique coins — next in 2h")
+            except Exception as e:
+                logger.warning(f"metas send: {e}")
+
         except Exception as e:
             logger.error(f"bg_trending_metas: {e}", exc_info=True)
-        await asyncio.sleep(60)
+
+        await asyncio.sleep(120)
 
 
 async def bg_price_alert_checker(app: Application):
@@ -4245,7 +4306,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v29 ready — "
+        f"🦅 Kayo Brain v29b ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
