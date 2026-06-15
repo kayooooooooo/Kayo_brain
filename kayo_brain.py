@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v30b — PRO REBUILD                     ║
+║                    KAYO BRAIN v31 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -17,7 +17,6 @@ from typing import Optional, List, Dict, Set
 
 import aiohttp
 import redis.asyncio as aioredis
-import redis as sync_redis
 import xml.etree.ElementTree as ET
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, BotCommand
 from telegram.ext import (
@@ -50,7 +49,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v30b", 200
+def _root(): return "🦅 Kayo Brain v31", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -69,17 +68,30 @@ threading.Thread(
 _redis: Optional[aioredis.Redis] = None   # set in post_init after loop starts
 
 def _make_redis() -> Optional[aioredis.Redis]:
-    """Create async Redis client; returns None if REDIS_URL not set."""
+    """Create async Redis client — no sync ping, lazy async connect."""
     if not REDIS_URL:
         return None
     try:
-        # Quick sync ping to confirm connectivity before we hand it to async
-        r_test = sync_redis.from_url(REDIS_URL, decode_responses=True, socket_connect_timeout=3)
-        r_test.ping()
-        r_test.close()
-        return aioredis.from_url(REDIS_URL, decode_responses=True)
+        return aioredis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            retry_on_timeout=True,
+        )
     except Exception as e:
-        logger.warning(f"Redis unavailable: {e}")
+        logger.warning(f"Redis client creation error: {e}")
+        return None
+    try:
+        client = aioredis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            retry_on_timeout=True,
+        )
+        logger.info("Redis client created (lazy connect)")
+        return client
+    except Exception as e:
+        logger.warning(f"Redis client creation failed: {e}")
         return None
 
 # ═══════════════════════════════════════════════════════════════
@@ -140,7 +152,15 @@ async def _save():
         raw = json.dumps(data)
         try:
             if _redis:
-                await _redis.set(REDIS_KEY, raw)
+                try:
+                    await _redis.set(REDIS_KEY, raw)
+                except Exception as redis_err:
+                    logger.warning(f"Redis save failed ({redis_err}) — falling back to file")
+                    try:
+                        loop = asyncio.get_event_loop()
+                        await loop.run_in_executor(None, lambda: open(STATE_FILE, "w").write(raw))
+                    except Exception as fe:
+                        logger.warning(f"File save also failed: {fe}")
             else:
                 loop = asyncio.get_event_loop()
                 await loop.run_in_executor(None, lambda: open(STATE_FILE, "w").write(raw))
@@ -154,9 +174,19 @@ async def _load():
     try:
         raw = None
         if _redis:
-            raw = await _redis.get(REDIS_KEY)
+            try:
+                raw = await _redis.get(REDIS_KEY)
+                if raw:
+                    logger.info("State loaded from Redis")
+            except Exception as redis_err:
+                logger.warning(f"Redis load failed ({redis_err}) — trying file")
         if not raw and os.path.exists(STATE_FILE):
-            raw = open(STATE_FILE).read()
+            try:
+                raw = open(STATE_FILE).read()
+                if raw:
+                    logger.info("State loaded from local file")
+            except Exception as fe:
+                logger.warning(f"File load failed: {fe}")
         if not raw: return
         d = json.loads(raw)
         watchlist       = d.get("watchlist", {})
@@ -1223,7 +1253,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v30b*\n"
+        f"\U0001f985 *KAYO BRAIN v31*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1260,7 +1290,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v30b — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v31 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2199,7 +2229,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v30b alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v31 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2467,13 +2497,13 @@ async def smartscan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Scan error: {e}")
 
 async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    redis_ok  = "✅" if _redis else "❌"
+    redis_ok  = "✅ Connected" if _redis else "❌ Not connected (set REDIS_URL)"
     groq_ok   = "✅" if GROQ_API_KEY else "❌"
     gemini_ok = "✅" if GEMINI_API_KEY else "❌"
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v30b STATUS*\n"
+        f"⚙️ *KAYO BRAIN v31 STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -3369,7 +3399,7 @@ async def bg_new_launch_scanner(app: Application):
                 addr  = (pd.get("baseToken") or {}).get("address", "")
                 if not addr or addr in blacklist: continue
 
-                alert_id = hashlib.md5(f"{addr}:newlaunch".encode()).hexdigest()[:16]
+                alert_id = hashlib.md5(f"{addr}:newlaunch:{int(time.time()//86400)}".encode()).hexdigest()[:16]
                 if _seen_check(seen_alert_ids, alert_id): continue
 
                 base    = pd.get("baseToken", {})
@@ -3404,7 +3434,7 @@ async def bg_new_launch_scanner(app: Application):
                 if liq / max(fdv, 1) > 0.05: score += 10
                 if b1h > 20: score += 10
 
-                if score < 15: continue  # very low — catch everything with any real signal
+                if score < 10: continue  # catch anything with ANY signal
                 if GROUP_CHAT_ID == 0: continue
 
                 # ── Anti-spam: never re-drop the same coin ─────────────
@@ -4153,7 +4183,12 @@ async def post_init(app: Application):
     global _redis
     _redis = _make_redis()
     if _redis:
-        logger.info("✅ Async Redis connected")
+        try:
+            await _redis.ping()
+            logger.info("✅ Redis connected and pinged OK")
+        except Exception as e:
+            logger.warning(f"Redis ping failed at startup ({e}) — will retry on save/load")
+            # Don't set to None — let it try on actual operations
     await _load()
     # ── Full command list (all 48) — shown in private chat menu ──────────
     all_cmds = [
@@ -4255,7 +4290,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v30b ready — "
+        f"🦅 Kayo Brain v31 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -4309,6 +4344,11 @@ def main():
             asyncio.create_task(bg_price_alert_checker(app))
             asyncio.create_task(bg_watchlist_scanner(app))
             asyncio.create_task(bg_reminder_checker(app))
+            logger.info("9 scanners started OK")
+            if GROUP_CHAT_ID:
+                logger.info("GROUP_CHAT_ID=%s — alerts ENABLED", GROUP_CHAT_ID)
+            else:
+                logger.warning("GROUP_CHAT_ID not set — scanner alerts DISABLED")
             logger.info("🚀 All scanners started")
             while True:
                 await asyncio.sleep(3600)
