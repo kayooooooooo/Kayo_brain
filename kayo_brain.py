@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v30 — PRO REBUILD                     ║
+║                    KAYO BRAIN v30b — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v30", 200
+def _root(): return "🦅 Kayo Brain v30b", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1223,7 +1223,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v30*\n"
+        f"\U0001f985 *KAYO BRAIN v30b*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1260,7 +1260,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v30 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v30b — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -1428,38 +1428,36 @@ async def new_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("\n".join(lines), parse_mode="Markdown")
 
 async def pump_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg = await u.message.reply_text("🚀 *Finding fresh pumps...*", parse_mode="Markdown")
-    QUERIES = ["solana meme", "solana new", "solana dog", "solana ai", "solana pump fun"]
-    pairs_map = await dex_multi_search(QUERIES)
-    pumping = [
-        p for p in pairs_map.values()
-        if float((p.get("priceChange") or {}).get("m5", 0) or 0) >= 5
-        and float((p.get("liquidity") or {}).get("usd", 0) or 0) >= 800
-        and (p.get("baseToken") or {}).get("address", "") not in blacklist
-    ]
-    pumping.sort(key=lambda p: float((p.get("priceChange") or {}).get("m5", 0) or 0), reverse=True)
+    msg = await u.message.reply_text("\U0001f680 *Finding fresh pumps...*", parse_mode="Markdown")
+    pools_new, pools_p2 = await asyncio.gather(gt_new_pools(page=1), gt_new_pools(page=2))
+    all_toks: Dict[str, Dict] = {}
+    for pool in (pools_new + pools_p2):
+        tok = gt_parse_pool(pool)
+        if tok and tok["address"] not in all_toks:
+            all_toks[tok["address"]] = tok
+    pumping = sorted(
+        [t for t in all_toks.values()
+         if t["address"] not in blacklist
+         and 0 < t["fdv"] <= 500_000
+         and t["liq"] >= 500
+         and t["ch5m"] >= 3
+         and t["b5m"] > t["s5m"]],
+        key=lambda t: t["ch5m"], reverse=True
+    )
     if not pumping:
-        await msg.edit_text("😴 Nothing pumping hard right now."); return
+        await msg.edit_text("Nothing pumping hard right now."); return
     add_xp(u.effective_user.id, 2)
-    lines = ["🚀 *FRESH PUMPS — 5M*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
-    for p in pumping[:8]:
-        base = p.get("baseToken", {})
-        sym  = base.get("symbol", "???")
-        addr = base.get("address", "")
-        ch5m = float((p.get("priceChange") or {}).get("m5", 0) or 0)
-        ch1h = float((p.get("priceChange") or {}).get("h1", 0) or 0)
-        fdv  = float(p.get("fdv", 0) or 0)
-        liq  = float((p.get("liquidity") or {}).get("usd", 0) or 0)
-        b5m  = int(((p.get("txns") or {}).get("m5") or {}).get("buys", 0) or 0)
-        s5m  = int(((p.get("txns") or {}).get("m5") or {}).get("sells", 0) or 0)
-        lines.append(
-            f"\n*${sym}*\n"
-            f"  5m: {_pct(ch5m)}  1h: {_pct(ch1h)}\n"
-            f"  MCap: `{_usd(fdv)}`  Liq: `{_usd(liq)}`\n"
-            f"  Buys/Sells (5m): {b5m}/{s5m}\n"
-            f"  `{addr}`"
+    header = "\U0001f680 *FRESH PUMPS \u2014 5M*\n" + "\u2501" * 14
+    out_lines = [header]
+    for t in pumping[:8]:
+        out_lines.append(
+            "\n*$" + t["sym"] + "*\n"
+            "  5m: " + _pct(t["ch5m"]) + "  1h: " + _pct(t["ch1h"]) + "\n"
+            "  MCap: `" + _usd(t["fdv"]) + "` Liq: `" + _usd(t["liq"]) + "`\n"
+            "  " + str(t["b5m"]) + "B / " + str(t["s5m"]) + "S (5m)\n"
+            "  `" + t["address"] + "`"
         )
-    await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+    await msg.edit_text("\n".join(out_lines), parse_mode="Markdown")
 
 async def gems_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     msg = await u.message.reply_text("💎 *Hunting hidden gems...*", parse_mode="Markdown")
@@ -2201,7 +2199,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v30 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v30b alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2475,7 +2473,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v30 STATUS*\n"
+        f"⚙️ *KAYO BRAIN v30b STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -4257,7 +4255,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v30 ready — "
+        f"🦅 Kayo Brain v30b ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
