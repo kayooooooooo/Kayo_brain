@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v32 — PRO REBUILD                     ║
+║                    KAYO BRAIN v33 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v32", 200
+def _root(): return "🦅 Kayo Brain v33", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -714,7 +714,7 @@ async def fetch_news(limit: int = 10) -> List[Dict]:
 # TWITTER (requires TWITTER_AUTH_TOKEN cookie)
 # ═══════════════════════════════════════════════════════════════
 def _tw_headers() -> Optional[Dict]:
-    """Twitter auth headers — kept for compatibility."""
+    """Twitter auth headers — kept for TWITTER_AUTH_TOKEN cookie auth."""
     if not TWITTER_AUTH_TOKEN: return None
     return {
         "Authorization": "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
@@ -725,80 +725,117 @@ def _tw_headers() -> Optional[Dict]:
         "x-twitter-client-language": "en",
     }
 
+# ─── RSS helpers ────────────────────────────────────────────────
 async def _fetch_rss(url: str) -> List[str]:
-    """Fetch RSS feed and return list of item titles."""
+    """Fetch RSS feed and return list of article titles."""
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(url, timeout=aiohttp.ClientTimeout(total=8),
                              headers={"User-Agent": "Mozilla/5.0"}) as r:
                 if r.status == 200:
                     body = await r.text()
-                    import xml.etree.ElementTree as ET
-                    try:
-                        root = ET.fromstring(body)
-                        items = root.findall(".//item/title")
-                        return [i.text or "" for i in items if i.text]
-                    except Exception:
-                        # Fallback: regex
-                        titles = re.findall(r'<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>', body)
-                        return [t for t in titles if len(t) > 10][:20]
+                    titles = re.findall(r'<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>', body)
+                    return [t.strip() for t in titles if len(t.strip()) > 15 and '<' not in t][:20]
     except Exception as e:
         logger.debug(f"RSS {url}: {e}")
     return []
 
 async def fetch_crypto_news() -> List[str]:
-    """Fetch latest crypto headlines from multiple free RSS feeds."""
+    """Fetch latest crypto headlines from 4 reliable free RSS feeds."""
     sources = [
         "https://decrypt.co/feed",
-        "https://cryptonews.com/news/feed/",
         "https://cointelegraph.com/rss",
         "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        "https://blockworks.co/feed",
+        "https://beincrypto.com/feed/",
+        "https://cryptoslate.com/feed/",
     ]
-    all_titles = []
-    results = await asyncio.gather(*[_fetch_rss(src) for src in sources], return_exceptions=True)
+    results = await asyncio.gather(*[_fetch_rss(s) for s in sources], return_exceptions=True)
+    seen, unique = set(), []
     for r in results:
         if isinstance(r, list):
-            all_titles.extend(r)
-    # Deduplicate and return
-    seen = set()
-    unique = []
-    for t in all_titles:
-        key = t[:40].lower()
-        if key not in seen:
-            seen.add(key)
-            unique.append(t)
+            for t in r:
+                key = t[:40].lower()
+                if key not in seen:
+                    seen.add(key)
+                    unique.append(t)
     return unique[:30]
 
+# ─── Pump.fun v3 API (working, no key needed) ───────────────────
+_PUMPFUN_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json",
+    "Referer": "https://pump.fun/",
+    "Origin": "https://pump.fun",
+}
+
+async def pumpfun_latest(limit: int = 20) -> List[Dict]:
+    """Get latest Pump.fun launches — real-time CT social signal."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://frontend-api-v3.pump.fun/coins",
+                params={"offset": "0", "limit": str(limit), "sort": "created_timestamp", "order": "DESC"},
+                headers=_PUMPFUN_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    if isinstance(data, list):
+                        return data
+    except Exception as e:
+        logger.debug(f"pumpfun_latest: {e}")
+    return []
+
+async def pumpfun_trending(limit: int = 10) -> List[Dict]:
+    """Get trending Pump.fun coins by market cap."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://frontend-api-v3.pump.fun/coins",
+                params={"offset": "0", "limit": str(limit), "sort": "market_cap", "order": "DESC"},
+                headers=_PUMPFUN_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    if isinstance(data, list):
+                        return data
+    except Exception as e:
+        logger.debug(f"pumpfun_trending: {e}")
+    return []
+
+async def fetch_social_signals() -> Dict:
+    """
+    Combined social signal from multiple real-time sources.
+    Returns: {
+        "pump_latest": [...],    # Pump.fun new launches
+        "pump_trending": [...],  # Pump.fun trending
+        "news": [...],           # RSS headlines
+        "cg_trending": [...],    # CoinGecko trending coins
+    }
+    """
+    pump_lat, pump_trend, news, cg_tr = await asyncio.gather(
+        pumpfun_latest(20),
+        pumpfun_trending(10),
+        fetch_crypto_news(),
+        cg_trending(),
+        return_exceptions=True
+    )
+    return {
+        "pump_latest":  pump_lat  if isinstance(pump_lat, list)  else [],
+        "pump_trending":pump_trend if isinstance(pump_trend, list) else [],
+        "news":         news       if isinstance(news, list)       else [],
+        "cg_trending":  (cg_tr.get("coins",[]) if isinstance(cg_tr, dict) else []),
+    }
+
+# ─── Twitter search — best-effort, graceful fallback ────────────
 async def tw_search(query: str, limit: int = 15) -> List[Dict]:
-    """Search for crypto content. Uses RSS feeds as primary source."""
-    # Try Nitter RSS search first (free, no auth)
-    nitter_instances = [
-        "https://nitter.privacydev.net",
-        "https://nitter.poast.org",
-        "https://nitter.cz",
-    ]
-    for instance in nitter_instances:
-        try:
-            url = f"{instance}/search/rss?q={query.replace(' ', '+')}&f=tweets"
-            async with aiohttp.ClientSession() as s:
-                async with s.get(url, timeout=aiohttp.ClientTimeout(total=6),
-                                 headers={"User-Agent": "Mozilla/5.0"}) as r:
-                    if r.status == 200:
-                        body = await r.text()
-                        if len(body) > 200:
-                            titles = re.findall(r'<title>(.*?)</title>', body)[1:]
-                            descs  = re.findall(r'<description>(.*?)</description>', body)
-                            tweets = []
-                            for i, t in enumerate(titles[:limit]):
-                                text = descs[i] if i < len(descs) else t
-                                text = re.sub(r'<[^>]+>', '', text)
-                                tweets.append({"id": str(i), "text": text[:280]})
-                            if tweets:
-                                logger.debug(f"Nitter {instance}: {len(tweets)} tweets")
-                                return tweets
-        except Exception as e:
-            logger.debug(f"Nitter {instance}: {e}")
-    # If TWITTER_AUTH_TOKEN set, try cookie auth
+    """
+    Try Twitter cookie auth first. Falls back to Pump.fun keyword search.
+    NOTE: All public Twitter scrapers (Nitter, RSSHub) are dead as of 2026.
+    """
+    # Try cookie auth if TWITTER_AUTH_TOKEN is set
     if TWITTER_AUTH_TOKEN:
         try:
             async with aiohttp.ClientSession() as s:
@@ -810,67 +847,73 @@ async def tw_search(query: str, limit: int = 15) -> List[Dict]:
                     guest = (await rg.json()).get("guest_token", "") if rg.status == 200 else ""
                 if guest:
                     async with s.get(
-                        "https://api.twitter.com/1.1/search/tweets.json",
+                        "https://twitter.com/i/api/2/search/adaptive.json",
                         headers={**_tw_headers(), "x-guest-token": guest},
-                        params={"q": query, "count": str(min(limit,20)), "tweet_mode": "extended"},
+                        params={"q": query, "count": str(min(limit, 20)), "tweet_mode": "extended", "result_type": "recent"},
                         timeout=aiohttp.ClientTimeout(total=12)
                     ) as r:
                         if r.status == 200:
-                            data = await r.json()
-                            return [{"id": t.get("id_str",""), "text": t.get("full_text", t.get("text",""))}
-                                    for t in data.get("statuses", [])]
+                            d = await r.json()
+                            tweets_raw = d.get("globalObjects", {}).get("tweets", {})
+                            result = []
+                            for tid, t in tweets_raw.items():
+                                result.append({"id": tid, "text": t.get("full_text", t.get("text", ""))})
+                            if result:
+                                logger.info(f"tw_search cookie: {len(result)} tweets for '{query}'")
+                                return result[:limit]
         except Exception as e:
             logger.debug(f"tw_search cookie: {e}")
+
+    # Fallback: search Pump.fun for keyword
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://frontend-api-v3.pump.fun/coins",
+                params={"offset": "0", "limit": "20", "sort": "created_timestamp", "order": "DESC"},
+                headers=_PUMPFUN_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    if isinstance(data, list):
+                        q_low = query.lower()
+                        matches = [
+                            {"id": str(i), "text": f"${c.get('symbol','?')} — {c.get('name','')} — {c.get('description','')[:100]}"}
+                            for i, c in enumerate(data)
+                            if any(w in (c.get('name','')+c.get('symbol','')+c.get('description','')).lower()
+                                   for w in q_low.split())
+                        ]
+                        return matches[:limit]
+    except Exception as e:
+        logger.debug(f"tw_search pumpfun fallback: {e}")
     return []
 
 async def tw_user_tweets(username: str, limit: int = 10) -> List[Dict]:
-    """Get user tweets via Nitter RSS or Twitter cookie auth."""
-    # Try Nitter RSS
-    nitter_instances = ["https://nitter.privacydev.net", "https://nitter.poast.org"]
-    for instance in nitter_instances:
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.get(f"{instance}/{username}/rss",
-                                 timeout=aiohttp.ClientTimeout(total=6),
-                                 headers={"User-Agent": "Mozilla/5.0"}) as r:
-                    if r.status == 200:
-                        body = await r.text()
-                        if len(body) > 200:
-                            titles = re.findall(r'<title>(.*?)</title>', body)[2:]
-                            descs  = re.findall(r'<description>(.*?)</description>', body)
-                            ids    = re.findall(r'<guid>(.*?)</guid>', body)
-                            tweets = []
-                            for i, t in enumerate(titles[:limit]):
-                                text = descs[i] if i < len(descs) else t
-                                text = re.sub(r'<[^>]+>', '', text)
-                                tweets.append({"id": ids[i] if i < len(ids) else str(i), "text": text[:280]})
-                            if tweets:
-                                return tweets
-        except Exception as e:
-            logger.debug(f"Nitter user {username}: {e}")
-    # Fallback: Twitter cookie auth
-    if TWITTER_AUTH_TOKEN:
-        try:
-            async with aiohttp.ClientSession() as s:
+    """
+    Try Twitter cookie auth. If no auth token, returns empty (no working public scraper exists).
+    """
+    if not TWITTER_AUTH_TOKEN:
+        return []
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://api.twitter.com/1.1/guest/activate.json",
+                headers={"Authorization": "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"},
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as rg:
+                guest = (await rg.json()).get("guest_token", "") if rg.status == 200 else ""
+            if guest:
                 async with s.get(
-                    "https://api.twitter.com/1.1/guest/activate.json",
-                    headers={"Authorization": "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA"},
-                    timeout=aiohttp.ClientTimeout(total=8)
-                ) as rg:
-                    guest = (await rg.json()).get("guest_token","") if rg.status==200 else ""
-                if guest:
-                    async with s.get(
-                        "https://api.twitter.com/1.1/statuses/user_timeline.json",
-                        headers={**_tw_headers(), "x-guest-token": guest},
-                        params={"screen_name": username, "count": str(min(limit,20)), "tweet_mode": "extended"},
-                        timeout=aiohttp.ClientTimeout(total=12)
-                    ) as r:
-                        if r.status == 200:
-                            tweets = await r.json()
-                            return [{"id": t.get("id_str",""), "text": t.get("full_text", t.get("text",""))}
-                                    for t in tweets]
-        except Exception as e:
-            logger.debug(f"tw_user cookie: {e}")
+                    "https://api.twitter.com/1.1/statuses/user_timeline.json",
+                    headers={**_tw_headers(), "x-guest-token": guest},
+                    params={"screen_name": username, "count": str(min(limit,20)), "tweet_mode": "extended", "include_rts": "false"},
+                    timeout=aiohttp.ClientTimeout(total=12)
+                ) as r:
+                    if r.status == 200:
+                        tweets = await r.json()
+                        return [{"id": t.get("id_str",""), "text": t.get("full_text", t.get("text",""))} for t in tweets]
+    except Exception as e:
+        logger.debug(f"tw_user_tweets: {e}")
     return []
 
 def extract_cas(text: str) -> List[str]:
@@ -1311,7 +1354,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v32*\n"
+        f"\U0001f985 *KAYO BRAIN v33*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1348,7 +1391,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v32 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v33 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -1964,29 +2007,227 @@ async def tt_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
         await u.message.reply_text("Usage: `/tt <ca_or_symbol>`", parse_mode="Markdown"); return
     query = " ".join(c.args)
-    msg   = await u.message.reply_text(f"🐦 *Searching Twitter for {query}...*", parse_mode="Markdown")
-    if not TWITTER_AUTH_TOKEN:
-        await msg.edit_text(
-            "⚠️ *Twitter not configured*\n\n"
-            "Add `TWITTER_AUTH_TOKEN` to Render env vars.\n"
-            "Get it: twitter.com → DevTools → Application → Cookies → `auth_token`",
-            parse_mode="Markdown"
-        ); return
-    tweets = await tw_search(f"{query} solana", limit=20)
-    if not tweets:
-        await msg.edit_text(f"No recent tweets found for `{query}`."); return
-    texts = " ".join([t.get("text", "") for t in tweets])
-    cas   = extract_cas(texts)
-    ai    = await ai_ask(
-        f"Analyze {len(tweets)} recent tweets about {query} on Solana. "
-        f"What's the sentiment (bullish/bearish/neutral)? Key themes? Any alpha? "
-        f"Tweets: {texts[:800]}",
-        fallback="Could not analyze."
+    msg   = await u.message.reply_text(f"🔍 *Searching social signals for {query}...*", parse_mode="Markdown")
+
+    # Search DexScreener + Pump.fun for this token
+    dex_pairs = await dex_search_pairs(query)
+    pump_coins = await asyncio.gather(
+        pumpfun_latest(30),
+        return_exceptions=True
     )
-    lines = [f"🐦 *TWITTER: {query.upper()}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{len(tweets)} tweets analyzed"]
-    if cas: lines.append("\n📋 *CAs found:*\n" + "\n".join([f"`{ca}`" for ca in cas[:3]]))
-    lines.append(f"\n🧠 *AI Analysis:*\n_{ai}_")
-    await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+    pump_list = pump_coins[0] if isinstance(pump_coins[0], list) else []
+
+    # Filter pump.fun matches
+    q_low = query.lower()
+    pump_matches = [
+        c for c in pump_list
+        if any(w in (c.get('symbol','') + c.get('name','') + c.get('description','')).lower()
+               for w in q_low.split() if len(w) > 2)
+    ]
+
+    sol_pairs = [p for p in (dex_pairs or []) if p.get("chainId") == "solana"][:5]
+    cas = list(set(
+        [(p.get("baseToken") or {}).get("address","") for p in sol_pairs] +
+        [c.get("mint","") for c in pump_matches[:3]]
+    ))
+    cas = [c for c in cas if c]
+
+    # Build context for AI
+    context_parts = []
+    if sol_pairs:
+        for p in sol_pairs[:3]:
+            sym = (p.get("baseToken") or {}).get("symbol","?")
+            fdv = float(p.get("fdv",0) or 0)
+            ch1h = float((p.get("priceChange") or {}).get("h1",0) or 0)
+            b1h = int(((p.get("txns") or {}).get("h1") or {}).get("buys",0) or 0)
+            s1h = int(((p.get("txns") or {}).get("h1") or {}).get("sells",0) or 0)
+            context_parts.append(f"${sym}: MCap {_usd(fdv)}, 1h {_pct(ch1h)}, Buys/Sells {b1h}/{s1h}")
+    if pump_matches:
+        for c in pump_matches[:3]:
+            context_parts.append(f"PumpFun: ${c.get('symbol','?')} — {c.get('description','')[:80]}")
+
+    context = "\n".join(context_parts) if context_parts else f"No on-chain data found for '{query}'"
+
+    # AI sentiment analysis from on-chain signals
+    ai = await ai_ask(
+        f"Analyze the on-chain social signals for '{query}' on Solana:\n{context}\n\n"
+        "What's the sentiment (bullish/bearish/neutral)? Is this worth aping? "
+        "What does the buy/sell pressure and price action tell us? "
+        "2-3 sharp sentences, degen style.",
+        fallback="Not enough signal to analyze right now.",
+        max_tokens=200, inject_market=True
+    )
+
+    out = [f"🔍 *SOCIAL SIGNAL: {query.upper()}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    if context_parts:
+        out.append("\n📊 *On-chain data:*")
+        for line in context_parts[:4]:
+            out.append(f"  {line}")
+    if cas:
+        out.append("\n📋 *Contract addresses:*")
+        for ca in cas[:3]:
+            out.append(f"  `{ca}`")
+    out.append(f"\n🧠 *Kayo's read:*\n_{ai}_")
+    out.append("\n_Powered by DexScreener + Pump.fun (Twitter scraping unavailable)_")
+
+    try:
+        await msg.edit_text("\n".join(out), parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception:
+        plain = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', "\n".join(out))
+        await msg.edit_text(plain[:4000])
+
+
+async def moni_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.message.reply_text("Usage: `/moni @username`", parse_mode="Markdown"); return
+    username = c.args[0].lstrip("@")
+    msg      = await u.message.reply_text(f"👤 *Checking @{username}...*", parse_mode="Markdown")
+
+    tweets = []
+    # Try Twitter cookie auth if configured
+    if TWITTER_AUTH_TOKEN:
+        tweets = await tw_user_tweets(username, limit=20)
+
+    if tweets:
+        texts = " ".join([t.get("text","") for t in tweets])
+        cas   = extract_cas(texts)
+        ai    = await ai_ask(
+            f"Analyze @{username}'s {len(tweets)} recent tweets. "
+            f"Are they reliable alpha? What tokens/narratives do they push? "
+            f"Tweets sample: {texts[:800]}",
+            fallback="", max_tokens=200
+        )
+        lines_out = [f"👤 *@{username}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{len(tweets)} tweets analyzed"]
+        if cas: lines_out.append("\n📋 *CAs found:*\n" + "\n".join([f"`{ca}`" for ca in cas[:5]]))
+        if ai:  lines_out.append(f"\n🧠 *AI read:*\n_{ai}_")
+    else:
+        # No Twitter access — show honest message + suggest /watch
+        lines_out = [
+            f"👤 *@{username}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            f"⚠️ Twitter scraping is currently unavailable (all public scrapers are Cloudflare-blocked).",
+            f"",
+            f"To enable Twitter features, add `TWITTER_AUTH_TOKEN` in Render env vars:",
+            f"1. Open twitter.com in browser (logged in)",
+            f"2. DevTools → Application → Cookies → copy `auth_token` value",
+            f"3. Add it to Render environment variables as `TWITTER_AUTH_TOKEN`",
+            f"",
+            f"_Use `/watch @{username}` to track their CA drops once Twitter is set up._",
+        ]
+
+    try:
+        await msg.edit_text("\n".join(lines_out), parse_mode="Markdown")
+    except Exception:
+        plain = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', "\n".join(lines_out))
+        await msg.edit_text(plain[:4000])
+
+
+async def watch_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.message.reply_text("Usage: `/watch @username` — watch a Twitter account for CA drops", parse_mode="Markdown"); return
+    username = c.args[0].lstrip("@").lower()
+    watchlist[username] = {"added": time.time(), "by": u.effective_user.id, "hits": 0}
+    await _save()
+    add_xp(u.effective_user.id, 5)
+    await u.message.reply_text(
+        f"👁 *Watching @{username}*\n"
+        f"I'll alert the group the moment they drop a CA.\n"
+        f"_Requires TWITTER\\_AUTH\\_TOKEN to be set in Render env vars_",
+        parse_mode="Markdown"
+    )
+
+async def unwatch_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.message.reply_text("Usage: `/unwatch @username`", parse_mode="Markdown"); return
+    username = c.args[0].lstrip("@").lower()
+    if username in watchlist:
+        del watchlist[username]; _save()
+        await u.message.reply_text(f"✅ Stopped watching @{username}")
+    else:
+        await u.message.reply_text(f"@{username} is not in your watchlist.")
+
+async def watchlist_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not watchlist:
+        await u.message.reply_text("Watchlist empty. Use `/watch @username` to add.", parse_mode="Markdown"); return
+    lines = ["👁 *WATCHLIST*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    for un, data in watchlist.items():
+        added = datetime.fromtimestamp(data.get("added", 0)).strftime("%d/%m")
+        hits  = data.get("hits", 0)
+        lines.append(f"• @{un} — added {added}, {hits} CA drops caught")
+    await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def tt_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.message.reply_text("Usage: `/tt <ca_or_symbol>`", parse_mode="Markdown"); return
+    query = " ".join(c.args)
+    msg   = await u.message.reply_text(f"🔍 *Searching social signals for {query}...*", parse_mode="Markdown")
+
+    # Search DexScreener + Pump.fun for this token
+    dex_pairs = await dex_search_pairs(query)
+    pump_coins = await asyncio.gather(
+        pumpfun_latest(30),
+        return_exceptions=True
+    )
+    pump_list = pump_coins[0] if isinstance(pump_coins[0], list) else []
+
+    # Filter pump.fun matches
+    q_low = query.lower()
+    pump_matches = [
+        c for c in pump_list
+        if any(w in (c.get('symbol','') + c.get('name','') + c.get('description','')).lower()
+               for w in q_low.split() if len(w) > 2)
+    ]
+
+    sol_pairs = [p for p in (dex_pairs or []) if p.get("chainId") == "solana"][:5]
+    cas = list(set(
+        [(p.get("baseToken") or {}).get("address","") for p in sol_pairs] +
+        [c.get("mint","") for c in pump_matches[:3]]
+    ))
+    cas = [c for c in cas if c]
+
+    # Build context for AI
+    context_parts = []
+    if sol_pairs:
+        for p in sol_pairs[:3]:
+            sym = (p.get("baseToken") or {}).get("symbol","?")
+            fdv = float(p.get("fdv",0) or 0)
+            ch1h = float((p.get("priceChange") or {}).get("h1",0) or 0)
+            b1h = int(((p.get("txns") or {}).get("h1") or {}).get("buys",0) or 0)
+            s1h = int(((p.get("txns") or {}).get("h1") or {}).get("sells",0) or 0)
+            context_parts.append(f"${sym}: MCap {_usd(fdv)}, 1h {_pct(ch1h)}, Buys/Sells {b1h}/{s1h}")
+    if pump_matches:
+        for c in pump_matches[:3]:
+            context_parts.append(f"PumpFun: ${c.get('symbol','?')} — {c.get('description','')[:80]}")
+
+    context = "\n".join(context_parts) if context_parts else f"No on-chain data found for '{query}'"
+
+    # AI sentiment analysis from on-chain signals
+    ai = await ai_ask(
+        f"Analyze the on-chain social signals for '{query}' on Solana:\n{context}\n\n"
+        "What's the sentiment (bullish/bearish/neutral)? Is this worth aping? "
+        "What does the buy/sell pressure and price action tell us? "
+        "2-3 sharp sentences, degen style.",
+        fallback="Not enough signal to analyze right now.",
+        max_tokens=200, inject_market=True
+    )
+
+    out = [f"🔍 *SOCIAL SIGNAL: {query.upper()}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    if context_parts:
+        out.append("\n📊 *On-chain data:*")
+        for line in context_parts[:4]:
+            out.append(f"  {line}")
+    if cas:
+        out.append("\n📋 *Contract addresses:*")
+        for ca in cas[:3]:
+            out.append(f"  `{ca}`")
+    out.append(f"\n🧠 *Kayo's read:*\n_{ai}_")
+    out.append("\n_Powered by DexScreener + Pump.fun (Twitter scraping unavailable)_")
+
+    try:
+        await msg.edit_text("\n".join(out), parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception:
+        plain = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', "\n".join(out))
+        await msg.edit_text(plain[:4000])
+
 
 async def moni_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
@@ -2265,7 +2506,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v32 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v33 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2539,7 +2780,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v32 STATUS*\n"
+        f"⚙️ *KAYO BRAIN v33 STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -3750,86 +3991,103 @@ async def bg_established_scanner(app: Application):
 
 async def bg_narrative_news_scanner(app: Application):
     """
-    Every 10 minutes: fetch real crypto news from RSS feeds → AI extracts narratives
-    → search DexScreener for tokens playing those narratives → alert.
-    NO keyword list. AI reads REAL headlines and generates search terms live.
+    Every 10 min: pulls REAL social signals from Pump.fun + RSS news + CoinGecko
+    → feeds to AI → AI generates DexScreener search terms → hunts pumping tokens.
+    No Twitter needed. All free, all working.
     """
     await asyncio.sleep(90)
-    _nar_seen: dict = {}
 
     while True:
         try:
-            # 1. Fetch real news headlines from multiple free RSS feeds
-            headlines = await fetch_crypto_news()
-            if not headlines:
+            signals = await fetch_social_signals()
+
+            # Build context from all sources
+            headlines   = signals.get("news", [])[:12]
+            pump_latest = signals.get("pump_latest", [])[:10]
+            pump_trend  = signals.get("pump_trending", [])[:5]
+            cg_coins    = signals.get("cg_trending", [])[:5]
+
+            # Extract pump.fun coin names/themes as social signal
+            pump_names = [f"${c.get('symbol','?')} ({c.get('name','?')})" for c in pump_latest]
+            pump_trend_names = [f"${c.get('symbol','?')}" for c in pump_trend]
+            cg_names = [c.get("item",{}).get("symbol","?") for c in cg_coins]
+
+            context = ""
+            if headlines:
+                context += "NEWS HEADLINES:\n" + "\n".join(f"- {h}" for h in headlines[:8]) + "\n\n"
+            if pump_names:
+                context += f"PUMP.FUN LATEST LAUNCHES: {', '.join(pump_names[:8])}\n"
+            if pump_trend_names:
+                context += f"PUMP.FUN TRENDING: {', '.join(pump_trend_names)}\n"
+            if cg_names:
+                context += f"COINGECKO TRENDING: {', '.join(cg_names)}\n"
+
+            if not context.strip():
                 await asyncio.sleep(600); continue
 
-            logger.info(f"[NARRATIVE] Got {len(headlines)} headlines")
+            logger.info(f"[NARRATIVE] Signal context built — {len(headlines)} headlines, {len(pump_latest)} pump launches")
 
-            # 2. Ask AI to extract 6-8 DexScreener search terms from the headlines
-            headlines_text = "\n".join(headlines[:15])
+            # Ask AI to extract DexScreener search terms from all signals
             ai_terms_raw = await ai_ask(
-                f"These are today's crypto news headlines:\n{headlines_text}\n\n"
-                "Based on these headlines, what crypto token names, meme themes, or narrative keywords "
-                "are likely to have pumping Solana meme coins right now? "
-                "Generate 6-8 short search terms (1-2 words each) that someone would use on DexScreener. "
-                "Output ONLY the terms, one per line. No explanations. No numbering.",
+                f"Here are REAL-TIME crypto social signals:\n{context}\n"
+                "Based on these signals, what 6 short search terms (1-2 words each) would find "
+                "pumping Solana meme coins on DexScreener right now? "
+                "Focus on themes from the news headlines and trending coin names. "
+                "Output ONLY the terms, one per line. No explanations.",
                 fallback="",
-                max_tokens=120,
+                max_tokens=100,
                 inject_market=False
             )
             if not ai_terms_raw:
                 await asyncio.sleep(600); continue
 
             search_terms = [t.strip().lower() for t in ai_terms_raw.strip().split("\n")
-                           if t.strip() and len(t.strip()) > 1][:8]
-            logger.info(f"[NARRATIVE] AI search terms: {search_terms}")
+                           if t.strip() and len(t.strip()) > 1][:6]
+            logger.info(f"[NARRATIVE] AI terms: {search_terms}")
 
             if GROUP_CHAT_ID == 0:
                 await asyncio.sleep(600); continue
 
             found_count = 0
+            now = time.time()
             for term in search_terms:
                 try:
                     pairs = await dex_search_pairs(f"solana {term}")
-                    if not pairs:
-                        continue
+                    if not pairs: continue
                     for p in pairs[:3]:
-                        addr  = (p.get("baseToken") or {}).get("address", "")
+                        addr = (p.get("baseToken") or {}).get("address", "")
                         if not addr or addr in blacklist: continue
-                        fdv   = float(p.get("fdv", 0) or 0)
-                        liq   = float((p.get("liquidity") or {}).get("usd", 0) or 0)
-                        if not (1000 <= fdv <= 500_000) or liq < 500: continue
-                        ch1h  = float((p.get("priceChange") or {}).get("h1", 0) or 0)
+                        fdv  = float(p.get("fdv", 0) or 0)
+                        liq  = float((p.get("liquidity") or {}).get("usd", 0) or 0)
+                        if not (1_000 <= fdv <= 500_000) or liq < 500: continue
+                        ch1h = float((p.get("priceChange") or {}).get("h1", 0) or 0)
                         if ch1h < 5: continue
-                        b1h   = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
-                        s1h   = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
+                        b1h  = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
+                        s1h  = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
                         buy_pct = b1h / max(b1h+s1h, 1) * 100
                         if buy_pct < 52: continue
 
-                        alert_id = hashlib.md5(f"{addr}:nar:{int(time.time()//7200)}".encode()).hexdigest()[:16]
+                        alert_id = hashlib.md5(f"{addr}:nar:{int(now//7200)}".encode()).hexdigest()[:16]
                         if _seen_check(seen_alert_ids, alert_id): continue
                         _seen_add(seen_alert_ids, alert_id)
 
-                        sym  = (p.get("baseToken") or {}).get("symbol", "???")
-                        name = (p.get("baseToken") or {}).get("name", "")
+                        sym   = (p.get("baseToken") or {}).get("symbol", "???")
+                        name  = (p.get("baseToken") or {}).get("name", "")
+                        nar   = detect_narrative(f"{sym} {name} {term}")
+                        price = float(p.get("priceUsd", 0) or 0)
+                        v5m   = float((p.get("volume") or {}).get("m5", 0) or 0)
+                        v1h   = float((p.get("volume") or {}).get("h1", 0) or 0)
+                        ch5m  = float((p.get("priceChange") or {}).get("m5", 0) or 0)
+                        avg5m = v1h / 12 if v1h > 0 else 1
+                        vs    = v5m / max(avg5m, 1)
 
-                        # AI explanation of why this token plays the narrative
                         ai_why = await ai_ask(
-                            f"Token ${sym} ({name}) is pumping +{ch1h:.0f}% on Solana. "
-                            f"The news narrative is: \"{term}\". "
-                            f"Why might this token be connected to that narrative? 1 sentence, max 12 words.",
-                            fallback="Narrative play — trending in current news cycle.",
+                            f"Token ${sym} ({name}) is up +{ch1h:.0f}% on Solana. "
+                            f"The current narrative/theme is: \'{term}\'. "
+                            "Why might this be relevant right now? 1 sharp sentence, max 12 words.",
+                            fallback="Riding current narrative — strong buy pressure.",
                             max_tokens=50, inject_market=False
                         )
-
-                        nar = detect_narrative(f"{sym} {name} {term}")
-                        v5m = float((p.get("volume") or {}).get("m5", 0) or 0)
-                        v1h = float((p.get("volume") or {}).get("h1", 0) or 0)
-                        ch5m = float((p.get("priceChange") or {}).get("m5", 0) or 0)
-                        price = float(p.get("priceUsd", 0) or 0)
-                        avg5m = v1h / 12 if v1h > 0 else 1
-                        vs = v5m / max(avg5m, 1)
                         tok = {
                             "address": addr, "sym": sym, "name": name,
                             "price": price, "fdv": fdv, "mcap": fdv, "liq": liq,
@@ -3847,11 +4105,10 @@ async def bg_narrative_news_scanner(app: Application):
                             "pair_addr": p.get("pairAddress", ""),
                             "mscore": min(100, int(abs(ch1h) + buy_pct/2 + vs*10)),
                         }
-                        card = build_alert_card(tok, "narrative", ai_why)
                         try:
                             await app.bot.send_message(
                                 chat_id=GROUP_CHAT_ID,
-                                text=card,
+                                text=build_alert_card(tok, "narrative", ai_why),
                                 parse_mode="Markdown",
                                 reply_markup=scan_buttons(addr, sym, tok["pair_addr"]),
                                 disable_web_page_preview=True,
@@ -3860,17 +4117,17 @@ async def bg_narrative_news_scanner(app: Application):
                             logger.info(f"[NARRATIVE] ${sym} via '{term}': +{ch1h:.0f}%")
                             await asyncio.sleep(2)
                         except Exception as e:
-                            logger.warning(f"narrative send: {e}")
+                            logger.warning(f"narrative send {sym}: {e}")
                 except Exception as e:
                     logger.debug(f"narrative term '{term}': {e}")
                 await asyncio.sleep(1)
 
-            logger.info(f"[NARRATIVE] Done — {found_count} alerts from {len(search_terms)} AI terms")
+            logger.info(f"[NARRATIVE] Cycle done — {found_count} alerts, {len(search_terms)} AI terms")
 
         except Exception as e:
             logger.error(f"bg_narrative_news_scanner: {e}", exc_info=True)
 
-        await asyncio.sleep(600)  # run every 10 minutes
+        await asyncio.sleep(600)
 
 
 async def bg_trending_metas_scanner(app: Application):
@@ -4226,7 +4483,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v32 ready — "
+        f"🦅 Kayo Brain v33 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
