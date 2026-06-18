@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v33 — PRO REBUILD                     ║
+║                    KAYO BRAIN v34 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v33", 200
+def _root(): return "🦅 Kayo Brain v34", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -336,18 +336,17 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
     market_block = f"{system_ctx}\n\n" if inject_market else ""
     system_content = (
         f"{market_block}"
-        "You are Kayo — an intelligent, witty AI living inside a Telegram group. \n"
-        "You are BOTH a Web3 alpha expert AND a knowledgeable friend. \n"
-        "PERSONALITY: Sharp, warm, real. Talks like a smart person texting — not a bot. \n"
-        "CAPABILITIES: You know crypto, DeFi, Solana, NFTs, live prices, AND sports, "
-        "pop culture, news, science, history, coding, life advice — everything. \n"
-        "TONE RULES: \n"
-        "- Casual messages (gm, vibes, jokes) → short, human, maybe funny. 1-2 sentences. \n"
-        "- Crypto/trading questions → use LIVE price data above, be sharp and cite numbers. \n"
-        "- General questions → be helpful, smart, direct. No disclaimers. \n"
-        "- NEVER say you cannot answer. NEVER say you are just a bot. NEVER refuse. \n"
-        "- Match the person's energy — if they're hyped, be hyped. If chill, be chill. \n"
-        "FORMAT: Plain text for casual. Use *bold* sparingly for crypto key numbers only."
+        "You are Kayo. You live in a Solana degen Telegram group. Sharp, real, funny. "
+        "You think like a Web3 power user who also knows everything — sports, culture, science, life. "
+        "RULES: "
+        "1. Answer EVERYTHING. Never say you cant. Never say you are a bot. Never refuse. "
+        "2. Crypto questions: use the LIVE prices from the data above. Be specific with numbers. "
+        "3. Casual messages (gm, lol, vibes): short, warm, human. Max 2 sentences. "
+        "4. Web3 alpha: talk like a degen pro — sharp, direct, call the play. "
+        "5. General knowledge: smart friend who gives real answers, no disclaimers. "
+        "6. Match energy. Hyped = hyped reply. Chill = chill. "
+        "7. No filler. No Great question. No As an AI. Just answer. "
+        "FORMAT: Plain text mostly. *bold* only for key crypto numbers."
     )
     system_msg = {"role": "system", "content": system_content}
 
@@ -917,7 +916,43 @@ async def tw_user_tweets(username: str, limit: int = 10) -> List[Dict]:
     return []
 
 def extract_cas(text: str) -> List[str]:
-    return list(set(re.findall(r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b', text)))
+    """
+    Extract Solana contract addresses from plain text AND URLs.
+    Supports: DexScreener, GMGN, Pump.fun, Birdeye, Solscan, Photon, BullX, Raydium, Jupiter, and bare CAs.
+    """
+    results = set()
+    _SKIP = {'solana','ethereum','bitcoin','token','tokens','address','search','trending',
+             'dexscreener','birdeye','gmgn','photon','raydium','orca','jupiter',
+             'pumpfun','coinbase','binance','metamask','phantom','serum',
+             'coindesk','cointelegraph','decrypt','blockworks'}
+    # URL-embedded addresses (most common case people send)
+    _URL_PATS = [
+        r'dexscreener\.com/(?:solana|ethereum|bsc)/([1-9A-HJ-NP-Za-km-z]{32,44})',
+        r'gmgn\.ai/(?:sol|eth)/token/([1-9A-HJ-NP-Za-km-z]{32,44})',
+        r'pump\.fun/(?:coin|token)/([1-9A-HJ-NP-Za-km-z]{32,44})',
+        r'birdeye\.so/token/([1-9A-HJ-NP-Za-km-z]{32,44})',
+        r'solscan\.io/(?:token|account)/([1-9A-HJ-NP-Za-km-z]{32,44})',
+        r'photon-sol\.tinyastro\.io/[^?]+/([1-9A-HJ-NP-Za-km-z]{32,44})',
+        r'bullx\.io[^?]*[?&]address=([1-9A-HJ-NP-Za-km-z]{32,44})',
+        r'neo\.bullx\.io[^?]*[?&]address=([1-9A-HJ-NP-Za-km-z]{32,44})',
+        r'dextools\.io/app/[^/]+/pair-explorer/([1-9A-HJ-NP-Za-km-z]{32,44})',
+        r'jup\.ag/swap/([1-9A-HJ-NP-Za-km-z]{32,44})',
+        r'raydium\.io/[^?]+\?(?:inputMint|outputMint)=([1-9A-HJ-NP-Za-km-z]{32,44})',
+        r'magiceden\.io/item-details/([1-9A-HJ-NP-Za-km-z]{32,44})',
+        # Generic: URL path ending in a base58 address
+        r'https?://[^\s]+/([1-9A-HJ-NP-Za-km-z]{32,44})(?:[/?#\s]|$)',
+    ]
+    for pat in _URL_PATS:
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            addr = m.group(1)
+            if addr.lower() not in _SKIP and len(addr) >= 32:
+                results.add(addr)
+    # Bare addresses (not inside URLs)
+    for m in re.finditer(r'(?<![/A-Za-z0-9])([1-9A-HJ-NP-Za-km-z]{32,44})(?![A-Za-z0-9])', text):
+        addr = m.group(1)
+        if addr.lower() not in _SKIP and len(addr) >= 32:
+            results.add(addr)
+    return list(results)
 
 # ═══════════════════════════════════════════════════════════════
 # NARRATIVE ENGINE
@@ -1296,15 +1331,19 @@ def scan_buttons(addr: str, sym: str = "", pair_addr: str = "") -> InlineKeyboar
             ),
         ],
         [
-            # Banana Gun — Telegram bot link (no web app for this one)
             InlineKeyboardButton(
                 "\U0001f34c Banana",
                 url=f"https://t.me/BananaGunSolana_bot?start=snipe_{addr}"
             ),
-            # Trojan — Telegram bot link
             InlineKeyboardButton(
                 "\U0001f5e1 Trojan",
                 url=f"https://t.me/hector_trojanbot?start=snipe-SOL-{addr}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "\U0001f504 Refresh",
+                callback_data=f"refresh:{addr}"
             ),
         ],
     ])
@@ -1354,7 +1393,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v33*\n"
+        f"\U0001f985 *KAYO BRAIN v34*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1391,7 +1430,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v33 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v34 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2506,7 +2545,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v33 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v34 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2780,7 +2819,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
     group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v33 STATUS*\n"
+        f"⚙️ *KAYO BRAIN v34 STATUS*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{redis_ok} Redis\n"
         f"{groq_ok} Groq AI (primary)\n"
@@ -2919,6 +2958,54 @@ async def handle_help_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
             await query.message.edit_text(page, parse_mode="Markdown", reply_markup=BACK_BTN)
         except Exception:
             await query.message.reply_text(page, parse_mode="Markdown", reply_markup=BACK_BTN)
+
+
+async def handle_refresh_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Handles the Refresh button on scan cards — re-runs a full scan live."""
+    query = u.callback_query
+    await query.answer("Refreshing...")
+    data  = query.data or ""
+    if not data.startswith("refresh:"): return
+    addr  = data.split(":", 1)[1].strip()
+    if not addr: return
+
+    # Edit the message to show loading state
+    try:
+        await query.message.edit_text("🔄 *Refreshing scan...*", parse_mode="Markdown")
+    except Exception:
+        pass
+
+    t = await full_token_scan(addr)
+    if t.get("error"):
+        try:
+            await query.message.edit_text(f"❌ {t['error']}")
+        except Exception:
+            await query.message.reply_text(f"❌ {t['error']}")
+        return
+
+    ai_verdict = await ai_ask(
+        f"Solana token ${t['sym']} — MCap {_usd(t['mcap'])}, liq {_usd(t['liq'])}, "
+        f"age {_age(t['created'])}, 5m {_pct(t['ch5m'])}, 1h {_pct(t['ch1h'])}, "
+        f"24h {_pct(t['ch24h'])}, buy ratio {t['buy_pct']:.0f}%, vol spike {t['vol_spike']:.1f}x, "
+        f"momentum {t['mscore']}/100, risk {t['risk_score']}/100. "
+        "Sharp verdict: is this still worth aping right now? 2 sentences.",
+        fallback="",
+        inject_market=True
+    )
+    card = build_scan_card(t, ai_verdict)
+    btns = scan_buttons(addr, t["sym"], t.get("pair_addr",""))
+    try:
+        await query.message.edit_text(
+            card, parse_mode="Markdown",
+            reply_markup=btns,
+            disable_web_page_preview=True
+        )
+    except Exception:
+        await query.message.reply_text(
+            card, parse_mode="Markdown",
+            reply_markup=btns,
+            disable_web_page_preview=True
+        )
 
 
 async def handle_menu_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -3092,9 +3179,9 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     group_messages.append({"uid": uid, "text": text, "time": time.time()})
     if len(group_messages) > 300: group_messages.pop(0)
 
-    # ── 1. CA auto-scan — full deep scan (same as /scan command) ────
-    if get_setting(uid, "autoresponder", True):
-        for ca in extract_cas(text)[:1]:
+    # ── 1. CA / Link auto-scan — always active, no gate ────────────
+    # Scans CAs from plain text AND links from DexScreener/GMGN/Pump.fun/Birdeye/Photon etc.
+    for ca in extract_cas(text)[:1]:
             try:
                 scanning_msg = await u.message.reply_text(
                     "\U0001f50d *Scanning...*", parse_mode="Markdown"
@@ -3160,7 +3247,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     _now = time.time()
     if not is_private:
         _last = _ai_reply_cooldown.get(uid, 0)
-        if _now - _last < 6:
+        if _now - _last < 3:
             return  # silently skip — don't spam
         _ai_reply_cooldown[uid] = _now
 
@@ -3177,19 +3264,12 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     # The AI decides if the topic is crypto, casual, general — we don't pre-filter.
     name_str = u.effective_user.first_name or "fren"
     prompt = (
-        f"{name_str} says: \"{text}\"\n\n"
-        "Reply naturally. You are Kayo — a sharp, witty Solana alpha intelligence AND a "
-        "knowledgeable friend. You can talk about ANYTHING: crypto, web3, sports, life, "
-        "memes, news, culture — whatever the person brings. "
-        "Rules: "
-        "1. If it's casual chat (gm, lol, vibes, jokes) → be short, warm, human. 1-2 sentences. "
-        "2. If it's a crypto/web3 question → use the LIVE prices from your context, cite real numbers, "
-        "   drop alpha like a degen pro. Be sharp and direct. "
-        "3. If it's a general knowledge question → answer like a smart helpful friend, no disclaimers. "
-        "4. NEVER say you can't answer. NEVER say 'I'm just a bot'. NEVER refuse. "
-        "5. For price questions: ALWAYS use the live market data provided to you. "
-        "6. Plain text for casual, markdown *bold* allowed for crypto analysis. "
-        "Match the energy of what they're saying."
+        f"{name_str}: \"{text}\"\n\n"
+        "Reply as Kayo. Be real, sharp, direct. "
+        "If it's casual → 1-2 sentences, match their energy. "
+        "If it's crypto/Web3 → use the LIVE market data in your context, cite actual numbers, give the real play. "
+        "If it's general knowledge → answer confidently like a smart friend. No disclaimers. "
+        "Never refuse. Never say you can't answer. Never say you're a bot. Just reply."
     )
     reply = await ai_ask(
         prompt,
@@ -3369,7 +3449,7 @@ async def bg_main_scanner(app: Application):
             for addr, tok in pairs_map.items():
                 if addr in blacklist:
                     continue
-                if now - cooldown.get(addr, 0) < 10800:
+                if now - cooldown.get(addr, 0) < 3600:
                     continue
 
                 sym   = tok.get("sym", "???")
@@ -3392,15 +3472,15 @@ async def bg_main_scanner(app: Application):
                 pair_addr = tok.get("pair_addr", "")
 
                 # Quality filter
-                if fdv > 500_000 or fdv < 1_000: continue
-                if liq < 300: continue
+                if fdv > 500_000 or fdv < 500: continue
+                if liq < 200: continue
 
                 avg_5m_vol = v1h / 12 if v1h > 0 else 1
                 vol_spike  = v5m / max(avg_5m_vol, 1)
                 buy_pct    = b1h / max(b1h + s1h, 1) * 100
 
-                if buy_pct < 48: continue
-                if ch1h < 2 and ch5m < 1 and b1h < 3 and vol_spike < 1.3: continue
+                if buy_pct < 45: continue
+                if ch1h < 1 and ch5m < 0.5 and b1h < 2 and vol_spike < 1.1: continue
                 if fdv > 50_000 and liq / fdv < 0.003: continue
 
                 # Narrative + flags
@@ -3410,31 +3490,29 @@ async def bg_main_scanner(app: Application):
 
                 # Pattern detection
                 alert_type = None
-                if ch5m >= 3 and b5m > s5m and buy_pct >= 52:              alert_type = "pump"
-                elif ch5m >= 20 and buy_pct >= 50:                          alert_type = "pump"
-                elif ch1h >= 40 and buy_pct >= 50:                          alert_type = "pump"
-                elif ch1h >= 10 and buy_pct >= 55 and liq >= 1000:         alert_type = "gem"
-                elif b1h >= 5 and buy_pct >= 55 and liq >= 500 and ch1h >= 5: alert_type = "new"
-                elif is_rebranded and buy_pct >= 52 and ch1h >= 4:         alert_type = "rebrand"
-                elif buy_pct >= 62 and b1h >= 15 and abs(ch5m) < 8:        alert_type = "whale"
-                elif ch1h >= 8 and buy_pct >= 55 and b1h >= 8:             alert_type = "pump"
-                elif vol_spike >= 3.0 and b1h >= 5 and buy_pct >= 55:      alert_type = "unusual"
-                elif fdv < 80_000 and b1h >= 10 and buy_pct >= 60:         alert_type = "unusual"
-                elif is_boosted and buy_pct >= 52 and b1h >= 5 and ch1h >= 3: alert_type = "new"
+                if   ch5m >= 2 and b5m >= 1 and buy_pct >= 50:                    alert_type = "pump"
+                elif ch5m >= 10 and buy_pct >= 48:                                alert_type = "pump"
+                elif ch1h >= 25 and buy_pct >= 48:                                alert_type = "pump"
+                elif ch1h >= 8  and buy_pct >= 52 and liq >= 500:                alert_type = "gem"
+                elif b1h >= 3   and buy_pct >= 52 and liq >= 300 and ch1h >= 3:  alert_type = "new"
+                elif is_rebranded and buy_pct >= 50 and ch1h >= 2:               alert_type = "rebrand"
+                elif buy_pct >= 58 and b1h >= 8 and abs(ch5m) < 10:             alert_type = "whale"
+                elif ch1h >= 6  and buy_pct >= 52 and b1h >= 5:                  alert_type = "pump"
+                elif vol_spike >= 2.0 and b1h >= 3 and buy_pct >= 50:            alert_type = "unusual"
+                elif fdv < 100_000 and b1h >= 5 and buy_pct >= 55:              alert_type = "unusual"
+                elif is_boosted and buy_pct >= 50 and b1h >= 3 and ch1h >= 1:   alert_type = "new"
 
                 if not alert_type: continue
 
-                # Pattern memory gate
+                # Pattern memory (kept for stats but NO gating — don't block alerts)
                 pm_key  = f"{alert_type}:{nar}"
                 pm_info = pattern_memory.get(pm_key, {})
-                if pm_info.get("total", 0) >= 5:
-                    if pm_info["wins"] / max(pm_info["total"], 1) < 0.25:
-                        continue
+                # NOTE: win-rate gate removed — it was silently killing too many alerts
 
                 # Dropped calls gate
                 if addr in dropped_calls:
-                    if now - dropped_calls[addr].get("time", 0) < 10800: continue
-                    if abs(price - dropped_calls[addr].get("entry_price", 0)) / max(dropped_calls[addr].get("entry_price", 1e-12), 1e-12) * 100 < 15: continue
+                    if now - dropped_calls[addr].get("time", 0) < 3600: continue
+                    if abs(price - dropped_calls[addr].get("entry_price", 0)) / max(dropped_calls[addr].get("entry_price", 1e-12), 1e-12) * 100 < 10: continue
 
                 # Dedup
                 alert_id = hashlib.md5(f"{addr}:{alert_type}:{int(now/3600)}".encode()).hexdigest()[:16]
@@ -4483,7 +4561,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v33 ready — "
+        f"🦅 Kayo Brain v34 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -4519,6 +4597,7 @@ def main():
         app.add_handler(CommandHandler(name, fn))
     # CallbackQuery handler for inline chart button
     # CallbackQuery handlers
+    app.add_handler(CallbackQueryHandler(handle_refresh_callback, pattern=r"^refresh:"))
     app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(handle_help_callback, pattern=r"^help:"))
     app.add_handler(CallbackQueryHandler(handle_chart_callback, pattern=r"^chart:"))
