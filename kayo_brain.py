@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v36b — PRO REBUILD                     ║
+║                    KAYO BRAIN v36c — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -32,6 +32,7 @@ BOT_TOKEN          = os.environ.get("BOT_TOKEN", "")
 GROUP_CHAT_ID      = int(os.environ.get("GROUP_CHAT_ID", "0"))
 GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY", "")
 GROQ_API_KEY       = os.environ.get("GROQ_API_KEY", "")
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 REDIS_URL          = os.environ.get("REDIS_URL", "")
 TWITTER_AUTH_TOKEN = os.environ.get("TWITTER_AUTH_TOKEN", "")
 STATE_FILE         = "kayo_state.json"
@@ -49,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v36b", 200
+def _root(): return "🦅 Kayo Brain v36c", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -317,9 +318,8 @@ async def get_live_market_context() -> str:
 # llama3-8b-8192 + llama-3.1-70b-versatile are DECOMMISSIONED (HTTP 400)
 GROQ_MODELS = [
     "llama-3.3-70b-versatile",      # Primary — best quality
-    "llama3-70b-8192",              # Fallback — still live
     "llama-3.1-8b-instant",         # Fast fallback — good for rate limits
-    "mixtral-8x7b-32768",           # Fallback
+    "llama3-70b-8192",              # Fallback — still live
     "gemma2-9b-it",                 # Final Groq fallback
 ]
 
@@ -408,9 +408,10 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
     # Gemini fallback — try multiple models in case one hits quota
     if GEMINI_API_KEY:
         gemini_models = [
-            "gemini-1.5-flash",        # Different quota from 2.0-flash
+            "gemini-2.5-flash",        # Newest — best quality + speed
+            "gemini-2.0-flash",        # Fast and capable
             "gemini-2.0-flash-lite",   # Lightweight, lower quota usage
-            "gemini-2.0-flash",        # Original (may be quota-exhausted)
+            "gemini-1.5-flash",        # Different quota bucket
             "gemini-1.5-flash-8b",     # Smallest, highest rate limits
         ]
         full_prompt = f"{system_ctx}\n\n{prompt}"
@@ -443,6 +444,49 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
                     continue
                 except Exception as e:
                     logger.error(f"Gemini {gem_model}: {e}")
+                    continue
+
+
+    # OpenRouter fallback — free models available
+    OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+    if OPENROUTER_API_KEY:
+        or_models = [
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "google/gemini-2.0-flash-exp:free",
+            "meta-llama/llama-3.1-8b-instruct:free",
+        ]
+        full_prompt = f"{system_ctx}\n\n{prompt}"
+        async with aiohttp.ClientSession() as s:
+            for or_model in or_models:
+                try:
+                    async with s.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": or_model,
+                            "messages": [system_msg, {"role": "user", "content": prompt}],
+                            "max_tokens": max_tokens,
+                        },
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as r:
+                        if r.status == 200:
+                            d = await r.json()
+                            text_out = d["choices"][0]["message"]["content"].strip()
+                            if text_out:
+                                logger.debug(f"ai_ask: OpenRouter {or_model} OK")
+                                return text_out
+                        elif r.status == 429:
+                            logger.warning(f"OpenRouter {or_model} rate limited")
+                            continue
+                        else:
+                            err_body = await r.text()
+                            logger.error(f"OpenRouter {or_model} HTTP {r.status}: {err_body[:100]}")
+                            continue
+                except Exception as e:
+                    logger.error(f"OpenRouter {or_model}: {e}")
                     continue
 
     logger.error(f"ai_ask: ALL backends failed. Groq={bool(GROQ_API_KEY)} Gemini={bool(GEMINI_API_KEY)}")
@@ -1455,7 +1499,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v36b*\n"
+        f"\U0001f985 *KAYO BRAIN v36c*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1492,7 +1536,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v36b — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v36c — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2636,7 +2680,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v36b alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v36c alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2927,6 +2971,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     redis_ok  = "\u2705 Connected" if _redis else "\u274c Not connected"
     gemini_ok = "\u2705" if GEMINI_API_KEY else "\u274c Not set"
+    or_ok       = "✅" if os.environ.get("OPENROUTER_API_KEY") else "❌ Not set"
     tw_ok     = "\u2705" if TWITTER_AUTH_TOKEN else "\u274c Not set"
     group_ok  = "\u2705" if GROUP_CHAT_ID != 0 else "\u274c NOT SET"
     groq_key  = f"Set ({GROQ_API_KEY[:6]}...{GROQ_API_KEY[-4:]})" if GROQ_API_KEY else "NOT SET"
@@ -2936,11 +2981,12 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]()~>#+=|{}.!\\])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *KAYO BRAIN v36b STATUS*\n"
+        f"\u2699\ufe0f *KAYO BRAIN v36c STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
         f"{_esc(gemini_ok)} Gemini AI (fallback)\n"
+        f"{_esc(or_ok)} OpenRouter (free models)\n"
         f"{_esc(redis_ok)} Redis\n"
         f"{_esc(tw_ok)} Twitter auth\n"
         f"{_esc(group_ok)} Group alerts (ID: {GROUP_CHAT_ID})\n\n"
@@ -4773,7 +4819,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v36b ready — "
+        f"🦅 Kayo Brain v36c ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
