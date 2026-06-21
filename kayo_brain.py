@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v35d — PRO REBUILD                     ║
+║                    KAYO BRAIN v35e — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v35d", 200
+def _root(): return "🦅 Kayo Brain v35e", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1218,7 +1218,7 @@ def build_scan_card(t: Dict, ai: str = "") -> str:
     card = (
         f"\U0001f985 *KAYO DEEP SCAN*  {tag_str}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"\U0001f4b0 *${t['sym']}* — _{t['name']}_ {nar}\n"
+        f"\U0001f4b0 *${_md(t['sym'])}* — _{_md(t['name'])}_ {nar}\n"
         f"\U0001f517 `{t['address']}`\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"\U0001f4b5 Price: *{_price(t['price'])}*\n"
@@ -1253,6 +1253,11 @@ def build_scan_card(t: Dict, ai: str = "") -> str:
     if ai:
         card += f"\n🧠 *Kayo AI:*\n_{ai}_"
     return card
+
+def _md(s: str) -> str:
+    """Escape Markdown special chars in dynamic text for Telegram V1."""
+    if not s: return ""
+    return re.sub(r'([*_`\[\]()~>#+=|{}.!\\])', r'\\\1', str(s))
 
 def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
     """
@@ -1430,7 +1435,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v35d*\n"
+        f"\U0001f985 *KAYO BRAIN v35e*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1467,7 +1472,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v35d — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v35e — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2583,7 +2588,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v35d alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v35e alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2883,7 +2888,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]()~>#+=|{}.!\\])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *KAYO BRAIN v35d STATUS*\n"
+        f"\u2699\ufe0f *KAYO BRAIN v35e STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -3610,35 +3615,39 @@ async def bg_main_scanner(app: Application):
                     "pair_addr": pair_addr,
                     "mscore": min(100, int(abs(ch1h) + buy_pct / 2 + vol_spike * 10)),
                 }
-                # Generate AI verdict for each alert
-                ai_verdict = ""
-                try:
-                    ai_verdict = await asyncio.wait_for(
-                        ai_ask(
-                            f"Solana token ${sym} | Type: {alert_type.upper()} | MCap {_usd(fdv)} | "
-                            f"Liq {_usd(liq)} | 5m {_pct(ch5m)} | 1h {_pct(ch1h)} | "
-                            f"Buys {b1h} Sells {s1h} | Buy% {buy_pct:.0f}% | Vol spike {vol_spike:.1f}x | "
-                            f"Narrative #{nar}. Is this worth aping? 1 sharp sentence — max 15 words.",
-                            fallback="",
-                            max_tokens=60,
-                            inject_market=False
-                        ),
-                        timeout=8
-                    )
-                except Exception:
-                    ai_verdict = ""
-                card    = build_alert_card(tok_dict, alert_type, ai_verdict)
+                # Cap alerts per cycle to prevent flooding
+                if alert_count >= 10:
+                    break
+
+                # Build card WITHOUT AI verdict first — send IMMEDIATELY
+                card = build_alert_card(tok_dict, alert_type, "")
                 buttons = scan_buttons(addr, sym)
 
                 if GROUP_CHAT_ID:
+                    sent_msg = None
                     try:
-                        await app.bot.send_message(
+                        sent_msg = await app.bot.send_message(
                             chat_id=GROUP_CHAT_ID,
                             text=card,
                             parse_mode="Markdown",
                             reply_markup=buttons,
                             disable_web_page_preview=True,
                         )
+                    except Exception as md_err:
+                        # Markdown failed — retry as plain text
+                        logger.warning(f"[ALERT MD FAIL] {sym}: {md_err} — retrying plain text")
+                        try:
+                            plain_card = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', card)
+                            sent_msg = await app.bot.send_message(
+                                chat_id=GROUP_CHAT_ID,
+                                text=plain_card,
+                                reply_markup=buttons,
+                                disable_web_page_preview=True,
+                            )
+                        except Exception as e2:
+                            logger.error(f"[ALERT SEND ERROR] {sym}: {e2}")
+                    
+                    if sent_msg:
                         alert_count += 1
                         logger.info(f"[ALERT] {alert_type.upper()} ${sym} fdv={fdv:,.0f} liq={liq:,.0f} 1h={ch1h:.1f}% buy%={buy_pct:.0f}%")
                         dropped_calls[addr] = {
@@ -3654,9 +3663,55 @@ async def bg_main_scanner(app: Application):
                         if len(active_calls) > 200:
                             active_calls.pop(0)
                         asyncio.create_task(_save())
-                        await asyncio.sleep(1)  # small delay between alerts
-                    except Exception as e:
-                        logger.error(f"[ALERT SEND ERROR] {sym}: {e}")
+                        
+                        # Fire AI verdict as NON-BLOCKING task — edit message when ready
+                        async def _add_ai_verdict(msg_id: int, chat_id: int, sym_: str, at: str,
+                                                   fdv_: float, liq_: float, ch5m_: float, ch1h_: float,
+                                                   b1h_: int, s1h_: int, bp_: float, vs_: float, nar_: str):
+                            try:
+                                ai_v = await asyncio.wait_for(
+                                    ai_ask(
+                                        f"Solana token ${sym_} | Type: {at.upper()} | MCap {_usd(fdv_)} | "
+                                        f"Liq {_usd(liq_)} | 5m {_pct(ch5m_)} | 1h {_pct(ch1h_)} | "
+                                        f"Buys {b1h_} Sells {s1h_} | Buy% {bp_:.0f}% | Vol spike {vs_:.1f}x | "
+                                        f"Narrative #{nar_}. Is this worth aping? 1 sharp sentence — max 15 words.",
+                                        fallback="",
+                                        max_tokens=60,
+                                        inject_market=False
+                                    ),
+                                    timeout=12
+                                )
+                                if ai_v and ai_v.strip():
+                                    try:
+                                        await app.bot.edit_message_text(
+                                            chat_id=chat_id, message_id=msg_id,
+                                            text=card + f"\n\U0001f9e0 *Kayo:* _{ai_v}_",
+                                            parse_mode="Markdown",
+                                            reply_markup=buttons,
+                                            disable_web_page_preview=True,
+                                        )
+                                    except Exception:
+                                        # Edit failed — try plain text
+                                        try:
+                                            plain_ai = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', ai_v)
+                                            await app.bot.edit_message_text(
+                                                chat_id=chat_id, message_id=msg_id,
+                                                text=card + f"\n🧠 Kayo: {plain_ai}",
+                                                reply_markup=buttons,
+                                                disable_web_page_preview=True,
+                                            )
+                                        except Exception:
+                                            pass
+                            except Exception:
+                                pass  # AI verdict is optional — alert already sent
+                        
+                        asyncio.create_task(_add_ai_verdict(
+                            sent_msg.message_id, GROUP_CHAT_ID,
+                            sym, alert_type, fdv, liq, ch5m, ch1h,
+                            b1h, s1h, buy_pct, vol_spike, nar
+                        ))
+                        
+                        await asyncio.sleep(1)  # rate limit between alerts
 
             logger.info(f"[SCANNER] Cycle done — {alert_count} alerts sent")
 
@@ -4631,7 +4686,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v35d ready — "
+        f"🦅 Kayo Brain v35e ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
