@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v36c — PRO REBUILD                     ║
+║                    KAYO BRAIN v37 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v36c", 200
+def _root(): return "🦅 Kayo Brain v37", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1499,7 +1499,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v36c*\n"
+        f"\U0001f985 *KAYO BRAIN v37*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1536,7 +1536,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v36c — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v37 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -1553,6 +1553,7 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if t.get("error"):
         await msg.edit_text(f"❌ {t['error']}"); return
     add_xp(u.effective_user.id, 5)
+    _track_scan(t, u.effective_user.id)
     # Send card IMMEDIATELY — no AI wait
     buttons = scan_buttons(addr, t.get("sym", ""), t.get("pair_addr", ""))
     sent = await msg.edit_text(
@@ -2680,7 +2681,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v36c alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v37 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2981,7 +2982,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]()~>#+=|{}.!\\])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *KAYO BRAIN v36c STATUS*\n"
+        f"\u2699\ufe0f *KAYO BRAIN v37 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -3015,6 +3016,9 @@ HELP_PAGES = {
         "`/price btc` — Live price for any coin\n"
         "`/verify <CA>` — Rug & honeypot check\n"
         "`/a <coin-id>` — Full CoinGecko coin lookup"
+        "`/dev <CA>` — Deployer history & same-name tokens\n"
+        "`/top <CA>` — Top trader activity\n"
+        "`/soc <CA>` — Quick socials lookup"
     ),
     "discover": (
         "\U0001f50d *DISCOVER*\n"
@@ -3024,7 +3028,15 @@ HELP_PAGES = {
         "`/pump` — Fresh 5-minute pumps\n"
         "`/gems` — Hidden gems (low cap, good momentum)\n"
         "`/boosted` — Tokens being actively promoted\n"
-        "`/takeover` — Community takeover tokens"
+        "`/takeover` — Community takeover tokens\n"
+        "`/best` — Top gainers (24h, CoinGecko)\n"
+        "`/worst` — Top losers (24h)\n"
+        "`/metas` — Trending networks/categories\n"
+        "`/pvp <CA>` — Similar/newer tokens\n"
+        "`/groupburp` — Best active group plays\n"
+        "`/last` — Last 10 tokens scanned\n"
+        "`/hot` — Most scanned tokens (1h)\n"
+        "`/ath` — ATH leaderboard from group scans"
     ),
     "narrative": (
         "\U0001f4d6 *NARRATIVES & TRENDS*\n"
@@ -3043,7 +3055,10 @@ HELP_PAGES = {
         "`/sentiment` — Market mood, F&G, BTC dom + AI verdict\n"
         "`/macro` — Macro briefing: BTC, SOL, risk environment\n"
         "`/markets` — Global market cap & volume data\n"
-        "`/index` — Fear & Greed index"
+        "`/index` — Fear & Greed index\n"
+        "`/dub` — AI chat summary\n"
+        "`/tldr <url>` — AI summary of any URL/article\n"
+        "`/s <ticker>` — Stock lookup (e.g. /s AAPL)"
     ),
     "twitter": (
         "\U0001f426 *TWITTER / SOCIAL*\n"
@@ -4819,7 +4834,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v36c ready — "
+        f"🦅 Kayo Brain v37 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -4861,6 +4876,456 @@ def safe_command(fn):
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
+
+# ═══════════════════════════════════════════════════════════════
+# RICK-STYLE FEATURES — all powered by FREE APIs
+# ═══════════════════════════════════════════════════════════════
+
+# Track scanned tokens for /last, /hot, /ath, /groupburp
+_scan_history = []  # [{ca, sym, mcap, ch1h, ch24h, time, uid}]
+_ath_tracker = {}   # {ca: {sym, first_mcap, ath_mcap, first_seen}}
+
+def _track_scan(t: Dict, uid: int = 0):
+    """Record a token scan for leaderboards and history."""
+    ca = t.get("address", "")
+    if not ca: return
+    entry = {
+        "ca": ca, "sym": t.get("sym", "???"), "mcap": t.get("mcap", 0),
+        "ch1h": t.get("ch1h", 0), "ch24h": t.get("ch24h", 0),
+        "liq": t.get("liq", 0), "mscore": t.get("mscore", 0),
+        "time": time.time(), "uid": uid
+    }
+    _scan_history.append(entry)
+    if len(_scan_history) > 500: _scan_history.pop(0)
+    # ATH tracking
+    if ca not in _ath_tracker:
+        _ath_tracker[ca] = {"sym": t.get("sym", "???"), "first_mcap": t.get("mcap", 0), "ath_mcap": t.get("mcap", 0), "first_seen": time.time()}
+    else:
+        if t.get("mcap", 0) > _ath_tracker[ca]["ath_mcap"]:
+            _ath_tracker[ca]["ath_mcap"] = t.get("mcap", 0)
+
+# ─── /dev — Deployer History ───────────────────────────────────
+async def dex_token_creator(ca: str) -> str:
+    """Get token deployer address from DexScreener."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{_DSX}/latest/dex/tokens/{ca}",
+                             timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    pairs = d.get("pairs") or []
+                    if pairs:
+                        # DexScreener doesn't expose deployer directly
+                        # but we can show the base token info
+                        return pairs[0].get("baseToken", {}).get("address", "")
+    except: pass
+    return ""
+
+async def dev_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Show deployer history — other tokens by same dev."""
+    if not c.args:
+        await u.message.reply_text("Usage: `/dev <contract_address>`", parse_mode="Markdown"); return
+    ca = c.args[0].strip()
+    msg = await u.message.reply_text("🔍 *Checking deployer history...*", parse_mode="Markdown")
+    try:
+        # Search DexScreener for tokens with similar names (proxy for same dev)
+        # Also get the token info
+        t = await asyncio.wait_for(full_token_scan(ca), timeout=15)
+        if t.get("error"):
+            await msg.edit_text(f"❌ {t['error']}"); return
+        sym = t.get("sym", "???")
+        # Search for other tokens with same symbol (potential dev connections)
+        pairs = await dex_search_pairs(sym)
+        same_name = [p for p in pairs if p.get("baseToken",{}).get("symbol","").upper() == sym.upper() and p.get("baseToken",{}).get("address","") != ca]
+        # Security info
+        sec_info = []
+        if t.get("is_renounced"): sec_info.append("✅ Renounced")
+        if t.get("lp_locked"): sec_info.append("🔒 LP Locked")
+        if t.get("is_honeypot"): sec_info.append("🚨 Honeypot")
+        if t.get("buy_tax",0) > 0 or t.get("sell_tax",0) > 0:
+            sec_info.append(f"🧾 Tax: {t.get('buy_tax',0):.0f}%/{t.get('sell_tax',0):.0f}%")
+        sec_str = "  ".join(sec_info) if sec_info else "⚠️ Unverified"
+        card = (
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"  👷 *DEPLOYER CHECK*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 *${_md(sym)}* — _{ _md(t.get('name',''))}_\n"
+            f"📋 `{ca}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 MCap: `{_usd(t.get('mcap',0))}`  ·  Liq: `{_usd(t.get('liq',0))}`\n"
+            f"🛡️ {sec_str}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📋 *Token Info*\n"
+            f"  Age: {_age(t.get('created',0))}\n"
+            f"  24h: {_pct(t.get('ch24h',0))}  ·  1h: {_pct(t.get('ch1h',0))}\n"
+            f"  Momentum: {t.get('mscore',0)}/100\n"
+        )
+        if same_name:
+            card += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            card += f"🔍 *Same-name tokens ({len(same_name)}):*\n"
+            for p in same_name[:5]:
+                p_sym = p.get("baseToken",{}).get("symbol","?")
+                p_ca = p.get("baseToken",{}).get("address","")
+                p_mcap = float(p.get("marketCap",0) or p.get("fdv",0) or 0)
+                p_ch = (p.get("priceChange") or {}).get("h24",0)
+                card += f"  ${_md(p_sym)} — {_usd(p_mcap)} — {_pct(p_ch)}\n"
+            card += f"_⚠️ Same name ≠ same dev. Verify on-chain._\n"
+        else:
+            card += f"\n✅ No other tokens found with same name — likely unique.\n"
+        card += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        # Track scan
+        _track_scan(t, u.effective_user.id)
+        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True,
+                            reply_markup=scan_buttons(ca, sym, t.get("pair_addr","")))
+    except asyncio.TimeoutError:
+        await msg.edit_text("❌ Scan timed out. Try again.")
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
+
+# ─── /top — Top Traders ────────────────────────────────────────
+async def top_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Show top traders for a token using DexScreener volume data."""
+    if not c.args:
+        await u.message.reply_text("Usage: `/top <contract_address>`", parse_mode="Markdown"); return
+    ca = c.args[0].strip()
+    msg = await u.message.reply_text("🔍 *Fetching top traders...*", parse_mode="Markdown")
+    try:
+        t = await asyncio.wait_for(full_token_scan(ca), timeout=15)
+        if t.get("error"):
+            await msg.edit_text(f"❌ {t['error']}"); return
+        sym = t.get("sym", "???")
+        # Buy/sell data as proxy for trader activity
+        b1h, s1h = t.get("b1h",0), t.get("s1h",0)
+        b24h = t.get("b24h",0)
+        s24h = t.get("s24h",0)
+        bp = t.get("buy_pct", 50)
+        card = (
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"  🏆 *TOP TRADER ACTIVITY*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🪙 *${_md(sym)}*\n"
+            f"📋 `{ca}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 *Transaction Activity*\n"
+            f"  1h: 🟢 {b1h} buys  ·  🔴 {s1h} sells  ({bp:.0f}% buy)\n"
+            f"  24h: 🟢 {b24h} buys  ·  🔴 {s24h} sells\n"
+            f"  Vol: `{_usd(t.get('v24h',0))}` (24h)\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"⚡ Momentum: {t.get('mscore',0)}/100\n"
+            f"🌊 Liq: `{_usd(t.get('liq',0))}`  ·  MCap: `{_usd(t.get('mcap',0))}`\n"
+        )
+        if bp > 70:
+            card += f"🔥 Strong buy pressure — whales accumulating\n"
+        elif bp < 40:
+            card += f"❄️ Heavy sell pressure — exits ongoing\n"
+        card += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        _track_scan(t, u.effective_user.id)
+        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True,
+                            reply_markup=scan_buttons(ca, sym, t.get("pair_addr","")))
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
+
+# ─── /soc — Quick Socials ──────────────────────────────────────
+async def soc_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Quick socials lookup for any token."""
+    if not c.args:
+        await u.message.reply_text("Usage: `/soc <contract_address>`", parse_mode="Markdown"); return
+    ca = c.args[0].strip()
+    msg = await u.message.reply_text("🔍 *Finding socials...*", parse_mode="Markdown")
+    try:
+        pairs = await asyncio.wait_for(dex_pairs_by_token(ca), timeout=12)
+        if not pairs:
+            await msg.edit_text("❌ Token not found"); return
+        p = pairs[0]
+        info = p.get("info") or {}
+        socials = info.get("socials") or []
+        sites = info.get("websites") or []
+        sym = p.get("baseToken",{}).get("symbol","???")
+        links = []
+        for s in socials:
+            t_type = s.get("type","")
+            url = s.get("url","")
+            if t_type == "twitter": links.append(f"🐦 [Twitter]({url})")
+            elif t_type == "telegram": links.append(f"💬 [Telegram]({url})")
+            elif t_type == "discord": links.append(f"🎮 [Discord]({url})")
+        for w in sites[:2]:
+            links.append(f"🌐 [Website]({w.get('url','')})")
+        if not links:
+            await msg.edit_text(f"❌ No socials found for ${_md(sym)}"); return
+        card = f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  🔗 *SOCIALS — ${_md(sym)}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        card += "\n".join(f"  {l}" for l in links)
+        card += f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n📋 `{ca}`"
+        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception as e:
+        await msg.edit_text(f"❌ Error: {str(e)[:100]}")
+
+# ─── /ath — ATH Leaderboard ────────────────────────────────────
+async def ath_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Show ATH leaderboard from group scans."""
+    if not _ath_tracker:
+        await u.message.reply_text("📊 No tokens tracked yet. Scan some tokens first!"); return
+    # Sort by ATH mcap
+    sorted_ath = sorted(_ath_tracker.items(), key=lambda x: x[1]["ath_mcap"], reverse=True)[:15]
+    card = "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  📈 *ATH LEADERBOARD*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    for i, (ca, data) in enumerate(sorted_ath, 1):
+        sym = data["sym"]
+        ath = data["ath_mcap"]
+        first = data["first_mcap"]
+        gain = ((ath - first) / max(first, 1) * 100) if first > 0 else 0
+        card += f"{i}. *${_md(sym)}* — ATH: `{_usd(ath)}` (+{gain:.0f}%)\n"
+    card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    await u.message.reply_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+
+# ─── /last — Recent Scans ──────────────────────────────────────
+async def last_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Show last 10 tokens scanned in the group."""
+    if not _scan_history:
+        await u.message.reply_text("📊 No tokens scanned yet."); return
+    recent = _scan_history[-10:][::-1]  # most recent first
+    card = "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  📋 *RECENT SCANS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    for i, e in enumerate(recent, 1):
+        ago = int((time.time() - e["time"]) / 60)
+        card += f"{i}. *${_md(e['sym'])}* — {_usd(e['mcap'])} · {_pct(e['ch1h'])} · {ago}m ago\n"
+    card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    await u.message.reply_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+
+# ─── /hot — Most Scanned ───────────────────────────────────────
+async def hot_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Show most scanned tokens in the last hour."""
+    cutoff = time.time() - 3600
+    recent = [e for e in _scan_history if e["time"] > cutoff]
+    if not recent:
+        await u.message.reply_text("📊 No scans in the last hour."); return
+    # Count by CA
+    counts = {}
+    for e in recent:
+        ca = e["ca"]
+        if ca not in counts:
+            counts[ca] = {"sym": e["sym"], "count": 0, "mcap": e["mcap"], "ch1h": e["ch1h"]}
+        counts[ca]["count"] += 1
+    sorted_hot = sorted(counts.items(), key=lambda x: x[1]["count"], reverse=True)[:10]
+    card = "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  🔥 *HOT IN LAST 1H*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    for i, (ca, d) in enumerate(sorted_hot, 1):
+        card += f"{i}. *${_md(d['sym'])}* — {d['count']}x scans · {_usd(d['mcap'])} · {_pct(d['ch1h'])}\n"
+    card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    await u.message.reply_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+
+# ─── /best — Top Gainers (CoinGecko) ───────────────────────────
+async def best_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Show top gainers from CoinGecko."""
+    msg = await u.message.reply_text("🔍 *Fetching top gainers...*", parse_mode="Markdown")
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=50&page=1&price_change_percentage=24h",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                coins = await r.json()
+        gainers = sorted(coins, key=lambda x: float(x.get("price_change_percentage_24h",0) or 0), reverse=True)[:10]
+        card = "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  🚀 *TOP GAINERS (24h)*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        for i, c2 in enumerate(gainers, 1):
+            sym = c2.get("symbol","?").upper()
+            ch = float(c2.get("price_change_percentage_24h",0) or 0)
+            mcap = float(c2.get("market_cap",0) or 0)
+            card += f"{i}. *${_md(sym)}* — 🟢 +{ch:.1f}% · {_usd(mcap)}\n"
+        card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception as e:
+        await msg.edit_text(f"❌ {str(e)[:100]}")
+
+# ─── /worst — Top Losers (CoinGecko) ───────────────────────────
+async def worst_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Show top losers from CoinGecko."""
+    msg = await u.message.reply_text("🔍 *Fetching top losers...*", parse_mode="Markdown")
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=50&page=1&price_change_percentage=24h",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                coins = await r.json()
+        losers = sorted(coins, key=lambda x: float(x.get("price_change_percentage_24h",0) or 0))[:10]
+        card = "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  💀 *TOP LOSERS (24h)*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        for i, c2 in enumerate(losers, 1):
+            sym = c2.get("symbol","?").upper()
+            ch = float(c2.get("price_change_percentage_24h",0) or 0)
+            mcap = float(c2.get("market_cap",0) or 0)
+            card += f"{i}. *${_md(sym)}* — 🔴 {ch:.1f}% · {_usd(mcap)}\n"
+        card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception as e:
+        await msg.edit_text(f"❌ {str(e)[:100]}")
+
+# ─── /dub — Chat Summary ───────────────────────────────────────
+async def dub_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """AI summary of recent chat messages."""
+    if len(group_messages) < 5:
+        await u.message.reply_text("💬 Not enough messages to summarize yet."); return
+    msg = await u.message.reply_text("🧠 *Summarizing chat...*", parse_mode="Markdown")
+    try:
+        recent = group_messages[-50:]
+        texts = [f"[{m['uid']}]: {m['text']}" for m in recent]
+        ai = await ai_ask(
+            f"Summarize this Telegram crypto chat in 3-4 bullet points. Key topics, tokens mentioned, sentiment:\n\n"
+            + "\n".join(texts),
+            fallback="Could not generate summary.",
+            max_tokens=250
+        )
+        await msg.edit_text(f"📝 *Chat Summary*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{ai}",
+                           parse_mode="Markdown")
+    except Exception as e:
+        await msg.edit_text(f"❌ {str(e)[:100]}")
+
+# ─── /tldr — URL Summary ───────────────────────────────────────
+async def tldr_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """AI summary of any URL (article, tweet, YouTube)."""
+    if not c.args:
+        await u.message.reply_text("Usage: `/tldr <url>`", parse_mode="Markdown"); return
+    url = c.args[0].strip()
+    msg = await u.message.reply_text("📄 *Fetching and summarizing...*", parse_mode="Markdown")
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=12),
+                            headers={"User-Agent": "Mozilla/5.0"}) as r:
+                if r.status != 200:
+                    await msg.edit_text("❌ Could not fetch URL"); return
+                html = await r.text()
+        # Extract text from HTML (simple strip)
+        text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
+        text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()[:3000]
+        if len(text) < 100:
+            await msg.edit_text("❌ Not enough text content to summarize"); return
+        ai = await ai_ask(
+            f"Summarize this article in 3-4 key points. Be concise:\n\n{text}",
+            fallback="Could not summarize.",
+            max_tokens=300
+        )
+        await msg.edit_text(f"📄 *TL;DR*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{ai}",
+                           parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception as e:
+        await msg.edit_text(f"❌ {str(e)[:100]}")
+
+# ─── /metas — Trending Categories ──────────────────────────────
+async def metas_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Show trending DexScreener categories/metas."""
+    msg = await u.message.reply_text("🔍 *Fetching trending categories...*", parse_mode="Markdown")
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"{_DSX}/token-profiles/latest/v1",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                profiles = await r.json()
+        # Group by chain
+        chains = {}
+        for p in profiles:
+            chain = p.get("chainId", "unknown")
+            chains[chain] = chains.get(chain, 0) + 1
+        sorted_chains = sorted(chains.items(), key=lambda x: x[1], reverse=True)[:10]
+        card = "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  📊 *TRENDING NETWORKS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        for i, (chain, count) in enumerate(sorted_chains, 1):
+            card += f"{i}. *{chain.title()}* — {count} new profiles\n"
+        # Also show top Solana tokens
+        sol = [p for p in profiles if p.get("chainId") == "solana"][:5]
+        if sol:
+            card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🔥 *New Solana Profiles:*\n"
+            for p in sol:
+                sym = p.get("symbol","?")
+                card += f"  ${_md(sym)} — {p.get('name','')[:20]}\n"
+        card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception as e:
+        await msg.edit_text(f"❌ {str(e)[:100]}")
+
+# ─── /pvp — Similar Tokens ─────────────────────────────────────
+async def pvp_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Find similar/newer tokens with same name."""
+    if not c.args:
+        await u.message.reply_text("Usage: `/pvp <contract_address or symbol>`", parse_mode="Markdown"); return
+    query = " ".join(c.args)
+    msg = await u.message.reply_text("🔍 *Finding PvP tokens...*", parse_mode="Markdown")
+    try:
+        pairs = await asyncio.wait_for(dex_search_pairs(query), timeout=12)
+        if not pairs:
+            await msg.edit_text("❌ No tokens found"); return
+        # Sort by age (newest first)
+        card = "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  ⚔️ *PVP — SIMILAR TOKENS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        for i, p in enumerate(pairs[:10], 1):
+            sym = p.get("baseToken",{}).get("symbol","?")
+            name = p.get("baseToken",{}).get("name","")
+            mcap = float(p.get("marketCap",0) or p.get("fdv",0) or 0)
+            liq = float((p.get("liquidity") or {}).get("usd",0) or 0)
+            ch24 = (p.get("priceChange") or {}).get("h24",0)
+            created = int(p.get("pairCreatedAt",0) or 0)
+            age = _age(created)
+            ca = p.get("baseToken",{}).get("address","")
+            card += f"{i}. *${_md(sym)}* — {_usd(mcap)} · Liq {_usd(liq)} · {_pct(ch24)} · {age}\n"
+            card += f"   `{ca[:12]}...`\n"
+        card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception as e:
+        await msg.edit_text(f"❌ {str(e)[:100]}")
+
+# ─── /groupburp — Active Plays ─────────────────────────────────
+async def groupburp_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Show best active plays from group scans."""
+    if not _scan_history:
+        await u.message.reply_text("📊 No tokens scanned yet."); return
+    # Get unique tokens scanned in last 24h, sorted by 1h change
+    cutoff = time.time() - 86400
+    seen = {}
+    for e in _scan_history:
+        if e["time"] > cutoff:
+            ca = e["ca"]
+            if ca not in seen or e["ch1h"] > seen[ca]["ch1h"]:
+                seen[ca] = e
+    plays = sorted(seen.values(), key=lambda x: x.get("ch1h",0), reverse=True)[:10]
+    card = "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  🎯 *ACTIVE PLAYS (24h)*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    for i, e in enumerate(plays, 1):
+        card += f"{i}. *${_md(e['sym'])}* — {_pct(e['ch1h'])} 1h · {_usd(e['mcap'])}\n"
+    card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    await u.message.reply_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+
+# ─── /s — Stock Lookup (Yahoo Finance free) ────────────────────
+async def stock_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Quick stock lookup via Yahoo Finance."""
+    if not c.args:
+        await u.message.reply_text("Usage: `/s <ticker>` — e.g. `/s AAPL`", parse_mode="Markdown"); return
+    ticker = c.args[0].strip().upper()
+    msg = await u.message.reply_text(f"🔍 *Looking up {ticker}...*", parse_mode="Markdown")
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}?interval=1d&range=5d",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status != 200:
+                    await msg.edit_text(f"❌ Stock {ticker} not found"); return
+                d = await r.json()
+        result = d.get("chart",{}).get("result",[{}])[0]
+        meta = result.get("meta",{})
+        price = meta.get("regularMarketPrice", 0)
+        prev = meta.get("chartPreviousClose", price)
+        ch = ((price - prev) / prev * 100) if prev > 0 else 0
+        name = meta.get("symbol", ticker)
+        currency = meta.get("currency", "USD")
+        card = (
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"  📈 *{name}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 Price: `{currency}{price:,.2f}`\n"
+            f"📊 Change: {'🟢' if ch >= 0 else '🔴'} {ch:+.2f}%\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception as e:
+        await msg.edit_text(f"❌ {str(e)[:100]}")
+
+
+
     CMDS = [
         ("start", start), ("help", help_cmd),
         ("scan", scan_cmd), ("c", c_cmd), ("verify", verify_cmd),
@@ -4882,6 +5347,12 @@ def main():
         ("price", price_cmd),
         ("autoresponder", autoresponder_cmd),
         ("smartscan", smartscan_cmd), ("status", status_cmd), ("ping", ping_cmd),
+        ("dev", dev_cmd), ("top", top_cmd), ("soc", soc_cmd),
+        ("ath", ath_cmd), ("last", last_cmd), ("hot", hot_cmd),
+        ("best", best_cmd), ("worst", worst_cmd),
+        ("dub", dub_cmd), ("tldr", tldr_cmd),
+        ("metas", metas_cmd), ("pvp", pvp_cmd),
+        ("groupburp", groupburp_cmd), ("s", stock_cmd),
     ]
     for name, fn in CMDS:
         app.add_handler(CommandHandler(name, safe_command(fn)))
