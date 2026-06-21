@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v35 — PRO REBUILD                     ║
+║                    KAYO BRAIN v35b — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v35", 200
+def _root(): return "🦅 Kayo Brain v35b", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -313,7 +313,15 @@ async def get_live_market_context() -> str:
 # Groq primary → Gemini fallback
 # Every call is injected with LIVE market context so prices are always real
 # ═══════════════════════════════════════════════════════════════
-GROQ_MODELS = ["llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "llama3-8b-8192"]
+# Live Groq models as of June 2026 — dead models removed
+# llama3-8b-8192 + llama-3.1-70b-versatile are DECOMMISSIONED (HTTP 400)
+GROQ_MODELS = [
+    "llama-3.3-70b-versatile",      # Primary — best quality
+    "llama3-70b-8192",              # Fallback — still live
+    "llama-3.1-8b-instant",         # Fast fallback — good for rate limits
+    "mixtral-8x7b-32768",           # Fallback
+    "gemma2-9b-it",                 # Final Groq fallback
+]
 
 async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
                  inject_market: bool = True) -> str:
@@ -351,9 +359,9 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
     system_msg = {"role": "system", "content": system_content}
 
     if GROQ_API_KEY:
-        for model in GROQ_MODELS:
-            try:
-                async with aiohttp.ClientSession() as s:
+        async with aiohttp.ClientSession() as s:
+            for model in GROQ_MODELS:
+                try:
                     async with s.post(
                         "https://api.groq.com/openai/v1/chat/completions",
                         headers={
@@ -364,52 +372,80 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
                             "model": model,
                             "messages": [system_msg, {"role": "user", "content": prompt}],
                             "max_tokens": max_tokens,
-                            "temperature": 0.65,
+                            "temperature": 0.7,
                         },
-                        timeout=aiohttp.ClientTimeout(total=20),
+                        timeout=aiohttp.ClientTimeout(total=15),
                     ) as r:
                         if r.status == 200:
                             d = await r.json()
                             text_out = d["choices"][0]["message"]["content"].strip()
                             if text_out:
+                                logger.debug(f"ai_ask: Groq {model} OK")
                                 return text_out
                         elif r.status == 429:
-                            logger.warning(f"Groq 429 rate-limit on {model} — waiting 2s")
-                            await asyncio.sleep(2)
+                            # Rate limited — immediately try next model, no wait
+                            logger.warning(f"Groq 429 on {model} — trying next")
+                            continue
+                        elif r.status == 400:
+                            # Bad request — model likely decommissioned, skip
+                            err = await r.text()
+                            if "decommissioned" in err or "no longer supported" in err:
+                                logger.warning(f"Groq {model} DECOMMISSIONED — skip")
+                            else:
+                                logger.error(f"Groq {model} 400: {err[:100]}")
                             continue
                         else:
                             err_body = await r.text()
-                            logger.error(f"Groq {model} HTTP {r.status}: {err_body[:200]}")
-                            # Don't break — try next model
-            except asyncio.TimeoutError:
-                logger.warning(f"Groq {model} timed out — trying next model")
-            except Exception as e:
-                logger.error(f"Groq {model} exception: {e}")
+                            logger.error(f"Groq {model} HTTP {r.status}: {err_body[:100]}")
+                            continue
+                except asyncio.TimeoutError:
+                    logger.warning(f"Groq {model} timeout — next model")
+                    continue
+                except Exception as e:
+                    logger.error(f"Groq {model}: {e}")
+                    continue
 
+    # Gemini fallback — try multiple models in case one hits quota
     if GEMINI_API_KEY:
-        try:
-            full_prompt = f"{system_ctx}\n\n{prompt}"
-            async with aiohttp.ClientSession() as s:
-                async with s.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
-                    json={"contents": [{"parts": [{"text": full_prompt}]}],
-                          "generationConfig": {"maxOutputTokens": max_tokens}},
-                    timeout=aiohttp.ClientTimeout(total=22),
-                ) as r:
-                    if r.status == 200:
-                        d = await r.json()
-                        text_out = d["candidates"][0]["content"]["parts"][0]["text"].strip()
-                        if text_out:
-                            return text_out
-                    else:
-                        err_body = await r.text()
-                        logger.error(f"Gemini HTTP {r.status}: {err_body[:200]}")
-        except asyncio.TimeoutError:
-            logger.warning("Gemini timed out")
-        except Exception as e:
-            logger.error(f"Gemini exception: {e}")
+        gemini_models = [
+            "gemini-1.5-flash",        # Different quota from 2.0-flash
+            "gemini-2.0-flash-lite",   # Lightweight, lower quota usage
+            "gemini-2.0-flash",        # Original (may be quota-exhausted)
+            "gemini-1.5-flash-8b",     # Smallest, highest rate limits
+        ]
+        full_prompt = f"{system_ctx}\n\n{prompt}"
+        async with aiohttp.ClientSession() as s:
+            for gem_model in gemini_models:
+                try:
+                    async with s.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{gem_model}:generateContent?key={GEMINI_API_KEY}",
+                        json={
+                            "contents": [{"parts": [{"text": full_prompt}]}],
+                            "generationConfig": {"maxOutputTokens": max_tokens}
+                        },
+                        timeout=aiohttp.ClientTimeout(total=20),
+                    ) as r:
+                        if r.status == 200:
+                            d = await r.json()
+                            text_out = d["candidates"][0]["content"]["parts"][0]["text"].strip()
+                            if text_out:
+                                logger.debug(f"ai_ask: Gemini {gem_model} OK")
+                                return text_out
+                        elif r.status == 429:
+                            logger.warning(f"Gemini {gem_model} quota exhausted — trying next")
+                            continue
+                        else:
+                            err_body = await r.text()
+                            logger.error(f"Gemini {gem_model} HTTP {r.status}: {err_body[:100]}")
+                            continue
+                except asyncio.TimeoutError:
+                    logger.warning(f"Gemini {gem_model} timeout")
+                    continue
+                except Exception as e:
+                    logger.error(f"Gemini {gem_model}: {e}")
+                    continue
 
-    logger.error(f"ai_ask: ALL backends failed. Groq key set={bool(GROQ_API_KEY)}, Gemini key set={bool(GEMINI_API_KEY)}")
+    logger.error(f"ai_ask: ALL backends failed. Groq={bool(GROQ_API_KEY)} Gemini={bool(GEMINI_API_KEY)}")
     return fallback
 
 # ═══════════════════════════════════════════════════════════════
@@ -1394,7 +1430,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v35*\n"
+        f"\U0001f985 *KAYO BRAIN v35b*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1431,7 +1467,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v35 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v35b — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2547,7 +2583,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v35 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v35b alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2843,7 +2879,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     groq_key  = f"Set ({GROQ_API_KEY[:6]}...{GROQ_API_KEY[-4:]})" if GROQ_API_KEY else "NOT SET"
 
     await u.message.reply_text(
-        f"\u2699\ufe0f *KAYO BRAIN v35 STATUS*\n"
+        f"\u2699\ufe0f *KAYO BRAIN v35b STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{ai_live}\n"
         f"  Groq key: {groq_key}\n"
@@ -4480,7 +4516,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v35 ready — "
+        f"🦅 Kayo Brain v35b ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
