@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v36 — PRO REBUILD                     ║
+║                    KAYO BRAIN v36b — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v36", 200
+def _root(): return "🦅 Kayo Brain v36b", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1455,7 +1455,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v36*\n"
+        f"\U0001f985 *KAYO BRAIN v36b*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1492,7 +1492,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v36 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v36b — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -1509,24 +1509,52 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if t.get("error"):
         await msg.edit_text(f"❌ {t['error']}"); return
     add_xp(u.effective_user.id, 5)
-    ai = await ai_ask(
-        f"Solana token ${t['sym']} — MCap {_usd(t['mcap'])}, liq {_usd(t['liq'])}, "
-        f"age {_age(t['created'])}, 5m {_pct(t['ch5m'])}, 1h {_pct(t['ch1h'])}, "
-        f"24h {_pct(t['ch24h'])}, buy ratio {t['buy_pct']:.0f}%, vol spike {t['vol_spike']:.1f}x, "
-        f"momentum {t['mscore']}/100, risk {t['risk_score']}/100, "
-        f"narrative #{t['narrative']}, honeypot={t['is_honeypot']}, lp_locked={t['lp_locked']}. "
-        "Give a sharp alpha verdict: is this worth aping right now? "
-        "Consider the current market conditions from your live context. "
-        "Call out any red flags. 2-3 direct sentences.",
-        fallback="",
-        inject_market=True
-    )
-    await msg.edit_text(
-        build_scan_card(t, ai),
+    # Send card IMMEDIATELY — no AI wait
+    buttons = scan_buttons(addr, t.get("sym", ""), t.get("pair_addr", ""))
+    sent = await msg.edit_text(
+        build_scan_card(t, ""),
         parse_mode="Markdown",
-        reply_markup=scan_buttons(addr, t["sym"]),
+        reply_markup=buttons,
         disable_web_page_preview=True,
     )
+    # AI verdict as background task — edits message when ready
+    async def _scan_ai(msg_id, chat_id, token_data, btns):
+        try:
+            ai_v = await asyncio.wait_for(
+                ai_ask(
+                    f"Solana token ${token_data['sym']} — MCap {_usd(token_data['mcap'])}, "
+                    f"liq {_usd(token_data['liq'])}, age {_age(token_data['created'])}, "
+                    f"5m {_pct(token_data['ch5m'])}, 1h {_pct(token_data['ch1h'])}, "
+                    f"24h {_pct(token_data['ch24h'])}, buy ratio {token_data['buy_pct']:.0f}%, "
+                    f"vol spike {token_data['vol_spike']:.1f}x, momentum {token_data['mscore']}/100, "
+                    f"risk {token_data['risk_score']}/100, narrative #{token_data['narrative']}, "
+                    f"honeypot={token_data['is_honeypot']}, lp_locked={token_data['lp_locked']}. "
+                    "Give a sharp alpha verdict: is this worth aping right now? "
+                    "Consider the current market conditions from your live context. "
+                    "Call out any red flags. 2-3 direct sentences.",
+                    fallback="",
+                    inject_market=True
+                ),
+                timeout=15
+            )
+            if ai_v and ai_v.strip():
+                try:
+                    await c.bot.edit_message_text(
+                        chat_id=chat_id, message_id=msg_id,
+                        text=build_scan_card(token_data, ai_v),
+                        parse_mode="Markdown",
+                        reply_markup=btns,
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    asyncio.create_task(_scan_ai(
+        sent.message_id if hasattr(sent, 'message_id') else msg.message_id,
+        u.effective_chat.id, t, buttons
+    ))
 
 async def c_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
@@ -2608,7 +2636,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v36 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v36b alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2908,7 +2936,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]()~>#+=|{}.!\\])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *KAYO BRAIN v36 STATUS*\n"
+        f"\u2699\ufe0f *KAYO BRAIN v36b STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -3273,8 +3301,9 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     group_messages.append({"uid": uid, "text": text, "time": time.time()})
     if len(group_messages) > 300: group_messages.pop(0)
 
-    # ── 1. CA / Link auto-scan — always active, no gate ────────────
+    # ── 1. CA / Link auto-scan — INSTANT, no AI blocking ────────────
     # Scans CAs from plain text AND links from DexScreener/GMGN/Pump.fun/Birdeye/Photon etc.
+    # Card appears in <3 seconds. AI verdict edits in later as a background task.
     for ca in extract_cas(text)[:1]:
             try:
                 scanning_msg = await u.message.reply_text(
@@ -3284,31 +3313,69 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                 if t.get("error"):
                     await scanning_msg.edit_text(f"\u274c {t['error']}")
                     return
-                # AI verdict — same as /scan
-                ai_verdict = await ai_ask(
-                    f"Solana token ${t['sym']} — MCap {_usd(t['mcap'])}, liq {_usd(t['liq'])}, "
-                    f"age {_age(t['created'])}, 5m {_pct(t['ch5m'])}, 1h {_pct(t['ch1h'])}, "
-                    f"24h {_pct(t['ch24h'])}, buy ratio {t['buy_pct']:.0f}%, vol spike {t['vol_spike']:.1f}x, "
-                    f"momentum {t['mscore']}/100, risk {t['risk_score']}/100, "
-                    f"narrative #{t['narrative']}, honeypot={t['is_honeypot']}, lp_locked={t['lp_locked']}. "
-                    "Give a sharp alpha verdict: is this worth aping right now? "
-                    "Call out any red flags. 2-3 direct sentences.",
-                    fallback="",
-                    inject_market=True
-                )
+                # Send scan card IMMEDIATELY — no AI wait
+                card = build_scan_card(t, "")
+                buttons = scan_buttons(ca, t.get("sym", ""), t.get("pair_addr", ""))
                 await scanning_msg.delete()
-                await u.message.reply_text(
-                    build_scan_card(t, ai_verdict),
+                sent = await u.message.reply_text(
+                    card,
                     parse_mode="Markdown",
-                    reply_markup=scan_buttons(ca, t["sym"]),
+                    reply_markup=buttons,
                     disable_web_page_preview=True,
                 )
                 add_xp(uid, 5)
+                # Fire AI verdict as NON-BLOCKING background task — edits message when ready
+                async def _ca_ai_verdict(msg_id, chat_id, token_data, ca_addr, btns):
+                    try:
+                        ai_v = await asyncio.wait_for(
+                            ai_ask(
+                                f"Solana token ${token_data['sym']} — MCap {_usd(token_data['mcap'])}, "
+                                f"liq {_usd(token_data['liq'])}, age {_age(token_data['created'])}, "
+                                f"5m {_pct(token_data['ch5m'])}, 1h {_pct(token_data['ch1h'])}, "
+                                f"24h {_pct(token_data['ch24h'])}, buy ratio {token_data['buy_pct']:.0f}%, "
+                                f"vol spike {token_data['vol_spike']:.1f}x, momentum {token_data['mscore']}/100, "
+                                f"risk {token_data['risk_score']}/100, narrative #{token_data['narrative']}, "
+                                f"honeypot={token_data['is_honeypot']}, lp_locked={token_data['lp_locked']}. "
+                                "Give a sharp alpha verdict: is this worth aping right now? "
+                                "Call out any red flags. 2-3 direct sentences.",
+                                fallback="",
+                                inject_market=True
+                            ),
+                            timeout=15
+                        )
+                        if ai_v and ai_v.strip():
+                            try:
+                                await c.bot.edit_message_text(
+                                    chat_id=chat_id, message_id=msg_id,
+                                    text=build_scan_card(token_data, ai_v),
+                                    parse_mode="Markdown",
+                                    reply_markup=btns,
+                                    disable_web_page_preview=True,
+                                )
+                            except Exception:
+                                # Markdown failed — try plain text
+                                try:
+                                    plain = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '',
+                                                   build_scan_card(token_data, ai_v))
+                                    await c.bot.edit_message_text(
+                                        chat_id=chat_id, message_id=msg_id,
+                                        text=plain,
+                                        reply_markup=btns,
+                                        disable_web_page_preview=True,
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass  # AI is optional — card already sent
+
+                asyncio.create_task(_ca_ai_verdict(
+                    sent.message_id, u.effective_chat.id, t, ca, buttons
+                ))
             except Exception as _ca_err:
                 logger.error(f"CA auto-scan error for {ca}: {_ca_err}", exc_info=True)
                 try:
-                    await scanning_msg.edit_text(
-                        f"\u274c Scan failed for this token. Try `/scan {ca}` instead."
+                    await u.message.reply_text(
+                        f"\u274c Scan failed. Try `/scan {ca}`"
                     )
                 except Exception:
                     pass
@@ -4706,7 +4773,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v36 ready — "
+        f"🦅 Kayo Brain v36b ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
