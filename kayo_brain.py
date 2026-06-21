@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v35b — PRO REBUILD                     ║
+║                    KAYO BRAIN v35c — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v35b", 200
+def _root(): return "🦅 Kayo Brain v35c", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1430,7 +1430,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v35b*\n"
+        f"\U0001f985 *KAYO BRAIN v35c*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1467,7 +1467,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v35b — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v35c — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2583,7 +2583,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v35b alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v35c alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2879,7 +2879,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     groq_key  = f"Set ({GROQ_API_KEY[:6]}...{GROQ_API_KEY[-4:]})" if GROQ_API_KEY else "NOT SET"
 
     await u.message.reply_text(
-        f"\u2699\ufe0f *KAYO BRAIN v35b STATUS*\n"
+        f"\u2699\ufe0f *KAYO BRAIN v35c STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{ai_live}\n"
         f"  Groq key: {groq_key}\n"
@@ -4516,11 +4516,43 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v35b ready — "
+        f"🦅 Kayo Brain v35c ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
     )
+
+
+async def global_error_handler(u: Update, context):
+    """Catch ALL errors from command handlers and show feedback to the user."""
+    error = context.error
+    logger.error(f"Handler error: {error}", exc_info=True)
+    try:
+        if u and u.effective_chat:
+            await context.bot.send_message(
+                chat_id=u.effective_chat.id,
+                text=f"⚠️ Command failed: {str(error)[:100]}\nTry again or use /help"
+            )
+    except Exception:
+        pass
+
+
+def safe_command(fn):
+    """Decorator that wraps any command handler with try/except.
+    If the command crashes, the user gets an error message instead of silence."""
+    async def wrapper(u: Update, c: ContextTypes.DEFAULT_TYPE):
+        try:
+            return await fn(u, c)
+        except Exception as e:
+            logger.error(f"Command {fn.__name__} failed: {e}", exc_info=True)
+            try:
+                if u and u.message:
+                    await u.message.reply_text(
+                        f"⚠️ `{fn.__name__}` failed: {str(e)[:80]}\nTry /help or /ping"
+                    )
+            except Exception:
+                pass
+    return wrapper
 
 
 def main():
@@ -4549,7 +4581,7 @@ def main():
         ("smartscan", smartscan_cmd), ("status", status_cmd), ("ping", ping_cmd),
     ]
     for name, fn in CMDS:
-        app.add_handler(CommandHandler(name, fn))
+        app.add_handler(CommandHandler(name, safe_command(fn)))
     # CallbackQuery handler for inline chart button
     # CallbackQuery handlers
     app.add_handler(CallbackQueryHandler(handle_refresh_callback, pattern=r"^refresh:"))
@@ -4557,6 +4589,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_help_callback, pattern=r"^help:"))
     app.add_handler(CallbackQueryHandler(handle_chart_callback, pattern=r"^chart:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(global_error_handler)
 
     async def run():
         async with app:
