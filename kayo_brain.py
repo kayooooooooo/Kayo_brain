@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v37 — PRO REBUILD                     ║
+║                    KAYO BRAIN v37b — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v37", 200
+def _root(): return "🦅 Kayo Brain v37b", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1237,11 +1237,6 @@ def build_scan_card(t: Dict, ai: str = "") -> str:
     bp   = float(t.get("buy_pct", 50))
     sp   = 100 - bp
 
-    def _chg(v):
-        v = float(v or 0)
-        if v > 0:  return f"🟢 +{v:.1f}%"
-        if v < 0:  return f"🔴 {v:.1f}%"
-        return f"⚪ {v:.1f}%"
 
     fill = int(bp / 10)
     bar  = "🟩" * fill + "🟥" * (10 - fill)
@@ -1499,7 +1494,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v37*\n"
+        f"\U0001f985 *KAYO BRAIN v37b*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1536,7 +1531,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v37 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v37b — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2144,156 +2139,11 @@ async def a_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown"
     )
 
-async def watch_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if not c.args:
-        await u.message.reply_text("Usage: `/watch @username` — watch a Twitter account for CA drops", parse_mode="Markdown"); return
-    username = c.args[0].lstrip("@").lower()
-    watchlist[username] = {"added": time.time(), "by": u.effective_user.id, "hits": 0}
-    await _save()
-    add_xp(u.effective_user.id, 5)
-    await u.message.reply_text(
-        f"👁 *Watching @{username}*\n"
-        f"I'll alert the group the moment they drop a CA.\n"
-        f"_Requires TWITTER\\_AUTH\\_TOKEN to be set in Render env vars_",
-        parse_mode="Markdown"
-    )
-
-async def unwatch_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if not c.args:
-        await u.message.reply_text("Usage: `/unwatch @username`", parse_mode="Markdown"); return
-    username = c.args[0].lstrip("@").lower()
-    if username in watchlist:
-        del watchlist[username]; _save()
-        await u.message.reply_text(f"✅ Stopped watching @{username}")
-    else:
-        await u.message.reply_text(f"@{username} is not in your watchlist.")
-
-async def watchlist_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if not watchlist:
-        await u.message.reply_text("Watchlist empty. Use `/watch @username` to add.", parse_mode="Markdown"); return
-    lines = ["👁 *WATCHLIST*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
-    for un, data in watchlist.items():
-        added = datetime.fromtimestamp(data.get("added", 0)).strftime("%d/%m")
-        hits  = data.get("hits", 0)
-        lines.append(f"• @{un} — added {added}, {hits} CA drops caught")
-    await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
-
-async def tt_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if not c.args:
-        await u.message.reply_text("Usage: `/tt <ca_or_symbol>`", parse_mode="Markdown"); return
-    query = " ".join(c.args)
-    msg   = await u.message.reply_text(f"🔍 *Searching social signals for {query}...*", parse_mode="Markdown")
-
-    # Search DexScreener + Pump.fun for this token
-    dex_pairs = await dex_search_pairs(query)
-    pump_coins = await asyncio.gather(
-        pumpfun_latest(30),
-        return_exceptions=True
-    )
-    pump_list = pump_coins[0] if isinstance(pump_coins[0], list) else []
-
-    # Filter pump.fun matches
-    q_low = query.lower()
-    pump_matches = [
-        c for c in pump_list
-        if any(w in (c.get('symbol','') + c.get('name','') + c.get('description','')).lower()
-               for w in q_low.split() if len(w) > 2)
-    ]
-
-    sol_pairs = [p for p in (dex_pairs or []) if p.get("chainId") == "solana"][:5]
-    cas = list(set(
-        [(p.get("baseToken") or {}).get("address","") for p in sol_pairs] +
-        [c.get("mint","") for c in pump_matches[:3]]
-    ))
-    cas = [c for c in cas if c]
-
-    # Build context for AI
-    context_parts = []
-    if sol_pairs:
-        for p in sol_pairs[:3]:
-            sym = (p.get("baseToken") or {}).get("symbol","?")
-            fdv = float(p.get("fdv",0) or 0)
-            ch1h = float((p.get("priceChange") or {}).get("h1",0) or 0)
-            b1h = int(((p.get("txns") or {}).get("h1") or {}).get("buys",0) or 0)
-            s1h = int(((p.get("txns") or {}).get("h1") or {}).get("sells",0) or 0)
-            context_parts.append(f"${sym}: MCap {_usd(fdv)}, 1h {_pct(ch1h)}, Buys/Sells {b1h}/{s1h}")
-    if pump_matches:
-        for c in pump_matches[:3]:
-            context_parts.append(f"PumpFun: ${c.get('symbol','?')} — {c.get('description','')[:80]}")
-
-    context = "\n".join(context_parts) if context_parts else f"No on-chain data found for '{query}'"
-
-    # AI sentiment analysis from on-chain signals
-    ai = await ai_ask(
-        f"Analyze the on-chain social signals for '{query}' on Solana:\n{context}\n\n"
-        "What's the sentiment (bullish/bearish/neutral)? Is this worth aping? "
-        "What does the buy/sell pressure and price action tell us? "
-        "2-3 sharp sentences, degen style.",
-        fallback="Not enough signal to analyze right now.",
-        max_tokens=200, inject_market=True
-    )
-
-    out = [f"🔍 *SOCIAL SIGNAL: {query.upper()}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
-    if context_parts:
-        out.append("\n📊 *On-chain data:*")
-        for line in context_parts[:4]:
-            out.append(f"  {line}")
-    if cas:
-        out.append("\n📋 *Contract addresses:*")
-        for ca in cas[:3]:
-            out.append(f"  `{ca}`")
-    out.append(f"\n🧠 *Kayo's read:*\n_{ai}_")
-    out.append("\n_Powered by DexScreener + Pump.fun (Twitter scraping unavailable)_")
-
-    try:
-        await msg.edit_text("\n".join(out), parse_mode="Markdown", disable_web_page_preview=True)
-    except Exception:
-        plain = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', "\n".join(out))
-        await msg.edit_text(plain[:4000])
 
 
-async def moni_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if not c.args:
-        await u.message.reply_text("Usage: `/moni @username`", parse_mode="Markdown"); return
-    username = c.args[0].lstrip("@")
-    msg      = await u.message.reply_text(f"👤 *Checking @{username}...*", parse_mode="Markdown")
 
-    tweets = []
-    # Try Twitter cookie auth if configured
-    if TWITTER_AUTH_TOKEN:
-        tweets = await tw_user_tweets(username, limit=20)
 
-    if tweets:
-        texts = " ".join([t.get("text","") for t in tweets])
-        cas   = extract_cas(texts)
-        ai    = await ai_ask(
-            f"Analyze @{username}'s {len(tweets)} recent tweets. "
-            f"Are they reliable alpha? What tokens/narratives do they push? "
-            f"Tweets sample: {texts[:800]}",
-            fallback="", max_tokens=200
-        )
-        lines_out = [f"👤 *@{username}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{len(tweets)} tweets analyzed"]
-        if cas: lines_out.append("\n📋 *CAs found:*\n" + "\n".join([f"`{ca}`" for ca in cas[:5]]))
-        if ai:  lines_out.append(f"\n🧠 *AI read:*\n_{ai}_")
-    else:
-        # No Twitter access — show honest message + suggest /watch
-        lines_out = [
-            f"👤 *@{username}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"⚠️ Twitter scraping is currently unavailable (all public scrapers are Cloudflare-blocked).",
-            f"",
-            f"To enable Twitter features, add `TWITTER_AUTH_TOKEN` in Render env vars:",
-            f"1. Open twitter.com in browser (logged in)",
-            f"2. DevTools → Application → Cookies → copy `auth_token` value",
-            f"3. Add it to Render environment variables as `TWITTER_AUTH_TOKEN`",
-            f"",
-            f"_Use `/watch @{username}` to track their CA drops once Twitter is set up._",
-        ]
 
-    try:
-        await msg.edit_text("\n".join(lines_out), parse_mode="Markdown")
-    except Exception:
-        plain = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', "\n".join(lines_out))
-        await msg.edit_text(plain[:4000])
 
 
 async def watch_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -2681,7 +2531,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v37 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v37b alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2982,7 +2832,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]()~>#+=|{}.!\\])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *KAYO BRAIN v37 STATUS*\n"
+        f"\u2699\ufe0f *KAYO BRAIN v37b STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -4834,7 +4684,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v37 ready — "
+        f"🦅 Kayo Brain v37b ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
