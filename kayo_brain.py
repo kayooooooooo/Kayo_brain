@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v35c — PRO REBUILD                     ║
+║                    KAYO BRAIN v35d — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v35c", 200
+def _root(): return "🦅 Kayo Brain v35d", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1430,7 +1430,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v35c*\n"
+        f"\U0001f985 *KAYO BRAIN v35d*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1467,7 +1467,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v35c — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v35d — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2583,7 +2583,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v35c alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v35d alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2878,22 +2878,137 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     group_ok  = "\u2705" if GROUP_CHAT_ID != 0 else "\u274c NOT SET"
     groq_key  = f"Set ({GROQ_API_KEY[:6]}...{GROQ_API_KEY[-4:]})" if GROQ_API_KEY else "NOT SET"
 
-    await u.message.reply_text(
-        f"\u2699\ufe0f *KAYO BRAIN v35c STATUS*\n"
+    # Escape dynamic values to prevent Markdown parse errors
+    import re as _re_st
+    def _esc(s): return _re_st.sub(r'([*_`\[\]()~>#+=|{}.!\\])', r'\\\1', str(s))
+
+    status_text = (
+        f"\u2699\ufe0f *KAYO BRAIN v35d STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        f"{ai_live}\n"
-        f"  Groq key: {groq_key}\n"
-        f"{gemini_ok} Gemini AI (fallback)\n"
-        f"{redis_ok} Redis\n"
-        f"{tw_ok} Twitter auth\n"
-        f"{group_ok} Group alerts (ID: {GROUP_CHAT_ID})\n\n"
+        f"{_esc(ai_live)}\n"
+        f"  Groq key: {_esc(groq_key)}\n"
+        f"{_esc(gemini_ok)} Gemini AI (fallback)\n"
+        f"{_esc(redis_ok)} Redis\n"
+        f"{_esc(tw_ok)} Twitter auth\n"
+        f"{_esc(group_ok)} Group alerts (ID: {GROUP_CHAT_ID})\n\n"
         f"\U0001f4ca Watchlist: {len(watchlist)} accounts\n"
         f"\U0001f514 Active alerts: {sum(1 for a in user_alerts if not a.get('triggered'))}\n"
         f"\U0001f4e2 Open calls: {sum(1 for cl in active_calls if cl.get('status')=='open')}\n"
         f"\U0001f6ab Blacklisted: {len(blacklist)}\n"
-        f"\U0001f4be Seen alerts: {len(seen_alert_ids)}",
-        parse_mode="Markdown"
+        f"\U0001f4be Seen alerts: {len(seen_alert_ids)}"
     )
+    try:
+        await u.message.reply_text(status_text, parse_mode="Markdown")
+    except Exception:
+        # If Markdown still fails, send as plain text
+        plain = _re_st.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', status_text)
+        await u.message.reply_text(plain)
+
+
+HELP_PAGES = {
+    "scan": (
+        "\U0001f52c *SCAN & ANALYZE*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/scan <CA>` — Full token deep scan + AI verdict\n"
+        "_(Bot auto-drops: pumps, gems, new launches, whale moves, unusual activity)_\n"
+        "`/c <CA>` — Quick price snapshot\n"
+        "`/chart <CA>` — In-app chart image\n"
+        "`/price btc` — Live price for any coin\n"
+        "`/verify <CA>` — Rug & honeypot check\n"
+        "`/a <coin-id>` — Full CoinGecko coin lookup"
+    ),
+    "discover": (
+        "\U0001f50d *DISCOVER*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/runners` — Top Solana gainers right now\n"
+        "`/new` — Brand new token launches\n"
+        "`/pump` — Fresh 5-minute pumps\n"
+        "`/gems` — Hidden gems (low cap, good momentum)\n"
+        "`/boosted` — Tokens being actively promoted\n"
+        "`/takeover` — Community takeover tokens"
+    ),
+    "narrative": (
+        "\U0001f4d6 *NARRATIVES & TRENDS*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/trending` — Trending metas on DexScreener\n"
+        "`/narrative <word>` — Tokens matching a narrative\n"
+        "  e.g. `/narrative ai` `/narrative gaming`\n"
+        "`/explain <narrative>` — AI breakdown of a narrative\n"
+        "  e.g. `/explain defi` `/explain meme`"
+    ),
+    "ai": (
+        "\U0001f4f0 *NEWS & AI*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/news` — Latest news + AI intelligence briefing\n"
+        "`/ask <question>` — Ask Kayo AI anything (uses live prices)\n"
+        "`/sentiment` — Market mood, F&G, BTC dom + AI verdict\n"
+        "`/macro` — Macro briefing: BTC, SOL, risk environment\n"
+        "`/markets` — Global market cap & volume data\n"
+        "`/index` — Fear & Greed index"
+    ),
+    "twitter": (
+        "\U0001f426 *TWITTER / SOCIAL*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/tt <CA>` — Twitter sentiment for a token\n"
+        "`/moni @user` — Analyze a KOL account\n"
+        "`/watch @user` — Monitor account for CA drops\n"
+        "`/unwatch @user` — Stop monitoring\n"
+        "`/watchlist` — Your monitored accounts"
+    ),
+    "alerts": (
+        "\U0001f514 *ALERTS*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/alert <CA> <price>` — Set a price alert\n"
+        "  e.g. `/alert EPjF... 0.05`\n"
+        "`/myalerts` — View all your active alerts\n"
+        "`/delalert <number>` — Delete an alert\n"
+        "`/blacklist <CA>` — Blacklist a rug token"
+    ),
+    "calls": (
+        "\U0001f4e2 *CALLS*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/call <CA> <entry>` — Make a public alpha call\n"
+        "  e.g. `/call EPjF... 0.042`\n"
+        "`/mycalls` — Your call history\n"
+        "`/stop <symbol> <exit>` — Close a call + auto P&L\n"
+        "  e.g. `/stop WIF 0.08`\n"
+        "`/leaderboard` — Top callers ranked by P&L"
+    ),
+    "portfolio": (
+        "\U0001f4bc *PORTFOLIO*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/addport <CA> <$amount>` — Add a token to portfolio\n"
+        "  e.g. `/addport EPjF... 500`\n"
+        "`/portfolio` — View live P&L for all holdings"
+    ),
+    "wallets": (
+        "\U0001f45b *WALLETS*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/trackwallet <address> <label>` — Track any Solana wallet\n"
+        "  e.g. `/trackwallet 9xQe... whaleacc`\n"
+        "`/mywallet <address>` — Link your own Solana wallet"
+    ),
+    "social": (
+        "\U0001f3ae *XP & SOCIAL*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/rank` — Your XP level and rank\n"
+        "`/gp` — Group XP leaderboard\n"
+        "`/dubs <story>` — Celebrate a win (+20 XP)\n"
+        "`/gsum` — AI summary of last 50 group messages\n"
+        "`/remindme <min> <msg>` — Set a reminder\n"
+        "  e.g. `/remindme 30 check WIF chart`"
+    ),
+    "system": (
+        "\u2699\ufe0f *SYSTEM*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/autoresponder` — Toggle auto-scan when CA is pasted\n"
+        "`/status` — Full bot health check\n"
+        "`/ping` — Latency check\n"
+        "`/start` — Reopen main menu"
+    ),
+}
+
+BACK_BTN = InlineKeyboardMarkup([[InlineKeyboardButton("\u2b05\ufe0f Back to categories", callback_data="help:back")]])
 
 async def handle_help_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Shows per-category command pages when tapping help category buttons."""
@@ -4516,7 +4631,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v35c ready — "
+        f"🦅 Kayo Brain v35d ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
