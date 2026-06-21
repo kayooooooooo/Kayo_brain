@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v34 — PRO REBUILD                     ║
+║                    KAYO BRAIN v35 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v34", 200
+def _root(): return "🦅 Kayo Brain v35", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1235,6 +1235,7 @@ def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
         "unusual":   "\U000026a1 *UNUSUAL ACTIVITY*",
         "migration": "\U0001f504 *MIGRATION ALERT*",   # pump.fun -> Raydium
         "rebrand":   "\U0001f3f7 *REBRAND ALERT*",     # renamed to trending narrative
+        "momentum":  "\U0001f4c8 *MOMENTUM ALERT*",    # strong general momentum
     }
     header = icons.get(alert_type, "\u26a1 *KAYO ALERT*")
     age    = _age(t["created"])
@@ -1393,7 +1394,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v34*\n"
+        f"\U0001f985 *KAYO BRAIN v35*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1430,7 +1431,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v34 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v35 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -1847,35 +1848,35 @@ async def news_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(plain[:4000])
 async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/ask <question>`", parse_mode="Markdown"); return
+        await u.message.reply_text("Usage: `/ask <question>`\nExample: `/ask what's the price of sol?`", parse_mode="Markdown"); return
     q   = " ".join(c.args)
     msg = await u.message.reply_text("\U0001f9e0 *Kayo thinking...*", parse_mode="Markdown")
     add_xp(u.effective_user.id, 2)
-    import random as _rand
-    _CASUAL_FALLBACKS = [
-        "haha yeah that checks out 😂", "lol true dat", "gm ser 🌅",
-        "vibing — what's good?", "lol no cap 😭", "yo 👋 what's the move?",
-        "facts 🤝", "based ngl", "haha 💀 real ones know",
-    ]
-    # Unified prompt — no keyword routing. Always inject live market data.
-    # AI decides tone: casual = short+human, crypto = sharp+data, general = helpful.
+
     prompt = (
-        f"User asks via /ask: \"{q}\"\n\n"
-        "You are Kayo — sharp Solana alpha bot AND knowledgeable friend. "
-        "Answer anything: crypto prices (use LIVE data), web3 alpha, general knowledge, casual chat. "
-        "Be direct. No disclaimers. No refusals. Match the tone of the question. "
-        "For prices: cite the exact live numbers from your context. "
-        "For casual: be short, warm, witty. For deep questions: be thorough but concise."
+        f"Question: \"{q}\"\n\n"
+        "Answer as Kayo. You are a Web3 alpha expert AND a knowledgeable friend. "
+        "Use the LIVE market data in your context for any price questions — cite actual numbers. "
+        "For crypto: be sharp, direct, drop alpha like a degen pro. "
+        "For general knowledge: answer like a smart friend, no disclaimers. "
+        "For casual: be short, warm, witty. "
+        "Never refuse. Never say you can't answer. Never say you're a bot. Just answer."
     )
-    ans = await ai_ask(prompt, max_tokens=500, inject_market=True,
-                       fallback=_rand.choice(_CASUAL_FALLBACKS))
-    ts     = datetime.utcnow().strftime("%H:%M UTC")
-    footer = f"\n\n_Live data as of {ts}_"
+    ans = await ai_ask(prompt, max_tokens=500, inject_market=True, fallback="")
 
     if not ans or not ans.strip():
-        ans = _rand.choice(_CASUAL_FALLBACKS)
+        ans = ("\u26a0\ufe0f My AI brain is offline right now. "
+               "Make sure GROQ_API_KEY is set in Render env vars. "
+               "Get a free key at console.groq.com/keys")
+        try:
+            await msg.edit_text(ans)
+        except Exception:
+            await u.message.reply_text(ans)
+        return
+
+    ts     = datetime.utcnow().strftime("%H:%M UTC")
+    footer = f"\n\n_Live data as of {ts}_"
     import re as _re3
-    # Always try markdown first (AI may use bold for crypto), fall back to plain
     try:
         await msg.edit_text(
             f"\U0001f9e0 *Kayo*\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{ans}{footer}",
@@ -1885,6 +1886,7 @@ async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     except Exception:
         plain_ans = _re3.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', ans)
         await msg.edit_text(f"{plain_ans.strip() or ans}{footer}")
+
 
 async def sentiment_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     msg = await u.message.reply_text("📊 *Reading market sentiment...*", parse_mode="Markdown")
@@ -2545,7 +2547,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v34 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v35 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2813,133 +2815,49 @@ async def smartscan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Scan error: {e}")
 
 async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    redis_ok  = "✅ Connected" if _redis else "❌ Not connected (set REDIS_URL)"
-    groq_ok   = "✅" if GROQ_API_KEY else "❌"
-    gemini_ok = "✅" if GEMINI_API_KEY else "❌"
-    tw_ok     = "✅" if TWITTER_AUTH_TOKEN else "❌"
-    group_ok  = "✅" if GROUP_CHAT_ID != 0 else f"❌ (set GROUP_CHAT_ID)"
+    # Test AI live
+    ai_live = "\u274c Not tested"
+    if GROQ_API_KEY:
+        try:
+            test = await asyncio.wait_for(
+                ai_ask("Say exactly: ONLINE", fallback="", max_tokens=10, inject_market=False),
+                timeout=10
+            )
+            if test and "ONLINE" in test.upper():
+                ai_live = "\u2705 Live (Groq working)"
+            elif test:
+                ai_live = f"\u2705 Live (got: {test[:20]})"
+            else:
+                ai_live = "\u274c Key set but no response"
+        except asyncio.TimeoutError:
+            ai_live = "\u274c Timeout (key may be invalid)"
+        except Exception as e:
+            ai_live = f"\u274c Error: {str(e)[:30]}"
+    else:
+        ai_live = "\u274c NOT SET — get free key at console.groq.com/keys"
+
+    redis_ok  = "\u2705 Connected" if _redis else "\u274c Not connected"
+    gemini_ok = "\u2705" if GEMINI_API_KEY else "\u274c Not set"
+    tw_ok     = "\u2705" if TWITTER_AUTH_TOKEN else "\u274c Not set"
+    group_ok  = "\u2705" if GROUP_CHAT_ID != 0 else "\u274c NOT SET"
+    groq_key  = f"Set ({GROQ_API_KEY[:6]}...{GROQ_API_KEY[-4:]})" if GROQ_API_KEY else "NOT SET"
+
     await u.message.reply_text(
-        f"⚙️ *KAYO BRAIN v34 STATUS*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{redis_ok} Redis\n"
-        f"{groq_ok} Groq AI (primary)\n"
+        f"\u2699\ufe0f *KAYO BRAIN v35 STATUS*\n"
+        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        f"{ai_live}\n"
+        f"  Groq key: {groq_key}\n"
         f"{gemini_ok} Gemini AI (fallback)\n"
+        f"{redis_ok} Redis\n"
         f"{tw_ok} Twitter auth\n"
         f"{group_ok} Group alerts (ID: {GROUP_CHAT_ID})\n\n"
-        f"📊 Watchlist: {len(watchlist)} accounts\n"
-        f"🔔 Active alerts: {sum(1 for a in user_alerts if not a.get('triggered'))}\n"
-        f"📢 Open calls: {sum(1 for cl in active_calls if cl.get('status')=='open')}\n"
-        f"🚫 Blacklisted: {len(blacklist)}\n"
-        f"💾 Seen alerts (Redis): {len(seen_alert_ids)}",
+        f"\U0001f4ca Watchlist: {len(watchlist)} accounts\n"
+        f"\U0001f514 Active alerts: {sum(1 for a in user_alerts if not a.get('triggered'))}\n"
+        f"\U0001f4e2 Open calls: {sum(1 for cl in active_calls if cl.get('status')=='open')}\n"
+        f"\U0001f6ab Blacklisted: {len(blacklist)}\n"
+        f"\U0001f4be Seen alerts: {len(seen_alert_ids)}",
         parse_mode="Markdown"
     )
-
-# ═══════════════════════════════════════════════════════════════
-# AUTO-RESPONDER
-# ═══════════════════════════════════════════════════════════════
-HELP_PAGES = {
-    "scan": (
-        "\U0001f52c *SCAN & ANALYZE*\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "`/scan <CA>` — Full token deep scan + AI verdict\n"        "_(Bot auto-drops: pumps, gems, new launches, whale moves, unusual activity)_\n"
-        "`/c <CA>` — Quick price snapshot\n"
-        "`/chart <CA>` — In-app chart image (no DexScreener needed)\n"
-        "`/price btc` — Live price for any coin (btc, sol, eth, bnb...)\n"
-        "`/verify <CA>` — Rug & honeypot check via GoPlus\n"
-        "`/a <coin-id>` — Full CoinGecko coin lookup"
-    ),
-    "discover": (
-        "\U0001f50d *DISCOVER*\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "`/runners` — Top Solana gainers right now\n"
-        "`/new` — Brand new token launches\n"
-        "`/pump` — Fresh 5-minute pumps\n"
-        "`/gems` — Hidden gems (low cap, good momentum)\n"
-        "`/boosted` — Tokens teams are actively promoting\n"
-        "`/takeover` — Community takeover tokens"
-    ),
-    "narrative": (
-        "\U0001f4d6 *NARRATIVES & TRENDS*\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "`/trending` — Trending metas on DexScreener\n"
-        "`/narrative <word>` — Tokens matching a narrative\n"
-        "  e.g. `/narrative ai` `/narrative gaming`\n"
-        "`/explain <narrative>` — AI professional breakdown of a narrative\n"
-        "  e.g. `/explain defi` `/explain meme`"
-    ),
-    "ai": (
-        "\U0001f4f0 *NEWS & AI*\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "`/news` — Latest 5-source news + AI intelligence briefing\n"
-        "`/ask <question>` — Ask Kayo AI anything (uses live prices)\n"
-        "`/sentiment` — Market mood, F&G, BTC dom + AI verdict\n"
-        "`/macro` — Macro briefing: BTC, SOL, risk environment\n"
-        "`/markets` — Global market cap & volume data\n"
-        "`/index` — Fear & Greed index"
-    ),
-    "twitter": (
-        "\U0001f426 *TWITTER / SOCIAL*\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "`/tt <CA>` — Twitter sentiment for a token\n"
-        "`/moni @user` — Analyze a KOL account (tweet history + CAs)\n"
-        "`/watch @user` — Monitor account for CA drops\n"
-        "`/unwatch @user` — Stop monitoring\n"
-        "`/watchlist` — Your monitored accounts"
-    ),
-    "alerts": (
-        "\U0001f514 *ALERTS*\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "`/alert <CA> <price>` — Set a price alert\n"
-        "  e.g. `/alert EPjF... 0.05` — fires when price hits target\n"
-        "`/myalerts` — View all your active alerts\n"
-        "`/delalert <number>` — Delete an alert by its number\n"
-        "`/blacklist <CA>` — Blacklist a rug (filtered from all scans)"
-    ),
-    "calls": (
-        "\U0001f4e2 *CALLS*\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "`/call <CA> <entry>` — Make a public alpha call\n"
-        "  e.g. `/call EPjF... 0.042`\n"
-        "`/mycalls` — Your call history\n"
-        "`/stop <symbol> <exit>` — Close a call + auto P&L\n"
-        "  e.g. `/stop WIF 0.08`\n"
-        "`/leaderboard` — Top callers ranked by P&L & win rate"
-    ),
-    "portfolio": (
-        "\U0001f4bc *PORTFOLIO*\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "`/addport <CA> <$amount>` — Add a token to portfolio\n"
-        "  e.g. `/addport EPjF... 500`\n"
-        "`/portfolio` — View live P&L for all holdings"
-    ),
-    "wallets": (
-        "\U0001f45b *WALLETS*\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "`/trackwallet <address> <label>` — Track any Solana wallet\n"
-        "  e.g. `/trackwallet 9xQe... whaleacc`\n"
-        "`/mywallet <address>` — Link your own Solana wallet"
-    ),
-    "social": (
-        "\U0001f3ae *XP & SOCIAL*\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "`/rank` — Your XP level and rank\n"
-        "`/gp` — Group XP leaderboard\n"
-        "`/dubs <story>` — Celebrate a win (+20 XP)\n"
-        "`/gsum` — AI summary of last 50 group messages\n"
-        "`/remindme <min> <msg>` — Set a reminder\n"
-        "  e.g. `/remindme 30 check WIF chart`"
-    ),
-    "system": (
-        "\U00002699\ufe0f *SYSTEM*\n"
-        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
-        "`/autoresponder` — Toggle auto-scan when CA is pasted\n"
-        "`/status` — Full bot health check (Redis, AI, Twitter, group)\n"
-        "`/ping` — Latency check\n"
-        "`/start` — Reopen main menu"
-    ),
-}
-
-BACK_BTN = InlineKeyboardMarkup([[InlineKeyboardButton("\u2b05\ufe0f Back to categories", callback_data="help:back")]])
 
 async def handle_help_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Shows per-category command pages when tapping help category buttons."""
@@ -3273,13 +3191,13 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     )
     reply = await ai_ask(
         prompt,
-        fallback="yo, brain glitched for a sec — say that again?",
+        fallback="",
         max_tokens=450,
         inject_market=True  # always inject live prices — AI ignores them for casual chat
     )
 
     if not reply or not reply.strip():
-        reply = "yo, say that again? 🤔"
+        reply = "⚠️ AI brain offline — GROQ_API_KEY may not be set on Render. Get a free key at console.groq.com/keys"
     # Always try markdown (AI uses bold for crypto analysis), fall back to plain
     import re as _re
     try:
@@ -3501,6 +3419,7 @@ async def bg_main_scanner(app: Application):
                 elif vol_spike >= 2.0 and b1h >= 3 and buy_pct >= 50:            alert_type = "unusual"
                 elif fdv < 100_000 and b1h >= 5 and buy_pct >= 55:              alert_type = "unusual"
                 elif is_boosted and buy_pct >= 50 and b1h >= 3 and ch1h >= 1:   alert_type = "new"
+                elif ch1h >= 12 and ch5m >= 3 and buy_pct >= 52 and vol_spike >= 1.5: alert_type = "momentum"
 
                 if not alert_type: continue
 
@@ -4561,7 +4480,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v34 ready — "
+        f"🦅 Kayo Brain v35 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
