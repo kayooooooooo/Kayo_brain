@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v37b — PRO REBUILD                     ║
+║                    KAYO BRAIN v37c — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -1494,7 +1494,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v37b*\n"
+        f"\U0001f985 *KAYO BRAIN v37c*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1531,7 +1531,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v37b — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v37c — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2832,7 +2832,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]()~>#+=|{}.!\\])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *KAYO BRAIN v37b STATUS*\n"
+        f"\u2699\ufe0f *KAYO BRAIN v37c STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -4723,10 +4723,6 @@ def safe_command(fn):
     return wrapper
 
 
-def main():
-    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
-
-
 # ═══════════════════════════════════════════════════════════════
 # RICK-STYLE FEATURES — all powered by FREE APIs
 # ═══════════════════════════════════════════════════════════════
@@ -5174,6 +5170,11 @@ async def stock_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await msg.edit_text(f"❌ {str(e)[:100]}")
 
+
+
+
+def main():
+    app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
 
     CMDS = [
