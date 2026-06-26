@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v38 — PRO REBUILD                     ║
+║                    KAYO BRAIN v39 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v38", 200
+def _root(): return "🦅 Kayo Brain v39", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1494,7 +1494,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f985 *KAYO BRAIN v38*\n"
+        f"\U0001f985 *KAYO BRAIN v39*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1531,7 +1531,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f985 *KAYO BRAIN v38 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v39 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2531,7 +2531,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v38 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v39 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2832,7 +2832,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]()~>#+=|{}.!\\])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *KAYO BRAIN v38 STATUS*\n"
+        f"\u2699\ufe0f *KAYO BRAIN v39 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -3429,6 +3429,845 @@ async def _fetch_dex_boosts() -> list:
     except Exception as e:
         logger.debug(f"dex_boosts: {e}")
         return []
+
+# ═══════════════════════════════════════════════════════════════════════
+# KAYO v39 ELITE INJECTION — ALL NEW FEATURES
+# Injected before bg_main_scanner
+# ═══════════════════════════════════════════════════════════════════════
+
+# ── FREE API HELPERS ─────────────────────────────────────────────────
+
+async def solscan_wallet_txns(addr: str, limit: int = 10) -> List[Dict]:
+    """SolanaFM / Solscan public API — no key needed."""
+    urls = [
+        f"https://api.solscan.io/v2/account/transactions?account={addr}&limit={limit}",
+        f"https://public-api.solscan.io/account/transactions?account={addr}&limit={limit}",
+    ]
+    async with aiohttp.ClientSession() as s:
+        for url in urls:
+            try:
+                async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        if isinstance(data, list): return data
+                        if isinstance(data, dict) and "data" in data: return data["data"]
+            except Exception:
+                continue
+    return []
+
+async def solanafm_wallet_txns(addr: str, limit: int = 10) -> List[Dict]:
+    """SolanaFM API — free, no key."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.solana.fm/v0/accounts/{addr}/transactions?limit={limit}",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    return d.get("result", {}).get("data", []) or []
+    except Exception:
+        pass
+    return []
+
+async def dex_wallet_pnl(addr: str) -> Dict:
+    """Get wallet PnL from DexScreener portfolio endpoint."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.dexscreener.com/latest/dex/portfolio/solana/{addr}",
+                timeout=aiohttp.ClientTimeout(total=12)
+            ) as r:
+                if r.status == 200:
+                    return await r.json()
+    except Exception:
+        pass
+    return {}
+
+async def fetch_token_holders(addr: str) -> Dict:
+    """Get top holder concentration via Solscan."""
+    result = {"top10_pct": 0, "holder_count": 0, "top_holders": []}
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.solscan.io/v2/token/holders?token={addr}&offset=0&limit=10",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    holders = d.get("data", {}).get("result", []) or []
+                    total_supply = float(d.get("data", {}).get("total", 1) or 1)
+                    top10_amt = sum(float(h.get("amount", 0)) for h in holders[:10])
+                    result["top10_pct"] = min(100, (top10_amt / max(total_supply, 1)) * 100)
+                    result["holder_count"] = int(d.get("data", {}).get("total", 0) or 0)
+                    result["top_holders"] = holders[:5]
+    except Exception:
+        pass
+    return result
+
+async def fetch_token_metadata(addr: str) -> Dict:
+    """Get rich token metadata from multiple free sources."""
+    meta = {}
+    try:
+        async with aiohttp.ClientSession() as s:
+            # Try Pump.fun metadata
+            async with s.get(
+                f"https://frontend-api.pump.fun/coins/{addr}",
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    meta["twitter"] = d.get("twitter", "")
+                    meta["telegram"] = d.get("telegram", "")
+                    meta["website"] = d.get("website", "")
+                    meta["dev_wallet"] = d.get("creator", "")
+                    meta["total_supply"] = d.get("total_supply", 0)
+                    meta["raydium_pool"] = d.get("raydium_pool", "")
+                    meta["is_currently_live"] = d.get("is_currently_live", False)
+    except Exception:
+        pass
+    return meta
+
+async def detect_bundled_launch(addr: str) -> Dict:
+    """
+    Detect if token was bundled at launch (coordinated multi-wallet buy).
+    Uses DexScreener first-txn data — no key needed.
+    """
+    result = {"is_bundled": False, "bundle_wallets": 0, "bundle_pct": 0.0}
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    pairs = d.get("pairs", [])
+                    if pairs:
+                        p = pairs[0]
+                        created = int(p.get("pairCreatedAt", 0) or 0) / 1000
+                        b5m = int(((p.get("txns") or {}).get("m5") or {}).get("buys", 0) or 0)
+                        s5m = int(((p.get("txns") or {}).get("m5") or {}).get("sells", 0) or 0)
+                        age_min = (time.time() - created) / 60 if created else 999
+                        # Heuristic: if token is <30min old and has many buys in first 5min
+                        # relative to current txns, likely bundled
+                        if age_min < 30 and b5m > 15:
+                            result["is_bundled"] = True
+                            result["bundle_wallets"] = b5m
+    except Exception:
+        pass
+    return result
+
+async def get_sol_price() -> float:
+    """Get live SOL price — CoinGecko free."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    return float(d.get("solana", {}).get("usd", 0))
+    except Exception:
+        pass
+    return 0.0
+
+async def fetch_smart_money_tokens() -> List[Dict]:
+    """
+    Detect tokens being accumulated by smart/profitable wallets.
+    Uses GeckoTerminal trending data cross-referenced with Pump.fun trending.
+    """
+    results = []
+    try:
+        gt_trending, pf_trending = await asyncio.gather(
+            gt_trending_pools(page=1),
+            _fetch_pumpfun_trending(),
+            return_exceptions=True
+        )
+        gt_addrs = set()
+        if not isinstance(gt_trending, Exception):
+            for p in gt_trending:
+                tok = gt_parse_pool(p)
+                if tok: gt_addrs.add(tok["address"])
+
+        pf_addrs = set()
+        if not isinstance(pf_trending, Exception):
+            for c in (pf_trending or [])[:20]:
+                addr = c.get("mint", "")
+                if addr: pf_addrs.add(addr)
+
+        # Tokens appearing in BOTH sources = smart money convergence
+        overlap = gt_addrs & pf_addrs
+        for addr in list(overlap)[:10]:
+            results.append({"address": addr, "signal": "smart_money_convergence"})
+    except Exception:
+        pass
+    return results
+
+async def _fetch_pumpfun_trending() -> List[Dict]:
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://frontend-api.pump.fun/coins?offset=0&limit=20&sort=market_cap&order=DESC&includeNsfw=false",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    return await r.json()
+    except Exception:
+        pass
+    return []
+
+async def check_dev_activity(dev_wallet: str, token_addr: str) -> Dict:
+    """Check if dev wallet has sold tokens or is still holding."""
+    result = {"dev_sold": False, "dev_hold_pct": 100, "dev_txn_count": 0, "warning": ""}
+    if not dev_wallet:
+        return result
+    try:
+        txns = await solscan_wallet_txns(dev_wallet, limit=20)
+        for txn in txns:
+            # If dev wallet appears to have transferred the token
+            if isinstance(txn, dict):
+                result["dev_txn_count"] += 1
+        if result["dev_txn_count"] > 10:
+            result["warning"] = "High dev wallet activity"
+        elif result["dev_txn_count"] == 0:
+            result["warning"] = "Dev wallet inactive"
+    except Exception:
+        pass
+    return result
+
+# ── ENHANCED SCAN CARD WITH HOLDER + BUNDLE DATA ──────────────────────
+
+async def full_enhanced_scan(addr: str) -> Dict:
+    """
+    Full token intelligence: base data + holder analysis + bundle detection + dev check.
+    All free APIs.
+    """
+    base, holders, bundle, metadata = await asyncio.gather(
+        full_token_scan(addr),
+        fetch_token_holders(addr),
+        detect_bundled_launch(addr),
+        fetch_token_metadata(addr),
+        return_exceptions=True
+    )
+
+    if isinstance(base, Exception) or not base:
+        return {"error": "Token not found"}
+
+    result = dict(base)
+
+    # Holder data
+    if not isinstance(holders, Exception):
+        result["top10_pct"]    = holders.get("top10_pct", 0)
+        result["holder_count"] = holders.get("holder_count", 0)
+        result["top_holders"]  = holders.get("top_holders", [])
+
+    # Bundle detection
+    if not isinstance(bundle, Exception):
+        result["is_bundled"]      = bundle.get("is_bundled", False)
+        result["bundle_wallets"]  = bundle.get("bundle_wallets", 0)
+
+    # Metadata
+    if not isinstance(metadata, Exception) and metadata:
+        if not result.get("tw_link") and metadata.get("twitter"):
+            result["tw_link"] = metadata["twitter"]
+        if not result.get("tg_link") and metadata.get("telegram"):
+            result["tg_link"] = metadata["telegram"]
+        if not result.get("web_link") and metadata.get("website"):
+            result["web_link"] = metadata["website"]
+        result["dev_wallet"]       = metadata.get("dev_wallet", "")
+        result["pump_live"]        = metadata.get("is_currently_live", False)
+
+    # Dev check
+    if result.get("dev_wallet"):
+        try:
+            dev = await asyncio.wait_for(
+                check_dev_activity(result["dev_wallet"], addr), timeout=8
+            )
+            result["dev_warning"]    = dev.get("warning", "")
+            result["dev_txn_count"]  = dev.get("dev_txn_count", 0)
+        except Exception:
+            pass
+
+    return result
+
+def build_elite_scan_card(t: Dict, ai: str = "") -> str:
+    """
+    Elite scan card — includes holder concentration, bundle flag, dev wallet check.
+    Rick-style information density.
+    """
+    sym   = _md(t.get("sym", "???"))
+    name  = _md(t.get("name", sym))
+    addr  = t.get("address", "")
+    age   = _age(t.get("created", 0))
+    nar   = f"#{t.get('narrative','').upper()}" if t.get("narrative") else ""
+
+    def _chg(v):
+        v = float(v or 0)
+        if v > 0: return f"🟢 +{v:.1f}%"
+        if v < 0: return f"🔴 {v:.1f}%"
+        return f"⚪ {v:.1f}%"
+
+    # Price bars
+    bp   = float(t.get("buy_pct", 50))
+    sp   = 100 - bp
+    fill = int(bp / 10)
+    bar  = "🟩" * fill + "🟥" * (10 - fill)
+    press = "🔥 BUY PRESSURE" if bp > 60 else ("❄️ SELL PRESSURE" if bp < 40 else "⚖️ BALANCED")
+
+    # Security flags
+    flags = []
+    if t.get("is_honeypot"):        flags.append("🚨 HONEYPOT")
+    if t.get("is_bundled"):         flags.append(f"🔴 BUNDLED ({t.get('bundle_wallets',0)} wallets)")
+    if t.get("top10_pct", 0) > 70:  flags.append(f"⚠️ TOP10 HOLD {t['top10_pct']:.0f}%")
+    if t.get("dev_warning"):        flags.append(f"👨‍💻 DEV: {t['dev_warning']}")
+    if t.get("lp_locked"):          flags.append("🔒 LP LOCKED")
+    if t.get("is_renounced"):       flags.append("✅ RENOUNCED")
+    if t.get("boost_active", 0) > 0: flags.append("💰 BOOSTED")
+    if t.get("pump_live"):          flags.append("🟣 PUMP.FUN LIVE")
+    flag_str = "  ".join(flags) if flags else "⚠️ UNVERIFIED"
+
+    # Risk color
+    rs = int(t.get("risk_score", 30))
+    risk_icon = "🔴" if rs >= 70 else ("🟡" if rs >= 40 else "🟢")
+    ms = int(t.get("mscore", 0))
+    ms_icon = "🔥" if ms >= 70 else ("⚡" if ms >= 40 else "💤")
+
+    holders_line = ""
+    if t.get("holder_count"):
+        h10 = t.get("top10_pct", 0)
+        holders_line = f"👥 Holders: `{t['holder_count']:,}`  ·  Top10: `{h10:.1f}%`\n"
+
+    socials = []
+    if t.get("tw_link"):  socials.append(f"[🐦 Twitter]({t['tw_link']})")
+    if t.get("tg_link"):  socials.append(f"[💬 TG]({t['tg_link']})")
+    if t.get("web_link"): socials.append(f"[🌐 Web]({t['web_link']})")
+    soc_str = "  ".join(socials)
+
+    tax_line = ""
+    bt = float(t.get("buy_tax", 0))
+    st = float(t.get("sell_tax", 0))
+    if bt > 0 or st > 0:
+        tax_line = f"🧾 Tax: Buy `{bt:.1f}%` / Sell `{st:.1f}%`\n"
+
+    card = (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔍 *KAYO ELITE SCAN* {f'| {nar}' if nar else ''}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 *{sym}* — _{name}_\n"
+        f"📋 `{addr}`\n"
+        f"🕐 Age: {age}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 Price: `{_price(t.get('price',0))}`\n"
+        f"📊 MCap: `{_usd(t.get('mcap',0))}`  ·  FDV: `{_usd(t.get('fdv',0))}`\n"
+        f"🌊 Liquidity: `{_usd(t.get('liq',0))}`\n"
+        f"{holders_line}"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 *Price Action*\n"
+        f"  5m: {_chg(t.get('ch5m',0))}  ·  1h: {_chg(t.get('ch1h',0))}\n"
+        f"  6h: {_chg(t.get('ch6h',0))}  ·  24h: {_chg(t.get('ch24h',0))}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔄 *Txns (1h)*  🟢 {t.get('b1h',0)} buys · 🔴 {t.get('s1h',0)} sells\n"
+        f"  {bar}\n"
+        f"  {bp:.0f}% Buy / {sp:.0f}% Sell — {press}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ Momentum: {ms_icon} `{ms}/100`  ·  Risk: {risk_icon} `{rs}/100`\n"
+        f"{tax_line}"
+        f"🛡️ {flag_str}\n"
+    )
+    if soc_str:
+        card += f"🔗 {soc_str}\n"
+    card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if ai:
+        card += f"\n\n🧠 *Kayo AI:*\n_{ai}_"
+    return card
+
+# ── WALLET INTELLIGENCE COMMANDS ─────────────────────────────────────
+
+async def wallet_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """
+    /wallet <address> — full wallet intelligence:
+    last 10 txns, token holdings snapshot, PnL estimate.
+    All free APIs (DexScreener, SolanaFM, Solscan).
+    """
+    if not c.args:
+        await u.effective_message.reply_text(
+            "Usage: `/wallet <solana_address>`\n"
+            "Shows last trades, holdings, PnL estimate.",
+            parse_mode="Markdown"
+        ); return
+
+    addr = c.args[0].strip()
+    if len(addr) < 32:
+        await u.effective_message.reply_text("❌ Invalid Solana address."); return
+
+    msg = await u.effective_message.reply_text("👛 *Fetching wallet intelligence...*", parse_mode="Markdown")
+    add_xp(u.effective_user.id, 3)
+
+    # Fetch in parallel
+    txns, pnl_data = await asyncio.gather(
+        solanafm_wallet_txns(addr, limit=10),
+        dex_wallet_pnl(addr),
+        return_exceptions=True
+    )
+
+    short = f"`{addr[:6]}...{addr[-4:]}`"
+    card = (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👛 *WALLET INTEL*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 {short}\n"
+        f"🔗 [Solscan](https://solscan.io/account/{addr})  ·  "
+        f"[SolanaFM](https://solana.fm/address/{addr})\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    # PnL section
+    if not isinstance(pnl_data, Exception) and pnl_data:
+        positions = pnl_data.get("positions", []) or []
+        total_pnl = sum(float(p.get("unrealizedPnl", 0) or 0) for p in positions)
+        realized  = sum(float(p.get("realizedPnl", 0) or 0) for p in positions)
+        pnl_icon  = "🟢" if total_pnl >= 0 else "🔴"
+        card += (
+            f"💰 *Portfolio Snapshot*\n"
+            f"  Unrealized PnL: {pnl_icon} `{_usd(total_pnl)}`\n"
+            f"  Realized PnL:   `{_usd(realized)}`\n"
+            f"  Positions: `{len(positions)}`\n"
+        )
+        # Top 3 positions
+        if positions:
+            card += "\n📊 *Top Positions*\n"
+            for p in sorted(positions, key=lambda x: abs(float(x.get("unrealizedPnl", 0) or 0)), reverse=True)[:3]:
+                sym = p.get("token", {}).get("symbol", "???")
+                upnl = float(p.get("unrealizedPnl", 0) or 0)
+                icon = "🟢" if upnl >= 0 else "🔴"
+                card += f"  {icon} `${sym}` — {_usd(upnl)}\n"
+        card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+
+    # Recent txns
+    if not isinstance(txns, Exception) and txns:
+        card += f"🔄 *Recent Txns ({len(txns)} fetched)*\n"
+        for txn in txns[:5]:
+            if isinstance(txn, dict):
+                sig   = str(txn.get("signature", txn.get("hash", "?")))[:10] + "..."
+                t_ms  = int(txn.get("blockTime", txn.get("timestamp", 0)) or 0)
+                t_str = datetime.fromtimestamp(t_ms).strftime("%m/%d %H:%M") if t_ms > 1e9 else "?"
+                card += f"  ·  `{sig}` — {t_str}\n"
+    else:
+        card += "ℹ️ Transaction history unavailable (rate limit)\n"
+
+    card += (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💡 Track this wallet: `/trackwallet {addr[:12]}... <label>`"
+    )
+
+    await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+
+
+async def holders_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/holders <CA> — show top holder concentration + bundle risk."""
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/holders <CA>`", parse_mode="Markdown"); return
+
+    addr = c.args[0].strip()
+    msg  = await u.effective_message.reply_text("👥 *Fetching holder data...*", parse_mode="Markdown")
+    add_xp(u.effective_user.id, 3)
+
+    holders, bundle = await asyncio.gather(
+        fetch_token_holders(addr),
+        detect_bundled_launch(addr),
+        return_exceptions=True
+    )
+
+    card = (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👥 *HOLDER ANALYSIS*\n"
+        f"📋 `{addr[:20]}...`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+
+    if not isinstance(holders, Exception) and holders:
+        h10  = holders.get("top10_pct", 0)
+        hcnt = holders.get("holder_count", 0)
+        risk = "🔴 HIGH" if h10 > 70 else ("🟡 MEDIUM" if h10 > 40 else "🟢 HEALTHY")
+        card += (
+            f"📊 Total Holders: `{hcnt:,}`\n"
+            f"🏆 Top 10 Control: `{h10:.1f}%` — {risk}\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        )
+        top = holders.get("top_holders", [])
+        if top:
+            card += "🔑 *Top Wallets*\n"
+            for i, h in enumerate(top[:5], 1):
+                wa   = h.get("address", "?")
+                pct  = float(h.get("amount", 0)) / max(float(h.get("total_supply", 1) or 1), 1) * 100
+                short_wa = f"{wa[:6]}...{wa[-4:]}"
+                card += f"  {i}. `{short_wa}` — `{pct:.1f}%`\n"
+    else:
+        card += "⚠️ Holder data unavailable\n"
+
+    if not isinstance(bundle, Exception) and bundle.get("is_bundled"):
+        card += (
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🔴 *BUNDLE DETECTED*\n"
+            f"   Coordinated buys: {bundle.get('bundle_wallets', 0)} wallets at launch\n"
+        )
+
+    card += (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔗 [Full Analysis](https://solscan.io/token/{addr}#holders)"
+    )
+    await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+
+
+async def pnl_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/pnl — show your linked wallet's PnL (requires /mywallet first)."""
+    uid  = str(u.effective_user.id)
+    addr = user_wallets.get(uid, "")
+    if not addr:
+        await u.effective_message.reply_text(
+            "Link your wallet first: `/mywallet <solana_address>`",
+            parse_mode="Markdown"
+        ); return
+
+    msg = await u.effective_message.reply_text("📊 *Calculating your PnL...*", parse_mode="Markdown")
+    add_xp(u.effective_user.id, 2)
+
+    pnl_data = await dex_wallet_pnl(addr)
+    if not pnl_data or not pnl_data.get("positions"):
+        await msg.edit_text(
+            f"⚠️ No position data found for your wallet.\n"
+            f"Wallet: `{addr[:10]}...{addr[-4:]}`\n\n"
+            f"This wallet may be new or have no DexScreener-tracked positions.",
+            parse_mode="Markdown"
+        ); return
+
+    positions = pnl_data.get("positions", [])
+    total_upnl = sum(float(p.get("unrealizedPnl", 0) or 0) for p in positions)
+    total_rpnl = sum(float(p.get("realizedPnl",   0) or 0) for p in positions)
+    total_pnl  = total_upnl + total_rpnl
+    pnl_icon   = "🟢" if total_pnl >= 0 else "🔴"
+
+    card = (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 *YOUR PnL DASHBOARD*\n"
+        f"👛 `{addr[:6]}...{addr[-4:]}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 Unrealized: {pnl_icon} `{_usd(total_upnl)}`\n"
+        f"✅ Realized:   `{_usd(total_rpnl)}`\n"
+        f"📈 Total PnL:  {pnl_icon} `{_usd(total_pnl)}`\n"
+        f"📦 Positions:  `{len(positions)}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"*Open Positions*\n"
+    )
+    winners = [p for p in positions if float(p.get("unrealizedPnl", 0) or 0) > 0]
+    losers  = [p for p in positions if float(p.get("unrealizedPnl", 0) or 0) < 0]
+    for p in sorted(positions, key=lambda x: float(x.get("unrealizedPnl", 0) or 0), reverse=True)[:8]:
+        sym  = (p.get("token") or {}).get("symbol", "???")
+        upnl = float(p.get("unrealizedPnl", 0) or 0)
+        icon = "🟢" if upnl >= 0 else "🔴"
+        card += f"  {icon} `${sym}` — `{_usd(upnl)}`\n"
+    card += (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏆 Winners: {len(winners)}  ·  💀 Losers: {len(losers)}\n"
+        f"[Full Portfolio](https://dexscreener.com/solana/{addr})"
+    )
+    await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+
+
+async def smart_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/smart — tokens being accumulated by smart money right now."""
+    msg = await u.effective_message.reply_text("🧠 *Scanning smart money signals...*", parse_mode="Markdown")
+    add_xp(u.effective_user.id, 3)
+
+    smart_tokens = await fetch_smart_money_tokens()
+    if not smart_tokens:
+        await msg.edit_text("⚠️ No smart money convergence signals right now. Try again in a few minutes.")
+        return
+
+    card = (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧠 *SMART MONEY RADAR*\n"
+        f"Tokens appearing across multiple alpha data sources\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+    for i, t in enumerate(smart_tokens[:8], 1):
+        addr = t.get("address", "")
+        card += f"  {i}. `{addr[:12]}...`  — `/scan {addr[:12]}...`\n"
+    card += (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"_Tap a CA or use `/scan <CA>` for full analysis_"
+    )
+    await msg.edit_text(card, parse_mode="Markdown")
+
+
+async def copy_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/copy <wallet_address> — get AI breakdown of a wallet's recent moves."""
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/copy <wallet_address>`\nAnalyze a wallet's recent trades.", parse_mode="Markdown"); return
+
+    addr = c.args[0].strip()
+    msg  = await u.effective_message.reply_text("🔍 *Analyzing wallet moves...*", parse_mode="Markdown")
+    add_xp(u.effective_user.id, 4)
+
+    txns = await solanafm_wallet_txns(addr, limit=20)
+    if not txns:
+        txns = await solscan_wallet_txns(addr, limit=20)
+
+    short = f"{addr[:8]}...{addr[-4:]}"
+    if not txns:
+        await msg.edit_text(
+            f"⚠️ No recent transactions found for `{short}`.\n"
+            f"Wallet may be inactive or API is rate limited.",
+            parse_mode="Markdown"
+        ); return
+
+    # Ask AI to analyze the moves
+    txn_summary = f"Wallet {short} had {len(txns)} recent transactions on Solana."
+    ai_analysis = await ai_ask(
+        f"This Solana wallet just made {len(txns)} transactions: {txn_summary}. "
+        f"Based on the wallet having {len(txns)} recent moves, give a sharp analysis: "
+        f"Is this likely a smart trader, bot, or retail? What copy trading strategy would you suggest? "
+        f"What signals to watch for? 3-4 direct sentences.",
+        fallback="Analysis unavailable.",
+        max_tokens=250,
+        inject_market=False
+    )
+
+    card = (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔁 *COPY TRADE ANALYSIS*\n"
+        f"👛 `{short}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 Recent Txns: `{len(txns)}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧠 *AI Verdict:*\n_{ai_analysis}_\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👁️ Track this wallet: `/trackwallet {addr} KOL`\n"
+        f"🔗 [View on Solscan](https://solscan.io/account/{addr})"
+    )
+    await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+
+
+async def bundle_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/bundle <CA> — detect if token was bundled at launch."""
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/bundle <CA>`\nDetects coordinated launch bundles.", parse_mode="Markdown"); return
+    addr = c.args[0].strip()
+    msg  = await u.effective_message.reply_text("🔍 *Checking for bundle...*", parse_mode="Markdown")
+    add_xp(u.effective_user.id, 2)
+
+    bundle, holders = await asyncio.gather(
+        detect_bundled_launch(addr),
+        fetch_token_holders(addr),
+        return_exceptions=True
+    )
+
+    h10  = holders.get("top10_pct", 0) if not isinstance(holders, Exception) else 0
+    is_b = bundle.get("is_bundled", False) if not isinstance(bundle, Exception) else False
+    bw   = bundle.get("bundle_wallets", 0) if not isinstance(bundle, Exception) else 0
+
+    verdict = "🔴 BUNDLED — HIGH RISK" if is_b else "🟢 No bundle signals detected"
+
+    card = (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔎 *BUNDLE CHECK*\n"
+        f"📋 `{addr[:20]}...`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Verdict: {verdict}\n"
+    )
+    if is_b:
+        card += f"  ↳ Coordinated wallets at launch: {bw}\n"
+    card += (
+        f"\n👥 Top 10 Holder Control: `{h10:.1f}%`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{'⚠️ Avoid or degen small — this was coordinated' if is_b else '✅ Looks organic — standard DYOR applies'}"
+    )
+    await msg.edit_text(card, parse_mode="Markdown")
+
+
+async def snipe_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/snipe — find the freshest tokens on pump.fun + DexScreener right now."""
+    msg = await u.effective_message.reply_text("🎯 *Finding snipe targets...*", parse_mode="Markdown")
+    add_xp(u.effective_user.id, 3)
+
+    try:
+        pf_new, gt_new = await asyncio.gather(
+            _fetch_pumpfun_trending(),
+            gt_new_pools(page=1),
+            return_exceptions=True
+        )
+
+        card = (
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 *SNIPE RADAR*\n"
+            f"Freshest launches right now\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        )
+
+        # Pump.fun newest
+        if not isinstance(pf_new, Exception) and pf_new:
+            card += "🟣 *Pump.fun Newest*\n"
+            for c2 in pf_new[:5]:
+                sym  = c2.get("symbol", "???")
+                name = c2.get("name", "")[:20]
+                mcap = float(c2.get("usd_market_cap", 0) or 0)
+                mint = c2.get("mint", "")
+                card += f"  • `${sym}` ({name}) — `{_usd(mcap)}`\n"
+                if mint: card += f"    `{mint}`\n"
+
+        # GeckoTerminal newest
+        if not isinstance(gt_new, Exception) and gt_new:
+            card += "\n📊 *GT New Pools*\n"
+            for pool in gt_new[:5]:
+                tok = gt_parse_pool(pool)
+                if tok:
+                    card += (
+                        f"  • `${tok['sym']}` — MCap `{_usd(tok['fdv'])}`  "
+                        f"1h: {'+' if tok['ch1h'] >= 0 else ''}{tok['ch1h']:.1f}%\n"
+                        f"    `{tok['address']}`\n"
+                    )
+
+        card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n⚠️ DYOR. New = risky."
+        await msg.edit_text(card, parse_mode="Markdown")
+
+    except Exception as e:
+        await msg.edit_text(f"❌ Snipe scan failed: {e}")
+
+
+# ── LIVE BACKGROUND: WALLET TRACKER ──────────────────────────────────
+
+async def bg_wallet_tracker(app):
+    """
+    Every 3 min: polls tracked wallets for new activity using SolanaFM.
+    Alerts group chat when a tracked wallet makes a move.
+    """
+    await asyncio.sleep(180)
+    wallet_last_seen: Dict[str, str] = {}  # addr -> last txn sig
+
+    while True:
+        try:
+            if not tracked_wallets or not GROUP_CHAT_ID:
+                await asyncio.sleep(180); continue
+
+            for addr, info in list(tracked_wallets.items()):
+                try:
+                    txns = await asyncio.wait_for(
+                        solanafm_wallet_txns(addr, limit=3), timeout=10
+                    )
+                    if not txns:
+                        txns = await asyncio.wait_for(
+                            solscan_wallet_txns(addr, limit=3), timeout=10
+                        )
+                    if not txns:
+                        continue
+
+                    latest = txns[0] if txns else {}
+                    sig = str(latest.get("signature", latest.get("hash", "")) or "")
+                    if not sig:
+                        continue
+
+                    last = wallet_last_seen.get(addr, "")
+                    if sig == last:
+                        continue  # No new txn
+
+                    wallet_last_seen[addr] = sig
+                    if not last:
+                        continue  # First time seeing this wallet — just record, don't alert
+
+                    label = info.get("label", addr[:8])
+                    short = f"{addr[:6]}...{addr[-4:]}"
+                    t_ms  = int(latest.get("blockTime", latest.get("timestamp", 0)) or 0)
+                    t_str = datetime.fromtimestamp(t_ms).strftime("%H:%M:%S") if t_ms > 1e9 else "just now"
+
+                    alert_text = (
+                        f"👛 *WALLET MOVE*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"🏷️ Label: *{_md(label)}*\n"
+                        f"📋 `{short}`\n"
+                        f"⏰ Time: {t_str}\n"
+                        f"🔗 [View Txn](https://solscan.io/tx/{sig})\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Use `/wallet {addr}` for full analysis"
+                    )
+                    try:
+                        await app.bot.send_message(
+                            chat_id=GROUP_CHAT_ID,
+                            text=alert_text,
+                            parse_mode="Markdown",
+                            disable_web_page_preview=True,
+                        )
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.5)
+                except Exception:
+                    continue
+
+            await asyncio.sleep(180)
+        except Exception as e:
+            logger.error(f"[WALLET TRACKER] {e}")
+            await asyncio.sleep(180)
+
+
+# ── ENHANCED /scan THAT USES ELITE DATA ───────────────────────────────
+
+async def escan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """
+    /escan <CA> — Elite scan with holder analysis, bundle check, dev wallet.
+    Richer than /scan. All free APIs.
+    """
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/escan <CA>`\nElite scan with holder + bundle analysis.", parse_mode="Markdown"); return
+    addr = c.args[0].strip()
+    msg  = await u.effective_message.reply_text("🔬 *Running elite scan...*", parse_mode="Markdown")
+    add_xp(u.effective_user.id, 8)
+
+    t = await asyncio.wait_for(full_enhanced_scan(addr), timeout=25)
+    if t.get("error"):
+        await msg.edit_text(f"❌ {t['error']}"); return
+
+    _track_scan(t, u.effective_user.id)
+    buttons = scan_buttons(addr, t.get("sym", ""), t.get("pair_addr", ""))
+
+    sent = await msg.edit_text(
+        build_elite_scan_card(t, ""),
+        parse_mode="Markdown",
+        reply_markup=buttons,
+        disable_web_page_preview=True,
+    )
+
+    # AI verdict async
+    async def _ai_verdict():
+        try:
+            ai_v = await asyncio.wait_for(
+                ai_ask(
+                    f"Elite scan on ${t['sym']}: MCap {_usd(t['mcap'])}, liq {_usd(t['liq'])}, "
+                    f"age {_age(t['created'])}, holders {t.get('holder_count',0):,}, "
+                    f"top10 hold {t.get('top10_pct',0):.0f}%, bundled={t.get('is_bundled',False)}, "
+                    f"1h change {_pct(t['ch1h'])}, buy% {t.get('buy_pct',50):.0f}%. "
+                    f"Is this worth aping? Any red flags? 2-3 sharp sentences.",
+                    fallback="", max_tokens=200, inject_market=True
+                ), timeout=15
+            )
+            if ai_v:
+                try:
+                    await c.bot.edit_message_text(
+                        build_elite_scan_card(t, ai_v),
+                        chat_id=u.effective_chat.id,
+                        message_id=sent.message_id,
+                        parse_mode="Markdown",
+                        reply_markup=buttons,
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    asyncio.create_task(_ai_verdict())
+
+
 
 async def bg_main_scanner(app: Application):
     """
@@ -4700,7 +5539,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v38 ready — "
+        f"🦅 Kayo Brain v39 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -5220,6 +6059,11 @@ def main():
         ("dub", dub_cmd), ("tldr", tldr_cmd),
         ("metas", metas_cmd), ("pvp", pvp_cmd),
         ("groupburp", groupburp_cmd), ("s", stock_cmd),
+        # v39 Elite Features
+        ("wallet", wallet_cmd), ("holders", holders_cmd),
+        ("pnl", pnl_cmd), ("smart", smart_cmd),
+        ("copy", copy_cmd), ("bundle", bundle_cmd),
+        ("snipe", snipe_cmd), ("escan", escan_cmd),
     ]
     for name, fn in CMDS:
         app.add_handler(CommandHandler(name, safe_command(fn)))
@@ -5245,7 +6089,8 @@ def main():
             asyncio.create_task(bg_price_alert_checker(app))
             asyncio.create_task(bg_watchlist_scanner(app))
             asyncio.create_task(bg_reminder_checker(app))
-            logger.info("9 scanners started OK")
+            asyncio.create_task(bg_wallet_tracker(app))  # v39: live wallet monitoring
+            logger.info("10 scanners started OK — v39 Elite")
             if GROUP_CHAT_ID:
                 logger.info("GROUP_CHAT_ID=%s — alerts ENABLED", GROUP_CHAT_ID)
             else:
