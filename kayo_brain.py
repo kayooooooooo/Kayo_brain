@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v37c — PRO REBUILD                     ║
+║                    KAYO BRAIN v37d — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -1494,7 +1494,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v37c*\n"
+        f"\U0001f985 *KAYO BRAIN v37d*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1531,7 +1531,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v37c — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v37d — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2832,7 +2832,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]()~>#+=|{}.!\\])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *KAYO BRAIN v37c STATUS*\n"
+        f"\u2699\ufe0f *KAYO BRAIN v37d STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -2981,7 +2981,9 @@ async def handle_help_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
     data = (query.data or "").replace("help:", "")
 
     if data == "back":
-        # Re-show the help category menu
+        # Re-show the help category menu — patch u.message for callback context
+        if u.message is None and query.message:
+            u.message = query.message
         await help_cmd(u, c)
         return
 
@@ -3102,10 +3104,16 @@ async def handle_menu_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
     }
 
     if cmd == "help":
+        if u.message is None and query.message:
+            u.message = query.message
         await help_cmd(u, c)
         return
 
     if cmd in NO_ARG_CMDS:
+        # Buttons come from callback_query — u.message is None.
+        # Patch it so all commands can call u.message.reply_text normally.
+        if u.message is None and query.message:
+            u.message = query.message
         await NO_ARG_CMDS[cmd](u, c)
         return
 
@@ -3118,6 +3126,8 @@ async def handle_menu_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
         return
 
     # Unknown — show main menu again
+    if u.message is None and query.message:
+        u.message = query.message
     await start(u, c)
 
 
