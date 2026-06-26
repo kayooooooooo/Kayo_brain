@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v39 — PRO REBUILD                     ║
+║                    KAYO BRAIN v39b — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v39", 200
+def _root(): return "🦅 Kayo Brain v39b", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1494,7 +1494,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f985 *KAYO BRAIN v39*\n"
+        f"\U0001f985 *KAYO BRAIN v39b*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1531,7 +1531,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f985 *KAYO BRAIN v39 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v39b — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2531,7 +2531,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v39 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v39b alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2832,7 +2832,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]()~>#+=|{}.!\\])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *KAYO BRAIN v39 STATUS*\n"
+        f"\u2699\ufe0f *KAYO BRAIN v39b STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -3431,7 +3431,7 @@ async def _fetch_dex_boosts() -> list:
         return []
 
 # ═══════════════════════════════════════════════════════════════════════
-# KAYO v39 ELITE INJECTION — ALL NEW FEATURES
+# KAYO v39b ELITE INJECTION — ALL NEW FEATURES
 # Injected before bg_main_scanner
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -4266,6 +4266,411 @@ async def escan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     asyncio.create_task(_ai_verdict())
+
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# KAYO v39b — MISSING 8 FEATURES
+# ═══════════════════════════════════════════════════════════════════════
+
+# ── 1. SNIPER DETECTION ──────────────────────────────────────────────
+async def detect_snipers(addr: str) -> Dict:
+    """
+    Detect wallets that bought within the first 30s of token launch.
+    Uses DexScreener txn data — free, no key.
+    Returns: sniper_count, sniper_pct_supply, risk_level
+    """
+    result = {"sniper_count": 0, "sniper_pct": 0.0, "risk": "unknown"}
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    pairs = d.get("pairs", [])
+                    if not pairs: return result
+                    p = pairs[0]
+                    created_ms = int(p.get("pairCreatedAt", 0) or 0)
+                    b5m = int(((p.get("txns") or {}).get("m5") or {}).get("buys", 0) or 0)
+                    b1h = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
+                    age_min = (time.time() - created_ms / 1000) / 60 if created_ms else 999
+                    # Heuristic: if >40% of 1h buys happened in first 5m = sniper heavy
+                    if b1h > 0:
+                        snipe_ratio = b5m / max(b1h, 1) * 100
+                        result["sniper_count"] = b5m
+                        result["sniper_pct"] = snipe_ratio
+                        if snipe_ratio > 60:   result["risk"] = "HIGH — heavy sniper load"
+                        elif snipe_ratio > 30: result["risk"] = "MEDIUM — some snipers"
+                        else:                  result["risk"] = "LOW — organic launch"
+    except Exception:
+        pass
+    return result
+
+# ── 2. TOKEN VELOCITY (holder growth rate) ───────────────────────────
+async def calc_token_velocity(addr: str) -> Dict:
+    """
+    Estimate holder growth velocity using CoinGecko + DexScreener data.
+    Returns: velocity_score (0-100), trend direction
+    """
+    result = {"velocity_score": 0, "trend": "unknown", "holder_growth": "unknown"}
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    pairs = d.get("pairs", [])
+                    if not pairs: return result
+                    p = pairs[0]
+                    b5m  = int(((p.get("txns") or {}).get("m5")  or {}).get("buys", 0) or 0)
+                    b1h  = int(((p.get("txns") or {}).get("h1")  or {}).get("buys", 0) or 0)
+                    b6h  = int(((p.get("txns") or {}).get("h6")  or {}).get("buys", 0) or 0)
+                    b24h = int(((p.get("txns") or {}).get("h24") or {}).get("buys", 0) or 0)
+                    # Velocity = rate of acceleration in buyer count
+                    hourly_avg = b24h / 24 if b24h > 0 else 1
+                    current_rate = b1h
+                    velocity = min(100, int((current_rate / max(hourly_avg, 1)) * 20))
+                    result["velocity_score"] = velocity
+                    if velocity >= 70:   result["trend"] = "🚀 ACCELERATING"
+                    elif velocity >= 40: result["trend"] = "📈 GROWING"
+                    elif velocity >= 15: result["trend"] = "➡️ STEADY"
+                    else:                result["trend"] = "📉 SLOWING"
+                    # Holder growth estimate
+                    if b5m > b1h / 12 * 2:
+                        result["holder_growth"] = "Accelerating in last 5m"
+                    else:
+                        result["holder_growth"] = "Normal pace"
+    except Exception:
+        pass
+    return result
+
+# ── 3. QUICKCHART.IO — visual price chart ────────────────────────────
+def build_quickchart_url(sym: str, prices: List[float], labels: List[str] = None) -> str:
+    """
+    Generate a free chart URL from quickchart.io — no API key needed.
+    Returns a URL to a PNG chart image embeddable in Telegram.
+    """
+    import urllib.parse
+    if not labels:
+        labels = [str(i) for i in range(len(prices))]
+    color = "#00ff88" if prices[-1] >= prices[0] else "#ff4444"
+    chart_config = {
+        "type": "line",
+        "data": {
+            "labels": labels[-20:],
+            "datasets": [{
+                "label": f"${sym}",
+                "data": prices[-20:],
+                "borderColor": color,
+                "backgroundColor": color + "22",
+                "fill": True,
+                "tension": 0.4,
+                "pointRadius": 0,
+                "borderWidth": 2,
+            }]
+        },
+        "options": {
+            "plugins": {"legend": {"display": False}},
+            "scales": {
+                "x": {"ticks": {"color": "#aaaaaa"}, "grid": {"color": "#333333"}},
+                "y": {"ticks": {"color": "#aaaaaa"}, "grid": {"color": "#333333"}}
+            },
+            "backgroundColor": "#1a1a2e"
+        }
+    }
+    cfg_str = json.dumps(chart_config, separators=(',',':'))
+    return f"https://quickchart.io/chart?w=600&h=300&c={urllib.parse.quote(cfg_str)}"
+
+async def fetch_price_history(addr: str) -> tuple:
+    """Get price history from DexScreener candles endpoint."""
+    prices, labels = [], []
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    pairs = d.get("pairs", [])
+                    if pairs:
+                        p = pairs[0]
+                        # Build synthetic 24h price history from % changes
+                        current_price = float(p.get("priceUsd", 0) or 0)
+                        ch1h  = float((p.get("priceChange") or {}).get("h1",  0) or 0)
+                        ch6h  = float((p.get("priceChange") or {}).get("h6",  0) or 0)
+                        ch24h = float((p.get("priceChange") or {}).get("h24", 0) or 0)
+                        if current_price > 0:
+                            p24 = current_price / (1 + ch24h/100) if ch24h != -100 else current_price * 0.1
+                            p6  = current_price / (1 + ch6h/100)  if ch6h  != -100 else p24
+                            p1  = current_price / (1 + ch1h/100)  if ch1h  != -100 else p6
+                            prices = [p24, p6, p1, current_price]
+                            labels = ["-24h", "-6h", "-1h", "Now"]
+    except Exception:
+        pass
+    return prices, labels
+
+# ── 4. /vchart — visual chart command ────────────────────────────────
+async def vchart_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/vchart <CA> — visual price chart via quickchart.io (free, no key)."""
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/vchart <CA>`\nShows a visual 24h price chart.", parse_mode="Markdown"); return
+    addr = c.args[0].strip()
+    msg  = await u.effective_message.reply_text("📊 *Generating chart...*", parse_mode="Markdown")
+
+    prices, labels = await fetch_price_history(addr)
+    if not prices or len(prices) < 2:
+        await msg.edit_text("❌ Not enough price data to chart this token."); return
+
+    chart_url = build_quickchart_url("TOKEN", prices, labels)
+    trend = "📈" if prices[-1] >= prices[0] else "📉"
+    chg = ((prices[-1] - prices[0]) / max(prices[0], 1e-18)) * 100
+
+    await msg.edit_text(
+        f"📊 *24H PRICE CHART*\n"
+        f"📋 `{addr[:20]}...`\n"
+        f"{trend} 24h Change: `{chg:+.1f}%`\n\n"
+        f"[View Chart]({chart_url})",
+        parse_mode="Markdown",
+        disable_web_page_preview=False
+    )
+
+# ── 5. /migrate — Pump.fun → Raydium migration detector ──────────────
+async def _fetch_pump_graduated() -> List[Dict]:
+    """Get tokens that recently graduated from Pump.fun to Raydium."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://frontend-api.pump.fun/coins?offset=0&limit=50&sort=market_cap&order=DESC&includeNsfw=false",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    coins = await r.json()
+                    # Graduated = has raydium_pool set
+                    return [c for c in coins if c.get("raydium_pool")]
+    except Exception:
+        pass
+    return []
+
+async def migrate_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/migrate — show tokens that just graduated from Pump.fun to Raydium."""
+    msg = await u.effective_message.reply_text("🔄 *Fetching Pump.fun graduates...*", parse_mode="Markdown")
+    add_xp(u.effective_user.id, 3)
+
+    graduated = await _fetch_pump_graduated()
+    if not graduated:
+        await msg.edit_text("⚠️ No recent migrations found. Try again in a minute."); return
+
+    card = (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔄 *PUMP.FUN → RAYDIUM*\n"
+        f"Recently graduated tokens\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+    for i, coin in enumerate(graduated[:8], 1):
+        sym  = coin.get("symbol", "???")
+        name = coin.get("name", "")[:18]
+        mcap = float(coin.get("usd_market_cap", 0) or 0)
+        mint = coin.get("mint", "")
+        pool = coin.get("raydium_pool", "")
+        card += (
+            f"{i}. *${sym}* — _{name}_\n"
+            f"   MCap: `{_usd(mcap)}`\n"
+            f"   CA: `{mint}`\n"
+        )
+    card += (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"_Use `/scan <CA>` to analyze any token above_"
+    )
+    await msg.edit_text(card, parse_mode="Markdown")
+
+# ── 6. bg_migrate_monitor — auto-alert on Pump.fun graduations ────────
+async def bg_migrate_monitor(app):
+    """
+    Every 5 min: detect new Pump.fun → Raydium migrations.
+    Alerts group when a token graduates with MCap < $500k.
+    """
+    await asyncio.sleep(300)
+    seen_pools: Set[str] = set()
+
+    while True:
+        try:
+            if not GROUP_CHAT_ID:
+                await asyncio.sleep(300); continue
+
+            graduated = await _fetch_pump_graduated()
+            for coin in graduated:
+                pool = coin.get("raydium_pool", "")
+                mint = coin.get("mint", "")
+                if not pool or pool in seen_pools: continue
+                seen_pools.add(pool)
+
+                sym  = coin.get("symbol", "???")
+                name = coin.get("name", "")[:20]
+                mcap = float(coin.get("usd_market_cap", 0) or 0)
+                if mcap > 500_000 or mcap < 1000: continue
+
+                alert = (
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🔄 *PUMP → RAYDIUM*\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"🪙 *${sym}* — _{_md(name)}_\n"
+                    f"📊 MCap: `{_usd(mcap)}`\n"
+                    f"📋 `{mint}`\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"_Just graduated to Raydium — early entry window_\n"
+                    f"Use `/scan {mint}` to analyze"
+                )
+                try:
+                    await app.bot.send_message(
+                        chat_id=GROUP_CHAT_ID,
+                        text=alert,
+                        parse_mode="Markdown",
+                    )
+                    await asyncio.sleep(1)
+                except Exception:
+                    pass
+
+            await asyncio.sleep(300)
+        except Exception as e:
+            logger.error(f"[MIGRATE MONITOR] {e}")
+            await asyncio.sleep(300)
+
+# ── 7. /kol — track known alpha callers ──────────────────────────────
+# KOL wallet registry (editable)
+KOL_WALLETS: Dict[str, str] = {
+    # "label": "wallet_address"
+    # User can add via /addkol
+}
+
+async def kol_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/kol — show recent moves from known KOL wallets."""
+    if not KOL_WALLETS and not tracked_wallets:
+        await u.effective_message.reply_text(
+            "No KOL wallets tracked yet.\n"
+            "Add one: `/trackwallet <address> KOL: <name>`",
+            parse_mode="Markdown"
+        ); return
+
+    msg = await u.effective_message.reply_text("🎯 *Checking KOL wallets...*", parse_mode="Markdown")
+    add_xp(u.effective_user.id, 2)
+
+    # Combine KOL_WALLETS + tracked_wallets tagged with "kol"
+    all_kols = {**KOL_WALLETS}
+    for addr, info in tracked_wallets.items():
+        label = info.get("label", "")
+        if "kol" in label.lower() or "alpha" in label.lower():
+            all_kols[label] = addr
+
+    if not all_kols:
+        await msg.edit_text(
+            "No KOL wallets found.\n"
+            "Track a wallet as KOL: `/trackwallet <address> KOL:<name>`",
+            parse_mode="Markdown"
+        ); return
+
+    card = (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 *KOL WALLET INTEL*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    )
+    for label, addr in list(all_kols.items())[:5]:
+        try:
+            txns = await asyncio.wait_for(solanafm_wallet_txns(addr, limit=3), timeout=8)
+            if not txns:
+                txns = await asyncio.wait_for(solscan_wallet_txns(addr, limit=3), timeout=8)
+            latest = txns[0] if txns else {}
+            t_ms  = int(latest.get("blockTime", latest.get("timestamp", 0)) or 0)
+            t_str = datetime.fromtimestamp(t_ms).strftime("%m/%d %H:%M") if t_ms > 1e9 else "unknown"
+            sig   = str(latest.get("signature", latest.get("hash", "")) or "?")[:12]
+            short = f"{addr[:6]}...{addr[-4:]}"
+            card += (
+                f"🎯 *{_md(label)}*\n"
+                f"   `{short}`\n"
+                f"   Last move: {t_str}\n"
+                f"   [View]({f'https://solscan.io/account/{addr}'})\n"
+            )
+        except Exception:
+            card += f"🎯 *{_md(label)}* — ⏳ fetching...\n"
+
+    card += (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"_Add KOL: `/trackwallet <address> KOL:<name>`_"
+    )
+    await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+
+# ── 8. WEEKLY LEADERBOARD AUTO-POST ──────────────────────────────────
+async def bg_weekly_leaderboard(app):
+    """
+    Every Sunday at ~midnight Lagos time (23:00 UTC): post weekly leaderboard.
+    """
+    await asyncio.sleep(60)
+
+    while True:
+        try:
+            now = datetime.utcnow()
+            # Sunday = weekday 6, post at 23:00 UTC (midnight Lagos WAT = UTC+1)
+            target_weekday = 6
+            target_hour    = 23
+
+            # Calculate seconds until next Sunday 23:00 UTC
+            days_ahead = (target_weekday - now.weekday()) % 7
+            if days_ahead == 0 and now.hour >= target_hour:
+                days_ahead = 7  # already passed this week — wait for next
+            next_run = now.replace(hour=target_hour, minute=0, second=0, microsecond=0) + timedelta(days=days_ahead)
+            wait_secs = (next_run - now).total_seconds()
+            logger.info(f"[WEEKLY LB] Next post in {wait_secs/3600:.1f}h")
+            await asyncio.sleep(max(wait_secs, 60))
+
+            if not GROUP_CHAT_ID or not xp_db:
+                continue
+
+            # Build leaderboard
+            sorted_xp = sorted(xp_db.items(), key=lambda x: x[1], reverse=True)[:10]
+            card = (
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"🏆 *WEEKLY LEADERBOARD*\n"
+                f"Week of {now.strftime('%b %d, %Y')}\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            )
+            medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+            for i, (uid, xp) in enumerate(sorted_xp):
+                card += f"{medals[i]} `User {uid}` — `{xp} XP`\n"
+            card += (
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"💬 Stay active, scan tokens, and make calls to earn XP!\n"
+                f"Use `/rank` to check your standing."
+            )
+            try:
+                await app.bot.send_message(
+                    chat_id=GROUP_CHAT_ID,
+                    text=card,
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                logger.error(f"[WEEKLY LB] Send error: {e}")
+
+        except Exception as e:
+            logger.error(f"[WEEKLY LB] {e}")
+            await asyncio.sleep(3600)
+
+# ── VELOCITY SCORE added to build_alert_card enrichment ─────────────
+async def enrich_alert_with_velocity(tok_dict: Dict) -> Dict:
+    """Add velocity score to a token dict in place — non-blocking."""
+    try:
+        vel = await asyncio.wait_for(
+            calc_token_velocity(tok_dict.get("address", "")), timeout=8
+        )
+        tok_dict["velocity_score"] = vel.get("velocity_score", 0)
+        tok_dict["velocity_trend"] = vel.get("trend", "")
+    except Exception:
+        tok_dict["velocity_score"] = 0
+        tok_dict["velocity_trend"] = ""
+    return tok_dict
 
 
 
@@ -5539,7 +5944,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v39 ready — "
+        f"🦅 Kayo Brain v39b ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -6059,11 +6464,14 @@ def main():
         ("dub", dub_cmd), ("tldr", tldr_cmd),
         ("metas", metas_cmd), ("pvp", pvp_cmd),
         ("groupburp", groupburp_cmd), ("s", stock_cmd),
-        # v39 Elite Features
+        # v39b Elite Features
         ("wallet", wallet_cmd), ("holders", holders_cmd),
         ("pnl", pnl_cmd), ("smart", smart_cmd),
         ("copy", copy_cmd), ("bundle", bundle_cmd),
         ("snipe", snipe_cmd), ("escan", escan_cmd),
+        # v39b — remaining elite features
+        ("vchart", vchart_cmd), ("migrate", migrate_cmd),
+        ("kol", kol_cmd),
     ]
     for name, fn in CMDS:
         app.add_handler(CommandHandler(name, safe_command(fn)))
@@ -6089,8 +6497,10 @@ def main():
             asyncio.create_task(bg_price_alert_checker(app))
             asyncio.create_task(bg_watchlist_scanner(app))
             asyncio.create_task(bg_reminder_checker(app))
-            asyncio.create_task(bg_wallet_tracker(app))  # v39: live wallet monitoring
-            logger.info("10 scanners started OK — v39 Elite")
+            asyncio.create_task(bg_wallet_tracker(app))  # v39b: live wallet monitoring
+            asyncio.create_task(bg_migrate_monitor(app)) # v39b: pump→raydium migration alerts
+            asyncio.create_task(bg_weekly_leaderboard(app)) # v39b: sunday leaderboard post
+            logger.info("12 scanners started OK — v39b Elite")
             if GROUP_CHAT_ID:
                 logger.info("GROUP_CHAT_ID=%s — alerts ENABLED", GROUP_CHAT_ID)
             else:
