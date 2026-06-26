@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v37d — PRO REBUILD                     ║
+║                    KAYO BRAIN v38 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v37b", 200
+def _root(): return "🦅 Kayo Brain v38", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1493,8 +1493,8 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("\U0001f4cb Full Command List", callback_data="menu:help"),
         ],
     ])
-    await u.message.reply_text(
-        f"\U0001f985 *KAYO BRAIN v37d*\n"
+    await (u.message or u.effective_message).reply_text(
+        f"\U0001f985 *KAYO BRAIN v38*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1530,8 +1530,8 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("\U00002699\ufe0f System",   callback_data="help:system"),
         ],
     ])
-    await u.message.reply_text(
-        "\U0001f985 *KAYO BRAIN v37d — COMMANDS*\n"
+    await u.effective_message.reply_text(
+        "\U0001f985 *KAYO BRAIN v38 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -1541,9 +1541,9 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/scan <contract_address>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/scan <contract_address>`", parse_mode="Markdown"); return
     addr = c.args[0].strip()
-    msg  = await u.message.reply_text("🔍 *Scanning...*", parse_mode="Markdown")
+    msg  = await u.effective_message.reply_text("🔍 *Scanning...*", parse_mode="Markdown")
     t    = await full_token_scan(addr)
     if t.get("error"):
         await msg.edit_text(f"❌ {t['error']}"); return
@@ -1598,11 +1598,11 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def c_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/c <ca>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/c <ca>`", parse_mode="Markdown"); return
     addr  = c.args[0].strip()
     pairs = await dex_pairs_by_token(addr)
     if not pairs:
-        await u.message.reply_text("❌ Token not found."); return
+        await u.effective_message.reply_text("❌ Token not found."); return
     p     = pairs[0]
     base  = p.get("baseToken", {})
     sym   = base.get("symbol", "???")
@@ -1613,7 +1613,7 @@ async def c_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     ch24h = float((p.get("priceChange") or {}).get("h24", 0) or 0)
     b1h   = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
     s1h   = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
-    await u.message.reply_text(
+    await u.effective_message.reply_text(
         f"⚡ *${sym}*\n"
         f"Price: {_price(price)}\n"
         f"MCap: `{_usd(fdv)}`  Liq: `{_usd(liq)}`\n"
@@ -1626,9 +1626,9 @@ async def c_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def verify_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/verify <ca>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/verify <ca>`", parse_mode="Markdown"); return
     addr = c.args[0].strip()
-    msg  = await u.message.reply_text("🛡 *Running security check...*", parse_mode="Markdown")
+    msg  = await u.effective_message.reply_text("🛡 *Running security check...*", parse_mode="Markdown")
     sec  = await goplus_check(addr)
     if not sec:
         await msg.edit_text("⚠️ Security data unavailable for this token."); return
@@ -1648,7 +1648,7 @@ async def verify_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(text, parse_mode="Markdown")
 
 async def runners_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg = await u.message.reply_text("🏃 *Scanning for top runners...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("🏃 *Scanning for top runners...*", parse_mode="Markdown")
     # Use GeckoTerminal — returns real coins, not just popular searched ones
     pools_new, pools_trend = await asyncio.gather(
         gt_new_pools(page=1),
@@ -1689,7 +1689,7 @@ async def runners_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text("\n".join(out_lines), parse_mode="Markdown")
 
 async def new_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg      = await u.message.reply_text("🆕 *Fetching new launches...*", parse_mode="Markdown")
+    msg      = await u.effective_message.reply_text("🆕 *Fetching new launches...*", parse_mode="Markdown")
     profiles = await dex_token_profiles_latest()
     sol      = [p for p in profiles if p.get("chainId") == "solana"][:20]
     if not sol:
@@ -1728,7 +1728,7 @@ async def new_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text("\n".join(lines), parse_mode="Markdown")
 
 async def pump_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg = await u.message.reply_text("\U0001f680 *Finding fresh pumps...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("\U0001f680 *Finding fresh pumps...*", parse_mode="Markdown")
     pools_new, pools_p2 = await asyncio.gather(gt_new_pools(page=1), gt_new_pools(page=2))
     all_toks: Dict[str, Dict] = {}
     for pool in (pools_new + pools_p2):
@@ -1760,7 +1760,7 @@ async def pump_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text("\n".join(out_lines), parse_mode="Markdown")
 
 async def gems_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg = await u.message.reply_text("💎 *Hunting hidden gems...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("💎 *Hunting hidden gems...*", parse_mode="Markdown")
     # GeckoTerminal new_pools — fresh coins, real data, no key needed
     pools_p1, pools_p2 = await asyncio.gather(
         gt_new_pools(page=1),
@@ -1817,7 +1817,7 @@ async def gems_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 
 async def trending_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg   = await u.message.reply_text("🔥 *Fetching trending metas...*", parse_mode="Markdown")
+    msg   = await u.effective_message.reply_text("🔥 *Fetching trending metas...*", parse_mode="Markdown")
     metas = await dex_trending_metas()
     if not metas:
         await msg.edit_text("❌ Could not fetch trending metas."); return
@@ -1840,9 +1840,9 @@ async def trending_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def narrative_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/narrative <word>` e.g. `/narrative ai`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/narrative <word>` e.g. `/narrative ai`", parse_mode="Markdown"); return
     slug = c.args[0].lower().strip()
-    msg  = await u.message.reply_text(f"📖 *Finding #{slug} tokens...*", parse_mode="Markdown")
+    msg  = await u.effective_message.reply_text(f"📖 *Finding #{slug} tokens...*", parse_mode="Markdown")
     pairs = await dex_meta_tokens(slug)
     if not pairs:
         pairs = await dex_search_pairs(f"solana {slug}")
@@ -1879,9 +1879,9 @@ async def narrative_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def explain_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """AI explains a narrative in professional terms."""
     if not c.args:
-        await u.message.reply_text("Usage: `/explain <narrative>` e.g. `/explain RWA`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/explain <narrative>` e.g. `/explain RWA`", parse_mode="Markdown"); return
     topic = " ".join(c.args)
-    msg   = await u.message.reply_text(f"🧠 *Explaining #{topic}...*", parse_mode="Markdown")
+    msg   = await u.effective_message.reply_text(f"🧠 *Explaining #{topic}...*", parse_mode="Markdown")
     ai = await ai_ask(
         f"Explain the '{topic}' crypto narrative in professional terms for a Solana trader. "
         f"Cover: what it is, why it's relevant now, what kind of tokens fall under it, "
@@ -1897,7 +1897,7 @@ async def explain_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     )
 
 async def boosted_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg    = await u.message.reply_text("💰 *Fetching boosted tokens...*", parse_mode="Markdown")
+    msg    = await u.effective_message.reply_text("💰 *Fetching boosted tokens...*", parse_mode="Markdown")
     boosts = await dex_boosts_top()
     sol    = [b for b in boosts if b.get("chainId") == "solana"][:15]
     if not sol:
@@ -1930,7 +1930,7 @@ async def boosted_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text("\n".join(lines), parse_mode="Markdown")
 
 async def takeover_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg  = await u.message.reply_text("🫧 *Fetching community takeovers...*", parse_mode="Markdown")
+    msg  = await u.effective_message.reply_text("🫧 *Fetching community takeovers...*", parse_mode="Markdown")
     data = await dex_community_takeovers()
     sol  = [t for t in data if t.get("chainId") == "solana"][:8]
     if not sol:
@@ -1946,7 +1946,7 @@ async def takeover_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text("\n".join(lines), parse_mode="Markdown")
 
 async def news_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg = await u.message.reply_text("📰 *Fetching latest crypto news...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("📰 *Fetching latest crypto news...*", parse_mode="Markdown")
     add_xp(u.effective_user.id, 2)
     headlines = await fetch_crypto_news()
     if not headlines:
@@ -1977,9 +1977,9 @@ async def news_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(plain[:4000])
 async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/ask <question>`\nExample: `/ask what's the price of sol?`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/ask <question>`\nExample: `/ask what's the price of sol?`", parse_mode="Markdown"); return
     q   = " ".join(c.args)
-    msg = await u.message.reply_text("\U0001f9e0 *Kayo thinking...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("\U0001f9e0 *Kayo thinking...*", parse_mode="Markdown")
     add_xp(u.effective_user.id, 2)
 
     prompt = (
@@ -2000,7 +2000,7 @@ async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         try:
             await msg.edit_text(ans)
         except Exception:
-            await u.message.reply_text(ans)
+            await u.effective_message.reply_text(ans)
         return
 
     ts     = datetime.utcnow().strftime("%H:%M UTC")
@@ -2018,7 +2018,7 @@ async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 
 async def sentiment_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg = await u.message.reply_text("📊 *Reading market sentiment...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("📊 *Reading market sentiment...*", parse_mode="Markdown")
     fg, glob, trending = await asyncio.gather(cg_fear_greed(), cg_global(), cg_trending())
     fg_val   = int(fg.get("value", 0) or 0)
     fg_class = fg.get("value_classification", "?")
@@ -2051,7 +2051,7 @@ async def sentiment_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(text, parse_mode="Markdown")
 
 async def macro_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg      = await u.message.reply_text("📉 *Analyzing macro...*", parse_mode="Markdown")
+    msg      = await u.effective_message.reply_text("📉 *Analyzing macro...*", parse_mode="Markdown")
     fg, glob = await asyncio.gather(cg_fear_greed(), cg_global())
     fg_val   = int(fg.get("value", 0) or 0)
     btc_dom  = float((glob.get("market_cap_percentage") or {}).get("btc", 0) or 0)
@@ -2072,7 +2072,7 @@ async def macro_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(f"📉 *MACRO BRIEFING*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{ai}", parse_mode="Markdown")
 
 async def markets_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    msg  = await u.message.reply_text("🌍 *Loading market data...*", parse_mode="Markdown")
+    msg  = await u.effective_message.reply_text("🌍 *Loading market data...*", parse_mode="Markdown")
     glob = await cg_global()
     if not glob:
         await msg.edit_text("❌ Market data unavailable."); return
@@ -2096,12 +2096,12 @@ async def markets_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def index_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     fg    = await cg_fear_greed()
     if not fg:
-        await u.message.reply_text("❌ F&G index unavailable."); return
+        await u.effective_message.reply_text("❌ F&G index unavailable."); return
     val   = int(fg.get("value", 0) or 0)
     cls   = fg.get("value_classification", "?")
     emoji = "😱" if val < 25 else "😰" if val < 40 else "😐" if val < 60 else "😊" if val < 75 else "🤑"
     add_xp(u.effective_user.id, 1)
-    await u.message.reply_text(
+    await u.effective_message.reply_text(
         f"{emoji} *FEAR & GREED INDEX*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"Score: *{val}/100*\n"
@@ -2112,9 +2112,9 @@ async def index_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def a_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/a <coin_id>` e.g. `/a solana`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/a <coin_id>` e.g. `/a solana`", parse_mode="Markdown"); return
     coin_id = c.args[0].lower()
-    msg     = await u.message.reply_text(f"💰 *Looking up {coin_id}...*", parse_mode="Markdown")
+    msg     = await u.effective_message.reply_text(f"💰 *Looking up {coin_id}...*", parse_mode="Markdown")
     d = await cg_coin(coin_id)
     if not d:
         await msg.edit_text(f"❌ `{coin_id}` not found on CoinGecko."); return
@@ -2148,12 +2148,12 @@ async def a_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def watch_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/watch @username` — watch a Twitter account for CA drops", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/watch @username` — watch a Twitter account for CA drops", parse_mode="Markdown"); return
     username = c.args[0].lstrip("@").lower()
     watchlist[username] = {"added": time.time(), "by": u.effective_user.id, "hits": 0}
     await _save()
     add_xp(u.effective_user.id, 5)
-    await u.message.reply_text(
+    await u.effective_message.reply_text(
         f"👁 *Watching @{username}*\n"
         f"I'll alert the group the moment they drop a CA.\n"
         f"_Requires TWITTER\\_AUTH\\_TOKEN to be set in Render env vars_",
@@ -2162,29 +2162,29 @@ async def watch_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def unwatch_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/unwatch @username`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/unwatch @username`", parse_mode="Markdown"); return
     username = c.args[0].lstrip("@").lower()
     if username in watchlist:
         del watchlist[username]; _save()
-        await u.message.reply_text(f"✅ Stopped watching @{username}")
+        await u.effective_message.reply_text(f"✅ Stopped watching @{username}")
     else:
-        await u.message.reply_text(f"@{username} is not in your watchlist.")
+        await u.effective_message.reply_text(f"@{username} is not in your watchlist.")
 
 async def watchlist_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not watchlist:
-        await u.message.reply_text("Watchlist empty. Use `/watch @username` to add.", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Watchlist empty. Use `/watch @username` to add.", parse_mode="Markdown"); return
     lines = ["👁 *WATCHLIST*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
     for un, data in watchlist.items():
         added = datetime.fromtimestamp(data.get("added", 0)).strftime("%d/%m")
         hits  = data.get("hits", 0)
         lines.append(f"• @{un} — added {added}, {hits} CA drops caught")
-    await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await u.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def tt_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/tt <ca_or_symbol>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/tt <ca_or_symbol>`", parse_mode="Markdown"); return
     query = " ".join(c.args)
-    msg   = await u.message.reply_text(f"🔍 *Searching social signals for {query}...*", parse_mode="Markdown")
+    msg   = await u.effective_message.reply_text(f"🔍 *Searching social signals for {query}...*", parse_mode="Markdown")
 
     # Search DexScreener + Pump.fun for this token
     dex_pairs = await dex_search_pairs(query)
@@ -2256,9 +2256,9 @@ async def tt_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def moni_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/moni @username`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/moni @username`", parse_mode="Markdown"); return
     username = c.args[0].lstrip("@")
-    msg      = await u.message.reply_text(f"👤 *Checking @{username}...*", parse_mode="Markdown")
+    msg      = await u.effective_message.reply_text(f"👤 *Checking @{username}...*", parse_mode="Markdown")
     if not TWITTER_AUTH_TOKEN:
         await msg.edit_text("⚠️ Twitter not configured. Add `TWITTER_AUTH_TOKEN` to Render.", parse_mode="Markdown"); return
     tweets = await tw_user_tweets(username, limit=20)
@@ -2279,13 +2279,13 @@ async def moni_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def alert_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if len(c.args) < 2:
-        await u.message.reply_text("Usage: `/alert <ca> <target_price>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/alert <ca> <target_price>`", parse_mode="Markdown"); return
     addr = c.args[0].strip()
     try:   target = float(c.args[1])
-    except: await u.message.reply_text("❌ Invalid price."); return
+    except: await u.effective_message.reply_text("❌ Invalid price."); return
     pairs = await dex_pairs_by_token(addr)
     if not pairs:
-        await u.message.reply_text("❌ Token not found."); return
+        await u.effective_message.reply_text("❌ Token not found."); return
     p     = pairs[0]
     sym   = p.get("baseToken", {}).get("symbol", "???")
     price = float(p.get("priceUsd", 0) or 0)
@@ -2293,7 +2293,7 @@ async def alert_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     user_alerts.append({"uid": u.effective_user.id, "addr": addr, "sym": sym, "target": target, "direction": direction, "triggered": False})
     await _save()
     add_xp(u.effective_user.id, 3)
-    await u.message.reply_text(
+    await u.effective_message.reply_text(
         f"🔔 *Alert set for ${sym}*\n"
         f"Current: {_price(price)}\n"
         f"Alert when price goes *{direction}* {_price(target)}",
@@ -2304,30 +2304,30 @@ async def myalerts_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid    = u.effective_user.id
     alerts = [a for a in user_alerts if a.get("uid") == uid and not a.get("triggered")]
     if not alerts:
-        await u.message.reply_text("No active alerts. Use `/alert <ca> <price>`.", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("No active alerts. Use `/alert <ca> <price>`.", parse_mode="Markdown"); return
     lines = ["🔔 *YOUR ALERTS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
     for i, a in enumerate(alerts, 1):
         lines.append(f"{i}. *${a['sym']}* — alert {a['direction']} {_price(a['target'])}")
-    await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await u.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def delalert_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/delalert <number>` — see numbers with /myalerts", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/delalert <number>` — see numbers with /myalerts", parse_mode="Markdown"); return
     uid = u.effective_user.id
     my  = [a for a in user_alerts if a.get("uid") == uid and not a.get("triggered")]
     try:   idx = int(c.args[0]) - 1
-    except: await u.message.reply_text("❌ Invalid number."); return
+    except: await u.effective_message.reply_text("❌ Invalid number."); return
     if idx < 0 or idx >= len(my):
-        await u.message.reply_text("❌ Alert not found."); return
+        await u.effective_message.reply_text("❌ Alert not found."); return
     user_alerts.remove(my[idx]); _save()
-    await u.message.reply_text(f"✅ Alert for *${my[idx]['sym']}* deleted.", parse_mode="Markdown")
+    await u.effective_message.reply_text(f"✅ Alert for *${my[idx]['sym']}* deleted.", parse_mode="Markdown")
 
 async def call_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if len(c.args) < 2:
-        await u.message.reply_text("Usage: `/call <ca> <entry_price>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/call <ca> <entry_price>`", parse_mode="Markdown"); return
     addr = c.args[0].strip()
     try:  entry = float(c.args[1])
-    except: await u.message.reply_text("❌ Invalid price."); return
+    except: await u.effective_message.reply_text("❌ Invalid price."); return
     pairs = await dex_pairs_by_token(addr)
     sym   = pairs[0].get("baseToken", {}).get("symbol", "???") if pairs else "???"
     user  = u.effective_user
@@ -2337,7 +2337,7 @@ async def call_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "time": time.time(), "status": "open", "exit": None, "pnl": None
     })
     asyncio.create_task(_save()); add_xp(user.id, 10)
-    await u.message.reply_text(
+    await u.effective_message.reply_text(
         f"📢 *CALL — ${sym}*\n"
         f"Entry: {_price(entry)}\n"
         f"By: @{user.username or user.first_name}\n"
@@ -2349,18 +2349,18 @@ async def mycalls_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid  = u.effective_user.id
     mine = [c2 for c2 in active_calls if c2.get("uid") == uid]
     if not mine:
-        await u.message.reply_text("No calls yet. Use `/call <ca> <price>`.", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("No calls yet. Use `/call <ca> <price>`.", parse_mode="Markdown"); return
     lines = ["📋 *YOUR CALLS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
     for cl in sorted(mine, key=lambda x: x["time"], reverse=True)[:10]:
         status = cl.get("status", "open")
         pnl    = f" → {cl['pnl']}" if cl.get("pnl") else ""
         date   = datetime.fromtimestamp(cl["time"]).strftime("%d/%m")
         lines.append(f"• *${cl['sym']}* @ {_price(cl['entry'])} [{status}]{pnl} — {date}")
-    await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await u.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def stop_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/stop <symbol_or_ca> <exit_price>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/stop <symbol_or_ca> <exit_price>`", parse_mode="Markdown"); return
     uid    = u.effective_user.id
     target = c.args[0].upper().lstrip("$")
     try:   exit_p = float(c.args[1]) if len(c.args) > 1 else None
@@ -2374,19 +2374,19 @@ async def stop_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
                 cl["pnl"] = f"{pnl_pct:+.1f}%"
                 if pnl_pct > 0: add_xp(uid, int(pnl_pct / 10))
             await _save()
-            await u.message.reply_text(
+            await u.effective_message.reply_text(
                 f"🛑 *Call closed — ${cl['sym']}*\n"
                 f"Entry: {_price(cl['entry'])}  Exit: {_price(exit_p) if exit_p else 'N/A'}\n"
                 f"P&L: {cl.get('pnl', 'N/A')}",
                 parse_mode="Markdown"
             )
             return
-    await u.message.reply_text(f"❌ No open call for {target}.")
+    await u.effective_message.reply_text(f"❌ No open call for {target}.")
 
 async def leaderboard_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     closed = [cl for cl in active_calls if cl.get("status") == "closed" and cl.get("pnl")]
     if not closed:
-        await u.message.reply_text("No closed calls yet."); return
+        await u.effective_message.reply_text("No closed calls yet."); return
     scores: Dict[str, dict] = {}
     for cl in closed:
         un = cl.get("username", "anon")
@@ -2402,14 +2402,14 @@ async def leaderboard_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         m  = medals[i] if i < 3 else f"{i+1}."
         wr = s["wins"] / s["total"] * 100 if s["total"] > 0 else 0
         lines.append(f"{m} @{un}  P&L: {s['pnl']:+.1f}%  WR: {wr:.0f}%  ({s['total']} calls)")
-    await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await u.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def addport_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if len(c.args) < 2:
-        await u.message.reply_text("Usage: `/addport <ca> <amount_usd>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/addport <ca> <amount_usd>`", parse_mode="Markdown"); return
     addr = c.args[0].strip()
     try: amount = float(c.args[1])
-    except: await u.message.reply_text("❌ Invalid amount."); return
+    except: await u.effective_message.reply_text("❌ Invalid amount."); return
     pairs = await dex_pairs_by_token(addr)
     sym   = pairs[0].get("baseToken", {}).get("symbol", "???") if pairs else "???"
     price = float(pairs[0].get("priceUsd", 0) or 0) if pairs else 0
@@ -2417,14 +2417,14 @@ async def addport_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if uid not in portfolios: portfolios[uid] = []
     portfolios[uid].append({"addr": addr, "sym": sym, "amount": amount, "entry_price": price, "time": time.time()})
     asyncio.create_task(_save()); add_xp(u.effective_user.id, 3)
-    await u.message.reply_text(f"✅ Added *${sym}* — ${amount:.2f} at {_price(price)}", parse_mode="Markdown")
+    await u.effective_message.reply_text(f"✅ Added *${sym}* — ${amount:.2f} at {_price(price)}", parse_mode="Markdown")
 
 async def portfolio_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid  = str(u.effective_user.id)
     port = portfolios.get(uid, [])
     if not port:
-        await u.message.reply_text("Portfolio empty. Use `/addport <ca> <amount>`.", parse_mode="Markdown"); return
-    msg = await u.message.reply_text("💼 *Loading portfolio...*", parse_mode="Markdown")
+        await u.effective_message.reply_text("Portfolio empty. Use `/addport <ca> <amount>`.", parse_mode="Markdown"); return
+    msg = await u.effective_message.reply_text("💼 *Loading portfolio...*", parse_mode="Markdown")
     addrs  = list(set([h["addr"] for h in port]))
     pairs  = await dex_batch(addrs[:15])
     prices = {pd.get("baseToken", {}).get("address", ""): float(pd.get("priceUsd", 0) or 0) for pd in pairs}
@@ -2444,18 +2444,18 @@ async def portfolio_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def blacklist_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/blacklist <ca>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/blacklist <ca>`", parse_mode="Markdown"); return
     addr = c.args[0].strip()
     blacklist.add(addr); _save()
     add_xp(u.effective_user.id, 2)
-    await u.message.reply_text(f"🚫 `{addr[:20]}...` blacklisted — filtered from all scans.", parse_mode="Markdown")
+    await u.effective_message.reply_text(f"🚫 `{addr[:20]}...` blacklisted — filtered from all scans.", parse_mode="Markdown")
 
 async def rank_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     uid  = str(u.effective_user.id)
     xp   = xp_db.get(uid, 0)
     rank = sum(1 for v in xp_db.values() if v > xp) + 1
     lvl  = xp // 100
-    await u.message.reply_text(
+    await u.effective_message.reply_text(
         f"⭐ *YOUR RANK*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"XP: {xp}  Level: {lvl}\n"
@@ -2466,38 +2466,38 @@ async def rank_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def gp_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not xp_db:
-        await u.message.reply_text("No XP recorded yet!"); return
+        await u.effective_message.reply_text("No XP recorded yet!"); return
     top    = sorted(xp_db.items(), key=lambda x: x[1], reverse=True)[:10]
     medals = ["🥇", "🥈", "🥉"]
     lines  = ["🏆 *XP LEADERBOARD*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
     for i, (uid, xp) in enumerate(top):
         m = medals[i] if i < 3 else f"{i+1}."
         lines.append(f"{m} User ...{uid[-4:]} — {xp} XP  (Lv {xp//100})")
-    await u.message.reply_text("\n".join(lines), parse_mode="Markdown")
+    await u.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
 
 async def trackwallet_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/trackwallet <address> <label>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/trackwallet <address> <label>`", parse_mode="Markdown"); return
     addr  = c.args[0].strip()
     label = " ".join(c.args[1:]) or addr[:8]
     tracked_wallets[addr] = {"label": label, "by": u.effective_user.id, "added": time.time()}
     asyncio.create_task(_save()); add_xp(u.effective_user.id, 5)
-    await u.message.reply_text(f"👛 Tracking *{label}*\n`{addr}`", parse_mode="Markdown")
+    await u.effective_message.reply_text(f"👛 Tracking *{label}*\n`{addr}`", parse_mode="Markdown")
 
 async def mywallet_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/mywallet <solana_address>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/mywallet <solana_address>`", parse_mode="Markdown"); return
     addr = c.args[0].strip()
     user_wallets[str(u.effective_user.id)] = addr; _save()
-    await u.message.reply_text(f"✅ Wallet linked: `{addr}`", parse_mode="Markdown")
+    await u.effective_message.reply_text(f"✅ Wallet linked: `{addr}`", parse_mode="Markdown")
 
 async def dubs_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
-        await u.message.reply_text("Usage: `/dubs <your win story>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/dubs <your win story>`", parse_mode="Markdown"); return
     text = " ".join(c.args)
     user = u.effective_user
     add_xp(user.id, 20)
-    await u.message.reply_text(
+    await u.effective_message.reply_text(
         f"🎉 *W ALERT*\n"
         f"@{user.username or user.first_name} is celebrating!\n\n_{text}_\n\n🏆 +20 XP",
         parse_mode="Markdown"
@@ -2505,7 +2505,7 @@ async def dubs_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def gsum_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if len(group_messages) < 5:
-        await u.message.reply_text("Not enough messages to summarize yet."); return
+        await u.effective_message.reply_text("Not enough messages to summarize yet."); return
     msgs = group_messages[-50:]
     ai   = await ai_ask(
         f"Summarize this Telegram crypto group conversation. What coins were discussed? "
@@ -2515,23 +2515,23 @@ async def gsum_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         max_tokens=350
     )
     add_xp(u.effective_user.id, 3)
-    await u.message.reply_text(f"📝 *GROUP SUMMARY*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{ai}", parse_mode="Markdown")
+    await u.effective_message.reply_text(f"📝 *GROUP SUMMARY*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{ai}", parse_mode="Markdown")
 
 async def remindme_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if len(c.args) < 2:
-        await u.message.reply_text("Usage: `/remindme <minutes> <message>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/remindme <minutes> <message>`", parse_mode="Markdown"); return
     try:  mins = int(c.args[0])
-    except: await u.message.reply_text("❌ Invalid time."); return
+    except: await u.effective_message.reply_text("❌ Invalid time."); return
     text = " ".join(c.args[1:])
     fire = (datetime.utcnow() + timedelta(minutes=mins)).isoformat()
     reminders.append({"chat_id": u.effective_chat.id, "text": text, "fire_at": fire}); _save()
-    await u.message.reply_text(f"⏰ Reminder set for *{mins} minutes*\n_{text}_", parse_mode="Markdown")
+    await u.effective_message.reply_text(f"⏰ Reminder set for *{mins} minutes*\n_{text}_", parse_mode="Markdown")
 
 async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
-    msg = await u.message.reply_text("🏓")
+    msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v37b alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v38 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2539,7 +2539,7 @@ async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     Always accurate, always real-time. Never relies on AI training data.
     """
     if not c.args:
-        await u.message.reply_text(
+        await u.effective_message.reply_text(
             "Usage: `/price <coin>` — e.g. `/price btc` `/price sol` `/price eth`",
             parse_mode="Markdown"
         ); return
@@ -2562,7 +2562,7 @@ async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "pengu": "pudgy-penguins",
     }
     coin_id = COIN_MAP.get(query, query)
-    msg = await u.message.reply_text(f"💰 *Fetching live price...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text(f"💰 *Fetching live price...*", parse_mode="Markdown")
 
     try:
         async with aiohttp.ClientSession() as s:
@@ -2623,14 +2623,14 @@ async def chart_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     No need to open DexScreener!
     """
     if not c.args:
-        await u.message.reply_text(
+        await u.effective_message.reply_text(
             "Usage: `/chart <contract_address>`\n"
             "Example: `/chart EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`",
             parse_mode="Markdown"
         ); return
 
     addr = c.args[0].strip()
-    msg  = await u.message.reply_text("📊 *Loading chart...*", parse_mode="Markdown")
+    msg  = await u.effective_message.reply_text("📊 *Loading chart...*", parse_mode="Markdown")
 
     # Step 1: Get token info from DexScreener
     pairs = await dex_pairs_by_token(addr)
@@ -2730,7 +2730,7 @@ async def chart_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if chart_url:
         try:
             await msg.delete()
-            await u.message.reply_photo(
+            await u.effective_message.reply_photo(
                 photo=chart_url,
                 caption=caption,
                 parse_mode="Markdown",
@@ -2757,11 +2757,11 @@ async def autoresponder_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     curr = get_setting(uid, "autoresponder", True)
     set_setting(uid, "autoresponder", not curr)
     state = "ON" if not curr else "OFF"
-    await u.message.reply_text(f"🤖 Auto CA-scanner turned *{state}*", parse_mode="Markdown")
+    await u.effective_message.reply_text(f"🤖 Auto CA-scanner turned *{state}*", parse_mode="Markdown")
 
 async def smartscan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Manual trigger of the live scanner — shows what the bot would alert right now."""
-    msg = await u.message.reply_text("🔍 *Running live GeckoTerminal scan...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("🔍 *Running live GeckoTerminal scan...*", parse_mode="Markdown")
     try:
         pools_new, pools_trend = await asyncio.gather(
             gt_new_pools(page=1),
@@ -2832,7 +2832,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]()~>#+=|{}.!\\])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *KAYO BRAIN v37d STATUS*\n"
+        f"\u2699\ufe0f *KAYO BRAIN v38 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -2848,11 +2848,11 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         f"\U0001f4be Seen alerts: {len(seen_alert_ids)}"
     )
     try:
-        await u.message.reply_text(status_text, parse_mode="Markdown")
+        await u.effective_message.reply_text(status_text, parse_mode="Markdown")
     except Exception:
         # If Markdown still fails, send as plain text
         plain = _re_st.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', status_text)
-        await u.message.reply_text(plain)
+        await u.effective_message.reply_text(plain)
 
 
 HELP_PAGES = {
@@ -2981,9 +2981,7 @@ async def handle_help_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
     data = (query.data or "").replace("help:", "")
 
     if data == "back":
-        # Re-show the help category menu — patch u.message for callback context
-        if u.message is None and query.message:
-            u.message = query.message
+        # Re-show help — use object.__setattr__ to bypass frozen slots
         await help_cmd(u, c)
         return
 
@@ -3103,31 +3101,32 @@ async def handle_menu_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "help":      None,
     }
 
+    # ── dispatch ──────────────────────────────────────────────────
+    # Callback updates have u.message = None (it's a frozen slot).
+    # We send replies directly via query.message so commands work.
+    async def _reply(text, parse_mode="Markdown", reply_markup=None, **kw):
+        try:
+            await query.message.reply_text(text, parse_mode=parse_mode,
+                                           reply_markup=reply_markup, **kw)
+        except Exception as e:
+            logger.warning(f"Menu reply error: {e}")
+
     if cmd == "help":
-        if u.message is None and query.message:
-            u.message = query.message
         await help_cmd(u, c)
         return
 
     if cmd in NO_ARG_CMDS:
-        # Buttons come from callback_query — u.message is None.
-        # Patch it so all commands can call u.message.reply_text normally.
-        if u.message is None and query.message:
-            u.message = query.message
+        # u.effective_message automatically resolves to callback_query.message
+        # so all commands work whether called via /slash or menu button
         await NO_ARG_CMDS[cmd](u, c)
         return
 
     if cmd in ARG_PROMPTS and ARG_PROMPTS[cmd]:
         icon, prompt = ARG_PROMPTS[cmd]
-        await query.message.reply_text(
-            f"{icon} {prompt}",
-            parse_mode="Markdown"
-        )
+        await _reply(f"{icon} {prompt}")
         return
 
     # Unknown — show main menu again
-    if u.message is None and query.message:
-        u.message = query.message
     await start(u, c)
 
 
@@ -3213,8 +3212,8 @@ _WEB3_TERMS = {
 }
 
 async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    if not u.message or not u.message.text: return
-    text = u.message.text.strip()
+    if not u.message or not u.effective_message.text: return
+    text = u.effective_message.text.strip()
     uid  = u.effective_user.id
     chat = u.effective_chat
 
@@ -3227,7 +3226,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     # Card appears in <3 seconds. AI verdict edits in later as a background task.
     for ca in extract_cas(text)[:1]:
             try:
-                scanning_msg = await u.message.reply_text(
+                scanning_msg = await u.effective_message.reply_text(
                     "\U0001f50d *Scanning...*", parse_mode="Markdown"
                 )
                 t = await full_token_scan(ca)
@@ -3238,7 +3237,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                 card = build_scan_card(t, "")
                 buttons = scan_buttons(ca, t.get("sym", ""), t.get("pair_addr", ""))
                 await scanning_msg.delete()
-                sent = await u.message.reply_text(
+                sent = await u.effective_message.reply_text(
                     card,
                     parse_mode="Markdown",
                     reply_markup=buttons,
@@ -3295,7 +3294,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
             except Exception as _ca_err:
                 logger.error(f"CA auto-scan error for {ca}: {_ca_err}", exc_info=True)
                 try:
-                    await u.message.reply_text(
+                    await u.effective_message.reply_text(
                         f"\u274c Scan failed. Try `/scan {ca}`"
                     )
                 except Exception:
@@ -3335,7 +3334,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     # Show typing indicator
     try:
-        await u.message.chat.send_action("typing")
+        await u.effective_message.chat.send_action("typing")
     except Exception:
         pass
 
@@ -3365,11 +3364,11 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     # Always try markdown (AI uses bold for crypto analysis), fall back to plain
     import re as _re
     try:
-        await u.message.reply_text(reply, parse_mode="Markdown",
+        await u.effective_message.reply_text(reply, parse_mode="Markdown",
                                    disable_web_page_preview=True)
     except Exception:
         plain = _re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', reply)
-        await u.message.reply_text(plain.strip() or reply)
+        await u.effective_message.reply_text(plain.strip() or reply)
 
 # ═══════════════════════════════════════════════════════════════
 # BACKGROUND SCANNERS
@@ -3555,14 +3554,14 @@ async def bg_main_scanner(app: Application):
 
                 # Quality filter
                 if fdv > 500_000 or fdv < 500: continue
-                if liq < 200: continue
+                if liq < 100: continue
 
                 avg_5m_vol = v1h / 12 if v1h > 0 else 1
                 vol_spike  = v5m / max(avg_5m_vol, 1)
                 buy_pct    = b1h / max(b1h + s1h, 1) * 100
 
                 if buy_pct < 45: continue
-                if ch1h < 1 and ch5m < 0.5 and b1h < 2 and vol_spike < 1.1: continue
+                if ch1h < 0.5 and ch5m < 0.3 and b1h < 1 and vol_spike < 1.1: continue  # skip truly dead coins
                 if fdv > 50_000 and liq / fdv < 0.003: continue
 
                 # Narrative + flags
@@ -3572,18 +3571,25 @@ async def bg_main_scanner(app: Application):
 
                 # Pattern detection
                 alert_type = None
-                if   ch5m >= 2 and b5m >= 1 and buy_pct >= 50:                    alert_type = "pump"
-                elif ch5m >= 10 and buy_pct >= 48:                                alert_type = "pump"
-                elif ch1h >= 25 and buy_pct >= 48:                                alert_type = "pump"
-                elif ch1h >= 8  and buy_pct >= 52 and liq >= 500:                alert_type = "gem"
-                elif b1h >= 3   and buy_pct >= 52 and liq >= 300 and ch1h >= 3:  alert_type = "new"
-                elif is_rebranded and buy_pct >= 50 and ch1h >= 2:               alert_type = "rebrand"
-                elif buy_pct >= 58 and b1h >= 8 and abs(ch5m) < 10:             alert_type = "whale"
-                elif ch1h >= 6  and buy_pct >= 52 and b1h >= 5:                  alert_type = "pump"
-                elif vol_spike >= 2.0 and b1h >= 3 and buy_pct >= 50:            alert_type = "unusual"
-                elif fdv < 100_000 and b1h >= 5 and buy_pct >= 55:              alert_type = "unusual"
-                elif is_boosted and buy_pct >= 50 and b1h >= 3 and ch1h >= 1:   alert_type = "new"
-                elif ch1h >= 12 and ch5m >= 3 and buy_pct >= 52 and vol_spike >= 1.5: alert_type = "momentum"
+                # ── Pump: fast 5m move ──────────────────────────────────
+                if   ch5m >= 5 and buy_pct >= 52:                               alert_type = "pump"
+                elif ch5m >= 2 and b5m >= 2 and buy_pct >= 50:                 alert_type = "pump"
+                elif ch5m >= 10 and buy_pct >= 45:                              alert_type = "pump"
+                # ── Momentum: strong 1h trend ───────────────────────────
+                elif ch1h >= 20 and buy_pct >= 48:                              alert_type = "momentum"
+                elif ch1h >= 12 and ch5m >= 2 and buy_pct >= 50:               alert_type = "momentum"
+                elif ch1h >= 8  and vol_spike >= 1.5 and buy_pct >= 50:        alert_type = "momentum"
+                # ── Gem: hidden micro-cap mover ─────────────────────────
+                elif ch1h >= 6  and buy_pct >= 52 and liq >= 300:              alert_type = "gem"
+                elif fdv < 50_000 and ch1h >= 4 and buy_pct >= 55:             alert_type = "gem"
+                # ── New Launch: fresh token with buy pressure ───────────
+                elif b1h >= 3   and buy_pct >= 52 and liq >= 200 and ch1h >= 2: alert_type = "new"
+                elif is_boosted and buy_pct >= 50 and b1h >= 2:                alert_type = "new"
+                # ── Whale: heavy accumulation ───────────────────────────
+                elif buy_pct >= 62 and b1h >= 5 and vol_spike >= 1.3:          alert_type = "whale"
+                # ── Unusual: vol spike or narrative ────────────────────
+                elif vol_spike >= 1.5 and b1h >= 3 and buy_pct >= 50:          alert_type = "unusual"
+                elif is_rebranded and buy_pct >= 50 and ch1h >= 1:             alert_type = "rebrand"
 
                 if not alert_type: continue
 
@@ -3624,7 +3630,7 @@ async def bg_main_scanner(app: Application):
                     "mscore": min(100, int(abs(ch1h) + buy_pct / 2 + vol_spike * 10)),
                 }
                 # Cap alerts per cycle to prevent flooding
-                if alert_count >= 10:
+                if alert_count >= 15:
                     break
 
                 # Build card WITHOUT AI verdict first — send IMMEDIATELY
@@ -4694,7 +4700,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v37b ready — "
+        f"🦅 Kayo Brain v38 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -4725,7 +4731,7 @@ def safe_command(fn):
             logger.error(f"Command {fn.__name__} failed: {e}", exc_info=True)
             try:
                 if u and u.message:
-                    await u.message.reply_text(
+                    await u.effective_message.reply_text(
                         f"⚠️ `{fn.__name__}` failed: {str(e)[:80]}\nTry /help or /ping"
                     )
             except Exception:
@@ -4780,9 +4786,9 @@ async def dex_token_creator(ca: str) -> str:
 async def dev_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Show deployer history — other tokens by same dev."""
     if not c.args:
-        await u.message.reply_text("Usage: `/dev <contract_address>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/dev <contract_address>`", parse_mode="Markdown"); return
     ca = c.args[0].strip()
-    msg = await u.message.reply_text("🔍 *Checking deployer history...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("🔍 *Checking deployer history...*", parse_mode="Markdown")
     try:
         # Search DexScreener for tokens with similar names (proxy for same dev)
         # Also get the token info
@@ -4842,9 +4848,9 @@ async def dev_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def top_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Show top traders for a token using DexScreener volume data."""
     if not c.args:
-        await u.message.reply_text("Usage: `/top <contract_address>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/top <contract_address>`", parse_mode="Markdown"); return
     ca = c.args[0].strip()
-    msg = await u.message.reply_text("🔍 *Fetching top traders...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("🔍 *Fetching top traders...*", parse_mode="Markdown")
     try:
         t = await asyncio.wait_for(full_token_scan(ca), timeout=15)
         if t.get("error"):
@@ -4885,9 +4891,9 @@ async def top_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def soc_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Quick socials lookup for any token."""
     if not c.args:
-        await u.message.reply_text("Usage: `/soc <contract_address>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/soc <contract_address>`", parse_mode="Markdown"); return
     ca = c.args[0].strip()
-    msg = await u.message.reply_text("🔍 *Finding socials...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("🔍 *Finding socials...*", parse_mode="Markdown")
     try:
         pairs = await asyncio.wait_for(dex_pairs_by_token(ca), timeout=12)
         if not pairs:
@@ -4919,7 +4925,7 @@ async def soc_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def ath_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Show ATH leaderboard from group scans."""
     if not _ath_tracker:
-        await u.message.reply_text("📊 No tokens tracked yet. Scan some tokens first!"); return
+        await u.effective_message.reply_text("📊 No tokens tracked yet. Scan some tokens first!"); return
     # Sort by ATH mcap
     sorted_ath = sorted(_ath_tracker.items(), key=lambda x: x[1]["ath_mcap"], reverse=True)[:15]
     card = "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  📈 *ATH LEADERBOARD*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -4930,20 +4936,20 @@ async def ath_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         gain = ((ath - first) / max(first, 1) * 100) if first > 0 else 0
         card += f"{i}. *${_md(sym)}* — ATH: `{_usd(ath)}` (+{gain:.0f}%)\n"
     card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    await u.message.reply_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+    await u.effective_message.reply_text(card, parse_mode="Markdown", disable_web_page_preview=True)
 
 # ─── /last — Recent Scans ──────────────────────────────────────
 async def last_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Show last 10 tokens scanned in the group."""
     if not _scan_history:
-        await u.message.reply_text("📊 No tokens scanned yet."); return
+        await u.effective_message.reply_text("📊 No tokens scanned yet."); return
     recent = _scan_history[-10:][::-1]  # most recent first
     card = "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  📋 *RECENT SCANS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     for i, e in enumerate(recent, 1):
         ago = int((time.time() - e["time"]) / 60)
         card += f"{i}. *${_md(e['sym'])}* — {_usd(e['mcap'])} · {_pct(e['ch1h'])} · {ago}m ago\n"
     card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    await u.message.reply_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+    await u.effective_message.reply_text(card, parse_mode="Markdown", disable_web_page_preview=True)
 
 # ─── /hot — Most Scanned ───────────────────────────────────────
 async def hot_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -4951,7 +4957,7 @@ async def hot_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     cutoff = time.time() - 3600
     recent = [e for e in _scan_history if e["time"] > cutoff]
     if not recent:
-        await u.message.reply_text("📊 No scans in the last hour."); return
+        await u.effective_message.reply_text("📊 No scans in the last hour."); return
     # Count by CA
     counts = {}
     for e in recent:
@@ -4964,12 +4970,12 @@ async def hot_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     for i, (ca, d) in enumerate(sorted_hot, 1):
         card += f"{i}. *${_md(d['sym'])}* — {d['count']}x scans · {_usd(d['mcap'])} · {_pct(d['ch1h'])}\n"
     card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    await u.message.reply_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+    await u.effective_message.reply_text(card, parse_mode="Markdown", disable_web_page_preview=True)
 
 # ─── /best — Top Gainers (CoinGecko) ───────────────────────────
 async def best_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Show top gainers from CoinGecko."""
-    msg = await u.message.reply_text("🔍 *Fetching top gainers...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("🔍 *Fetching top gainers...*", parse_mode="Markdown")
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(
@@ -4992,7 +4998,7 @@ async def best_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 # ─── /worst — Top Losers (CoinGecko) ───────────────────────────
 async def worst_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Show top losers from CoinGecko."""
-    msg = await u.message.reply_text("🔍 *Fetching top losers...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("🔍 *Fetching top losers...*", parse_mode="Markdown")
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(
@@ -5016,8 +5022,8 @@ async def worst_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def dub_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """AI summary of recent chat messages."""
     if len(group_messages) < 5:
-        await u.message.reply_text("💬 Not enough messages to summarize yet."); return
-    msg = await u.message.reply_text("🧠 *Summarizing chat...*", parse_mode="Markdown")
+        await u.effective_message.reply_text("💬 Not enough messages to summarize yet."); return
+    msg = await u.effective_message.reply_text("🧠 *Summarizing chat...*", parse_mode="Markdown")
     try:
         recent = group_messages[-50:]
         texts = [f"[{m['uid']}]: {m['text']}" for m in recent]
@@ -5036,9 +5042,9 @@ async def dub_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def tldr_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """AI summary of any URL (article, tweet, YouTube)."""
     if not c.args:
-        await u.message.reply_text("Usage: `/tldr <url>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/tldr <url>`", parse_mode="Markdown"); return
     url = c.args[0].strip()
-    msg = await u.message.reply_text("📄 *Fetching and summarizing...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("📄 *Fetching and summarizing...*", parse_mode="Markdown")
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(url, timeout=aiohttp.ClientTimeout(total=12),
@@ -5066,7 +5072,7 @@ async def tldr_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 # ─── /metas — Trending Categories ──────────────────────────────
 async def metas_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Show trending DexScreener categories/metas."""
-    msg = await u.message.reply_text("🔍 *Fetching trending categories...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("🔍 *Fetching trending categories...*", parse_mode="Markdown")
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(
@@ -5099,9 +5105,9 @@ async def metas_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def pvp_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Find similar/newer tokens with same name."""
     if not c.args:
-        await u.message.reply_text("Usage: `/pvp <contract_address or symbol>`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/pvp <contract_address or symbol>`", parse_mode="Markdown"); return
     query = " ".join(c.args)
-    msg = await u.message.reply_text("🔍 *Finding PvP tokens...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("🔍 *Finding PvP tokens...*", parse_mode="Markdown")
     try:
         pairs = await asyncio.wait_for(dex_search_pairs(query), timeout=12)
         if not pairs:
@@ -5128,7 +5134,7 @@ async def pvp_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def groupburp_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Show best active plays from group scans."""
     if not _scan_history:
-        await u.message.reply_text("📊 No tokens scanned yet."); return
+        await u.effective_message.reply_text("📊 No tokens scanned yet."); return
     # Get unique tokens scanned in last 24h, sorted by 1h change
     cutoff = time.time() - 86400
     seen = {}
@@ -5142,15 +5148,15 @@ async def groupburp_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     for i, e in enumerate(plays, 1):
         card += f"{i}. *${_md(e['sym'])}* — {_pct(e['ch1h'])} 1h · {_usd(e['mcap'])}\n"
     card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    await u.message.reply_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+    await u.effective_message.reply_text(card, parse_mode="Markdown", disable_web_page_preview=True)
 
 # ─── /s — Stock Lookup (Yahoo Finance free) ────────────────────
 async def stock_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Quick stock lookup via Yahoo Finance."""
     if not c.args:
-        await u.message.reply_text("Usage: `/s <ticker>` — e.g. `/s AAPL`", parse_mode="Markdown"); return
+        await u.effective_message.reply_text("Usage: `/s <ticker>` — e.g. `/s AAPL`", parse_mode="Markdown"); return
     ticker = c.args[0].strip().upper()
-    msg = await u.message.reply_text(f"🔍 *Looking up {ticker}...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text(f"🔍 *Looking up {ticker}...*", parse_mode="Markdown")
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(
