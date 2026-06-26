@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v39b — PRO REBUILD                     ║
+║                    KAYO BRAIN v40 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v39b", 200
+def _root(): return "🦅 Kayo Brain v40", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -247,7 +247,10 @@ async def get_live_market_context() -> str:
         async with aiohttp.ClientSession() as s:
             async with s.get(
                 "https://api.coingecko.com/api/v3/simple/price"
-                "?ids=bitcoin,solana,ethereum,binancecoin"
+                "?ids=bitcoin,solana,ethereum,binancecoin,ripple,cardano,avalanche-2,"
+                "dogecoin,polkadot,chainlink,uniswap,litecoin,near,aptos,sui,"
+                "pepe,shiba-inu,bonk,dogwifcoin,jupiter,raydium,jito-governance-token,"
+                "trump-official,popcat,book-of-meme"
                 "&vs_currencies=usd"
                 "&include_24hr_change=true"
                 "&include_market_cap=true",
@@ -280,20 +283,55 @@ async def get_live_market_context() -> str:
                     # (Solana gainers removed — was adding 5-10s latency to every AI call)
                     sol_gainers = ""
 
+                    # Format all coins dynamically
+                    def _fmt_coin(name_id, data, d):
+                        cd = d.get(name_id, {})
+                        p   = cd.get("usd", 0)
+                        chg = cd.get("usd_24h_change", 0)
+                        if p == 0: return ""
+                        sym_map = {
+                            "bitcoin":"BTC","solana":"SOL","ethereum":"ETH","binancecoin":"BNB",
+                            "ripple":"XRP","cardano":"ADA","avalanche-2":"AVAX","dogecoin":"DOGE",
+                            "polkadot":"DOT","chainlink":"LINK","uniswap":"UNI","litecoin":"LTC",
+                            "near":"NEAR","aptos":"APT","sui":"SUI","pepe":"PEPE",
+                            "shiba-inu":"SHIB","bonk":"BONK","dogwifcoin":"WIF",
+                            "jupiter":"JUP","raydium":"RAY","jito-governance-token":"JTO",
+                            "trump-official":"TRUMP","popcat":"POPCAT","book-of-meme":"BOME",
+                        }
+                        sym = sym_map.get(name_id, name_id.upper()[:6])
+                        icon = "📈" if chg >= 0 else "📉"
+                        if p >= 1000:   p_str = f"${p:,.0f}"
+                        elif p >= 1:    p_str = f"${p:,.2f}"
+                        elif p >= 0.001: p_str = f"${p:.4f}"
+                        else:           p_str = f"${p:.8f}"
+                        return f"{icon} {sym}: {p_str} ({chg:+.1f}%)"
+
+                    coin_ids = [
+                        "bitcoin","ethereum","solana","binancecoin","ripple",
+                        "cardano","avalanche-2","dogecoin","polkadot","chainlink",
+                        "near","aptos","sui","pepe","shiba-inu","bonk","dogwifcoin",
+                        "jupiter","raydium","trump-official","popcat","book-of-meme"
+                    ]
+                    coin_lines = [_fmt_coin(cid, d, d) for cid in coin_ids]
+                    coin_lines = [x for x in coin_lines if x]
+                    # Group: majors | alts | sol memes
+                    majors = coin_lines[:5]
+                    alts   = coin_lines[5:11]
+                    memes  = coin_lines[11:]
+
                     ctx = (
-                        f"[LIVE MARKET DATA - {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}]\n"
-                        f"BTC: ${btc.get('usd',0):,.0f} ({btc.get('usd_24h_change',0):+.2f}% 24h) | MCap ${btc.get('usd_market_cap',0)/1e9:.1f}B\n"
-                        f"ETH: ${eth.get('usd',0):,.0f} ({eth.get('usd_24h_change',0):+.2f}% 24h)\n"
-                        f"SOL: ${sol.get('usd',0):,.2f} ({sol.get('usd_24h_change',0):+.2f}% 24h)\n"
-                        f"BNB: ${bnb.get('usd',0):,.2f} ({bnb.get('usd_24h_change',0):+.2f}% 24h)\n"
-                        f"Fear & Greed: {fg_v}/100 - {fg_c}\n"
+                        f"[LIVE MARKET — {datetime.utcnow().strftime('%d %b %Y %H:%M UTC')}]\n"
+                        f"MAJORS: {'  '.join(majors)}\n"
+                        f"ALTS:   {'  '.join(alts)}\n"
+                        f"MEMES:  {'  '.join(memes)}\n"
+                        f"Fear & Greed: {fg_v}/100 ({fg_c})\n"
                         f"{trending_line}"
-                        f"{sol_gainers}"
                         f"---\n"
                         f"You are Kayo — a sharp, witty Solana alpha intelligence. "
-                        f"ALWAYS use the live data above for prices. Never hallucinate prices. "
-                        f"You can chat casually, explain web3 terms, talk like a degen pro, "
-                        f"and answer any question — crypto or not. Be helpful, real, and direct."
+                        f"ALWAYS use the LIVE prices above when asked. Never hallucinate prices. "
+                        f"You know EVERY coin above — price, 24h change, narratives. "
+                        f"Answer any question: crypto, Web3, life, sports, culture. "
+                        f"Talk like a degen pro who also knows everything. No disclaimers."
                     )
                     _market_ctx_cache["data"] = ctx
                     _market_ctx_cache["ts"]   = now
@@ -1494,7 +1532,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f985 *KAYO BRAIN v39b*\n"
+        f"\U0001f985 *KAYO BRAIN v40*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -1531,7 +1569,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f985 *KAYO BRAIN v39b — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v40 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -2531,7 +2569,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v39b alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v40 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -2832,7 +2870,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]()~>#+=|{}.!\\])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *KAYO BRAIN v39b STATUS*\n"
+        f"\u2699\ufe0f *KAYO BRAIN v40 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -3431,7 +3469,7 @@ async def _fetch_dex_boosts() -> list:
         return []
 
 # ═══════════════════════════════════════════════════════════════════════
-# KAYO v39b ELITE INJECTION — ALL NEW FEATURES
+# KAYO v40 ELITE INJECTION — ALL NEW FEATURES
 # Injected before bg_main_scanner
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -4270,7 +4308,7 @@ async def escan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# KAYO v39b — MISSING 8 FEATURES
+# KAYO v40 — MISSING 8 FEATURES
 # ═══════════════════════════════════════════════════════════════════════
 
 # ── 1. SNIPER DETECTION ──────────────────────────────────────────────
@@ -4767,7 +4805,7 @@ async def bg_main_scanner(app: Application):
                 except Exception as e:
                     logger.debug(f"dex_batch_extra: {e}")
 
-            logger.info(f"[SCANNER] {len(pairs_map)} unique Solana coins (GT:{len(all_gt_pools)} + boosted:{len(extra_addrs)})")
+            logger.info(f"[SCANNER] {len(pairs_map)} unique coins fetched. Running detection...")
 
             # Evaluate each coin
             alert_count = 0
@@ -4796,17 +4834,26 @@ async def bg_main_scanner(app: Application):
                 price = float(tok.get("price", 0) or 0)
                 pair_addr = tok.get("pair_addr", "")
 
-                # Quality filter
-                if fdv > 500_000 or fdv < 500: continue
-                if liq < 100: continue
+                # Quality filter — use effective cap (fdv or mcap or liq*3)
+                eff_cap = max(fdv, mcap, liq * 3)
+                if eff_cap > 500_000: continue          # above $500k cap
+                if eff_cap < 200 and liq < 50: continue  # truly zero — skip
+                if liq < 80: continue                   # need some liquidity
 
                 avg_5m_vol = v1h / 12 if v1h > 0 else 1
                 vol_spike  = v5m / max(avg_5m_vol, 1)
-                buy_pct    = b1h / max(b1h + s1h, 1) * 100
+                # buy_pct: use 5m data for brand-new coins with no h1 txns yet
+                if b1h + s1h >= 3:
+                    buy_pct = b1h / max(b1h + s1h, 1) * 100
+                elif b5m + s5m >= 1:
+                    buy_pct = b5m / max(b5m + s5m, 1) * 100
+                else:
+                    buy_pct = 60.0  # brand new — assume bullish if liq exists
 
-                if buy_pct < 45: continue
-                if ch1h < 0.5 and ch5m < 0.3 and b1h < 1 and vol_spike < 1.1: continue  # skip truly dead coins
-                if fdv > 50_000 and liq / fdv < 0.003: continue
+                if buy_pct < 40: continue   # drop hard sell-pressure only
+                # skip dead coins only if ALL signals are flat
+                if ch1h == 0 and ch5m == 0 and b1h == 0 and b5m == 0 and vol_spike < 1.05: continue
+                if eff_cap > 50_000 and liq / max(eff_cap, 1) < 0.002: continue
 
                 # Narrative + flags
                 nar = detect_narrative(f"{name} {sym}")
@@ -4815,25 +4862,38 @@ async def bg_main_scanner(app: Application):
 
                 # Pattern detection
                 alert_type = None
-                # ── Pump: fast 5m move ──────────────────────────────────
-                if   ch5m >= 5 and buy_pct >= 52:                               alert_type = "pump"
-                elif ch5m >= 2 and b5m >= 2 and buy_pct >= 50:                 alert_type = "pump"
-                elif ch5m >= 10 and buy_pct >= 45:                              alert_type = "pump"
-                # ── Momentum: strong 1h trend ───────────────────────────
-                elif ch1h >= 20 and buy_pct >= 48:                              alert_type = "momentum"
-                elif ch1h >= 12 and ch5m >= 2 and buy_pct >= 50:               alert_type = "momentum"
-                elif ch1h >= 8  and vol_spike >= 1.5 and buy_pct >= 50:        alert_type = "momentum"
-                # ── Gem: hidden micro-cap mover ─────────────────────────
-                elif ch1h >= 6  and buy_pct >= 52 and liq >= 300:              alert_type = "gem"
-                elif fdv < 50_000 and ch1h >= 4 and buy_pct >= 55:             alert_type = "gem"
-                # ── New Launch: fresh token with buy pressure ───────────
-                elif b1h >= 3   and buy_pct >= 52 and liq >= 200 and ch1h >= 2: alert_type = "new"
-                elif is_boosted and buy_pct >= 50 and b1h >= 2:                alert_type = "new"
-                # ── Whale: heavy accumulation ───────────────────────────
-                elif buy_pct >= 62 and b1h >= 5 and vol_spike >= 1.3:          alert_type = "whale"
-                # ── Unusual: vol spike or narrative ────────────────────
-                elif vol_spike >= 1.5 and b1h >= 3 and buy_pct >= 50:          alert_type = "unusual"
-                elif is_rebranded and buy_pct >= 50 and ch1h >= 1:             alert_type = "rebrand"
+                is_fresh = (b1h + s1h) < 5  # brand-new token with almost no h1 history
+
+                # ── NEW LAUNCH: fresh token — most important to catch first ──
+                if is_fresh and liq >= 100 and buy_pct >= 50:
+                    alert_type = "new"  # any fresh token with liquidity + buy pressure
+                elif is_fresh and is_boosted and liq >= 80:
+                    alert_type = "new"
+
+                # ── PUMP: fast 5m price spike ─────────────────────────────
+                elif ch5m >= 5 and buy_pct >= 50:                              alert_type = "pump"
+                elif ch5m >= 3 and b5m >= 2 and buy_pct >= 50:                alert_type = "pump"
+                elif ch5m >= 10 and buy_pct >= 40:                             alert_type = "pump"
+
+                # ── MOMENTUM: sustained 1h grind ─────────────────────────
+                elif ch1h >= 15 and buy_pct >= 45:                             alert_type = "momentum"
+                elif ch1h >= 8  and ch5m >= 1 and buy_pct >= 48:              alert_type = "momentum"
+                elif ch1h >= 6  and vol_spike >= 1.3 and buy_pct >= 48:       alert_type = "momentum"
+
+                # ── GEM: micro-cap mover with real buyers ─────────────────
+                elif ch1h >= 5  and buy_pct >= 50 and liq >= 200:             alert_type = "gem"
+                elif eff_cap < 50_000 and ch1h >= 3 and buy_pct >= 52:        alert_type = "gem"
+
+                # ── ESTABLISHED NEW: small cap with real h1 buys ─────────
+                elif b1h >= 3   and buy_pct >= 52 and liq >= 150 and ch1h >= 1: alert_type = "new"
+                elif is_boosted and buy_pct >= 48 and b1h >= 1:               alert_type = "new"
+
+                # ── WHALE: heavy accumulation ─────────────────────────────
+                elif buy_pct >= 65 and b1h >= 3 and vol_spike >= 1.2:         alert_type = "whale"
+
+                # ── UNUSUAL: vol spike or narrative play ──────────────────
+                elif vol_spike >= 1.4 and b1h >= 2 and buy_pct >= 48:         alert_type = "unusual"
+                elif is_rebranded and buy_pct >= 48 and (ch1h >= 1 or ch5m >= 1): alert_type = "rebrand"
 
                 if not alert_type: continue
 
@@ -4976,7 +5036,7 @@ async def bg_main_scanner(app: Application):
         except Exception as e:
             logger.error(f"[bg_main_scanner] {e}", exc_info=True)
 
-        await asyncio.sleep(60)
+        await asyncio.sleep(30)
 
 
 async def bg_followup_tracker(app: Application):
@@ -5171,7 +5231,11 @@ async def bg_new_launch_scanner(app: Application):
                 boost   = boost_map.get(addr, 0)
                 buy_pct = b1h / max(b1h + s1h, 1) * 100
 
-                if liq < 500 or fdv < 2000 or fdv > 500_000: continue  # hard $500k cap
+                eff_fdv = max(fdv, liq * 3)
+                if liq < 200: continue                            # need liquidity
+                if eff_fdv > 500_000: continue                    # hard $500k cap
+                if eff_fdv > 0 and eff_fdv < 500: continue        # dust token
+                # fdv=0 is OK for brand new tokens — skip the $2000 floor
 
                 # Scoring
                 score = 0
@@ -5944,7 +6008,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v39b ready — "
+        f"🦅 Kayo Brain v40 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -6464,12 +6528,12 @@ def main():
         ("dub", dub_cmd), ("tldr", tldr_cmd),
         ("metas", metas_cmd), ("pvp", pvp_cmd),
         ("groupburp", groupburp_cmd), ("s", stock_cmd),
-        # v39b Elite Features
+        # v40 Elite Features
         ("wallet", wallet_cmd), ("holders", holders_cmd),
         ("pnl", pnl_cmd), ("smart", smart_cmd),
         ("copy", copy_cmd), ("bundle", bundle_cmd),
         ("snipe", snipe_cmd), ("escan", escan_cmd),
-        # v39b — remaining elite features
+        # v40 — remaining elite features
         ("vchart", vchart_cmd), ("migrate", migrate_cmd),
         ("kol", kol_cmd),
     ]
@@ -6497,10 +6561,10 @@ def main():
             asyncio.create_task(bg_price_alert_checker(app))
             asyncio.create_task(bg_watchlist_scanner(app))
             asyncio.create_task(bg_reminder_checker(app))
-            asyncio.create_task(bg_wallet_tracker(app))  # v39b: live wallet monitoring
-            asyncio.create_task(bg_migrate_monitor(app)) # v39b: pump→raydium migration alerts
-            asyncio.create_task(bg_weekly_leaderboard(app)) # v39b: sunday leaderboard post
-            logger.info("12 scanners started OK — v39b Elite")
+            asyncio.create_task(bg_wallet_tracker(app))  # v40: live wallet monitoring
+            asyncio.create_task(bg_migrate_monitor(app)) # v40: pump→raydium migration alerts
+            asyncio.create_task(bg_weekly_leaderboard(app)) # v40: sunday leaderboard post
+            logger.info("12 scanners started OK — v40 Elite")
             if GROUP_CHAT_ID:
                 logger.info("GROUP_CHAT_ID=%s — alerts ENABLED", GROUP_CHAT_ID)
             else:
