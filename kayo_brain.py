@@ -613,7 +613,7 @@ GROQ_MODELS = [
 # ── NARRATIVE/CHAIN TOKEN SEARCH ─────────────────────────────────────
 # Lets the AI answer "what degen coins on Solana?" with REAL live data
 
-async def search_narrative_tokens(narrative: str, chain: str = "", limit: int = 20) -> str:
+async def search_narrative_tokens(narrative: str, chain: str = "solana", limit: int = 20) -> str:
     """
     Search for tokens by narrative/keyword across DexScreener + GeckoTerminal + Pump.fun.
     chain="" searches ALL chains. chain="solana" limits to Solana.
@@ -622,11 +622,12 @@ async def search_narrative_tokens(narrative: str, chain: str = "", limit: int = 
     narrative = narrative.lower().strip()
     results = []
 
-    # ── 1. DexScreener search across ALL chains ──
+    # ── 1. DexScreener search (default: Solana, or specific chain) ──
     try:
-        if chain:
+        if chain and chain != "all":
             pairs = await asyncio.wait_for(dex_search_pairs(narrative, chain), timeout=8)
         else:
+            # "all" or "" — search across ALL chains
             pairs = await asyncio.wait_for(dex_search_all_chains(narrative, limit), timeout=8)
         for p in pairs[:limit]:
             base = p.get("baseToken", {})
@@ -906,7 +907,7 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         f"{market_block}"
         f"{NARRATIVE_KB}\n"
         "You are Kayo. You live in a Solana degen Telegram group. Sharp, real, funny. "
-        "You are a FULL-STACK WEB3 NATIVE. You know EVERY chain — Solana, Ethereum, Base, Sui, "
+        "You are a FULL-STACK WEB3 NATIVE. Solana is your HOME CHAIN — you know it deepest. You also know EVERY other chain — Solana, Ethereum, Base, Sui, "
         "BSC, Arbitrum, Bitcoin, Avalanche, Polygon, Tron. You know every narrative — degen, AI, "
         "dog, cat, frog, politics, meme, DeFi, RWA, restaking, L2, NFT. "
         "When someone asks 'what degen coins on Solana' or 'what's on Base' or 'top AI tokens' — "
@@ -998,18 +999,21 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         # Also fetch trending on that chain
         fetch_tasks.append(fetch_chain_trending(chain=detected_chain))
     elif detected_narratives:
-        # No specific chain — search ALL chains
+        # No specific chain mentioned — default to Solana (our primary chain)
         for nar in detected_narratives[:3]:
-            fetch_tasks.append(search_narrative_tokens(nar))
-        fetch_tasks.append(fetch_chain_trending())
+            fetch_tasks.append(search_narrative_tokens(nar, chain="solana"))
+        # Also fetch trending on Solana
+        fetch_tasks.append(fetch_chain_trending(chain="solana"))
     elif asks_about_chain and detected_chain:
         # Asking "what's on [chain]" without specific narrative
         fetch_tasks.append(fetch_chain_trending(chain=detected_chain))
         # Also search for "degen" as default narrative
         fetch_tasks.append(search_narrative_tokens("degen", chain=detected_chain))
     elif asks_about_chain:
-        # "what coins are on web3" — fetch global trending
-        fetch_tasks.append(fetch_chain_trending())
+        # "what coins are on web3" — Solana primary + global trending
+        fetch_tasks.append(fetch_chain_trending(chain="solana"))
+        fetch_tasks.append(search_narrative_tokens("degen", chain="solana"))
+        fetch_tasks.append(fetch_chain_trending())  # global too
 
     if fetch_tasks:
         nar_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
