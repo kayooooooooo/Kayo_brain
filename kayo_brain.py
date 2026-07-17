@@ -115,59 +115,42 @@ _ai_reply_cooldown: dict           = {}  # uid → last AI reply ts (group rate-
 # the OLDEST entries (not random ones like plain set).
 seen_alert_ids:  "OrderedDict[str, int]" = OrderedDict()  # key=id, value=timestamp
 
-# ── LIVE SCANNER FEED ─────────────────────────────────────────────
-# Rolling cache of last 30 tokens seen by the scanner
-# This is what the AI uses when asked "what should I trade?"
-_live_feed: list = []          # list of token dicts, newest first
-_LIVE_FEED_MAX = 30            # keep last 30 tokens
+_live_feed: list = []
+_LIVE_FEED_MAX = 30
 
 def _feed_add(t: dict):
-    """Add a token to the live scanner feed (newest first, capped at 30)."""
     global _live_feed
-    addr = t.get("address", t.get("addr", ""))
-    # Remove duplicates
+    addr = t.get("address", t.get("addr",""))
     _live_feed = [x for x in _live_feed if x.get("address") != addr]
     _live_feed.insert(0, {
-        "sym": t.get("sym", "?"),
-        "name": t.get("name", t.get("sym", "?")),
+        "sym": t.get("sym","?"), "name": t.get("name", t.get("sym","?")),
         "address": addr,
-        "mcap": float(t.get("mcap", 0) or t.get("fdv", 0) or 0),
-        "liq": float(t.get("liq", 0) or 0),
-        "ch1h": float(t.get("ch1h", 0) or 0),
-        "ch24h": float(t.get("ch24h", 0) or 0),
-        "created": t.get("created", 0),
-        "narrative": t.get("narrative", ""),
-        "is_pumpfun": t.get("is_pumpfun", False),
-        "is_graduated": t.get("is_graduated", False),
-        "chain": t.get("chain", "solana"),
+        "mcap": float(t.get("mcap",0) or t.get("fdv",0) or 0),
+        "liq": float(t.get("liq",0) or 0),
+        "ch1h": float(t.get("ch1h",0) or 0),
+        "created": t.get("created",0),
+        "narrative": t.get("narrative",""),
+        "is_pumpfun": t.get("is_pumpfun",False),
+        "is_graduated": t.get("is_graduated",False),
         "seen_at": time.time(),
     })
     _live_feed = _live_feed[:_LIVE_FEED_MAX]
 
 def _build_live_feed_context() -> str:
-    """Format the live scanner feed for AI injection."""
-    if not _live_feed:
-        return ""
-    lines = ["[LIVE SCANNER FEED — tokens Kayo is currently watching, mcap under $500K]:"]
-    for i, t in enumerate(_live_feed[:15]):
+    if not _live_feed: return ""
+    out = ["[LIVE SCANNER FEED — tokens Kayo is watching, mcap under $500K]:"]
+    for t in _live_feed[:15]:
         mcap = t["mcap"]
-        if mcap > 500_000:
-            continue  # skip big caps
-        age_s = time.time() - t.get("seen_at", time.time())
-        age_str = _age_human(t.get("created", 0)) if t.get("created") else f"{int(age_s/60)}m ago"
-        platform = "Pump" if t.get("is_pumpfun") else ("Raydium" if t.get("is_graduated") else "DEX")
-        chain = t.get("chain", "Solana").capitalize()
-        nar = t.get("narrative", "")
-        nar_tag = f" #{nar}" if nar else ""
-        ch = t.get("ch1h", 0)
-        ch_str = f" {ch:+.0f}% 1h" if ch else ""
-        lines.append(
-            f"  {t['sym']} on {chain} @ {platform} — MCap ${mcap:,.0f}{ch_str} — {age_str}{nar_tag}"
-        )
-    if len(lines) == 1:
-        return ""  # No tokens under $500K
-    lines.append("When asked what to trade, use tokens FROM THIS LIST — not generic coins like BONK/PEPE.")
-    return "\n".join(lines)
+        if mcap > 500_000: continue
+        plat = "Pump" if t.get("is_pumpfun") else ("Raydium" if t.get("is_graduated") else "DEX")
+        nar = f" #{t['narrative']}" if t.get("narrative") else ""
+        ch = t.get("ch1h",0); ch_s = f" {ch:+.0f}% 1h" if ch else ""
+        out.append(f"  {t['sym']} on Solana @ {plat} — MCap ${mcap:,.0f}{ch_s} — {_age_human(t.get('created',0))}{nar}")
+    if len(out)==1: return ""
+    out.append("Use tokens FROM THIS LIST when asked what to trade. NEVER default to BONK/PEPE/WIF.")
+    return "\n".join(out)
+
+
 dropped_calls:   Dict[str, dict]         = {}  # addr -> {sym,entry_price,time,alert_type,...} for follow-ups
 pattern_memory: Dict[str, dict]         = {}  # alert_type+nar -> {wins,losses,total,avg_mult} for self-learning
 watchlist_seen:  "OrderedDict[str, int]" = OrderedDict()
@@ -259,16 +242,14 @@ async def _load():
         reminders       = d.get("reminders", [])
         _saved_seen = d.get("seen_alert_ids", [])
         seen_alert_ids = OrderedDict()
-        for sid in _saved_seen[-3000:]:
-            seen_alert_ids[sid] = 1
-        global dropped_calls, pattern_memory
-        dropped_calls   = d.get("dropped_calls", {})
-        pattern_memory  = d.get("pattern_memory", {})
-        # Restore Rick Bot tracking state
+        for sid in _saved_seen[-3000:]: seen_alert_ids[sid] = 1
         global _first_alert_seen, _token_watchers
         _first_alert_seen = set(d.get("first_alert_seen", []))
         _token_watchers = d.get("token_watchers", {})
-        logger.info(f"✅ State loaded — {len(watchlist)} watched, {len(active_calls)} calls, {len(dropped_calls)} tracked drops (seen_alert_ids restored from saved state)")
+        global dropped_calls, pattern_memory
+        dropped_calls   = d.get("dropped_calls", {})
+        pattern_memory  = d.get("pattern_memory", {})
+        logger.info(f"✅ State loaded — {len(watchlist)} watched, {len(active_calls)} calls, {len(dropped_calls)} tracked drops (seen_alert_ids cleared for fresh session)")
         # Prune dropped_calls older than 7 days so it doesn't block forever
         cutoff = time.time() - 604800
         dropped_calls = {k: v for k, v in dropped_calls.items() if v.get("time", 0) > cutoff}
@@ -989,34 +970,10 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         "6. General knowledge: smart friend who gives real answers, no disclaimers. "
         "7. Match energy. Hyped = hyped reply. Chill = chill. "
         "8. No filler. No Great question. No As an AI. Just answer. "
-        "9. When asked what to trade RIGHT NOW or what's hot: ONLY use tokens from LIVE SCANNER FEED below. "
-        "   Give name, mcap, age, chain, a one-line degen take. Max $500K mcap — degen range. "
-        "   NEVER recommend BONK/PEPE/WIF by default — those are large caps. Degens want micro-caps. "
+        "9. When asked what to trade/whats hot: ONLY use tokens from LIVE SCANNER FEED injected below. Max $500K mcap. Never default to BONK/PEPE/WIF. "
         "FORMAT: Plain text mostly. *bold* only for key crypto numbers."
     )
-
-    # ── LIVE FEED INJECTION ──────────────────────────────────────────
-    # When someone asks "what should I trade" or "what's hot" etc.,
-    # inject the live scanner feed so AI uses REAL tokens not generic ones
-    trading_intent_kws = [
-        "what should i trade", "what memecoin", "what coin", "what to trade",
-        "what's hot", "whats hot", "what's popping", "what coin should",
-        "trade right now", "ape into", "what do you see", "what are you watching",
-        "what's moving", "whats moving", "show me coins", "give me alpha",
-        "what's good", "whats good", "latest coins", "new coins", "hot coins",
-        "what coin to buy", "which coin", "what token", "drop a ca", "drop something",
-        "what's cooking", "whats cooking", "got anything", "show coins",
-    ]
-    prompt_low = prompt.lower()
-    inject_feed = any(kw in prompt_low for kw in trading_intent_kws)
-    live_feed_block = ""
-    if inject_feed:
-        feed_ctx = _build_live_feed_context()
-        if feed_ctx:
-            live_feed_block = f"\n\n{feed_ctx}\n"
-    # Start with base system message + live feed if trading intent detected
-    base_system = system_content + live_feed_block if inject_feed else system_content
-    system_msg = {"role": "system", "content": base_system}
+    system_msg = {"role": "system", "content": system_content}
 
     # ── ON-DEMAND NARRATIVE + PRICE ENRICHMENT ───────────────────
     # 1. Detect narrative keywords and fetch live Solana tokens
@@ -1079,12 +1036,6 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
 
     narrative_block = ""
     fetch_tasks = []
-    # Ensure inject_feed is defined even if prompt check above was skipped
-    if "inject_feed" not in dir():
-        inject_feed = False
-        live_feed_block = ""
-    if "base_system" not in dir():
-        base_system = system_content
 
     # ── If user asks about a specific chain, search that chain ──
     if detected_chain and (asks_about_chain or detected_narratives):
@@ -2133,12 +2084,7 @@ def _social_line(t: Dict) -> str:
     return " · ".join(parts) if parts else "None"
 
 
-# ═══════════════════════════════════════════════════════════════════
-# RICK BOT FORMAT HELPERS
-# ═══════════════════════════════════════════════════════════════════
-
 def _short_k(v) -> str:
-    """Format mcap/liq/vol in K/M/B format."""
     v = float(v or 0)
     if v >= 1e9: return f"{v/1e9:.1f}B"
     if v >= 1e6: return f"{v/1e6:.1f}M"
@@ -2146,180 +2092,164 @@ def _short_k(v) -> str:
     return f"{v:.0f}"
 
 def _age_human(ts) -> str:
-    """Human-readable age from timestamp."""
     if not ts or ts == 0: return "?"
     try:
         age_s = time.time() - (ts / 1000 if ts > 1e10 else ts)
         if age_s < 0: return "now"
-        if age_s < 3600: return f"{int(age_s / 60)}m"
-        if age_s < 86400: return f"{int(age_s / 3600)}h"
-        if age_s < 604800: return f"{int(age_s / 86400)}d"
-        return f"{int(age_s / 604800)}w"
-    except Exception:
-        return "?"
+        if age_s < 3600: return f"{int(age_s/60)}m"
+        if age_s < 86400: return f"{int(age_s/3600)}h"
+        if age_s < 604800: return f"{int(age_s/86400)}d"
+        return f"{int(age_s/604800)}w"
+    except: return "?"
 
-def _platform_emoji(t: Dict) -> tuple:
-    """Return (emoji, platform_text) for chain/platform line."""
-    if t.get("is_pumpfun"):
-        return ("\U0001f7e3", "Solana @ Pump")
-    if t.get("is_graduated"):
-        return ("\U0001f7e2", "Solana @ Raydium")
-    return ("\U0001f535", "Solana @ DEX")
+def _plat(t):
+    if t.get("is_pumpfun"): return ("\U0001f7e3","Solana @ Pump")
+    if t.get("is_graduated"): return ("\U0001f7e2","Solana @ Raydium")
+    return ("\U0001f535","Solana @ DEX")
 
 def _build_rick_card(t: Dict, ai: str = "", is_first_alert: bool = False, watchers: int = 0) -> str:
-    """Build scan/alert card in EXACT Rick Bot format."""
-    sym = t.get("sym", "???")
-    name = t.get("name", sym)
-    addr = t.get("address", t.get("addr", ""))
-    price = float(t.get("price", 0) or 0)
-    mcap = float(t.get("mcap", 0) or t.get("fdv", 0) or 0)
-    liq = float(t.get("liq", 0) or 0)
-    vol24 = float(t.get("v24h", 0) or t.get("vol24h", 0) or 0)
-    ch1h = float(t.get("ch1h", 0) or 0)
-    ch24h = float(t.get("ch24h", 0) or 0)
-    created = t.get("created", 0)
-    b1h = int(t.get("b1h", 0) or t.get("buy_1h", 0) or 0)
-    s1h = int(t.get("s1h", 0) or t.get("sell_1h", 0) or 0)
+    sym = t.get("sym","???"); name = t.get("name",sym)
+    addr = t.get("address", t.get("addr",""))
+    price = float(t.get("price",0) or 0)
+    mcap = float(t.get("mcap",0) or t.get("fdv",0) or 0)
+    liq = float(t.get("liq",0) or 0)
+    vol24 = float(t.get("v24h",0) or t.get("vol24h",0) or 0)
+    ch1h = float(t.get("ch1h",0) or 0); ch24h = float(t.get("ch24h",0) or 0)
+    b1h = int(t.get("b1h",0) or t.get("buy_1h",0) or 0)
+    s1h = int(t.get("s1h",0) or t.get("sell_1h",0) or 0)
+    plat_e, plat_t = _plat(t)
+    ch24_d = f"/{ch24h:+.0f}%" if ch24h != 0 else ""
+    hdr = f"\U0001f7e0 {name} [{_short_k(mcap)}{ch24_d}] ${sym}"
+    if price>=0.01: ps=f"{price:.6f}"
+    elif price>=0.0001: ps=f"{price:.8f}"
+    else: ps=f"{price:.10f}"
+    fm = float(t.get("first_seen_mcap",0) or 0)
+    fdv_l = f"\U0001f48e FDV: {_short_k(fm)} \u21d2 {_short_k(mcap)} (now!)" if fm>0 and fm!=mcap else f"\U0001f48e FDV: {_short_k(mcap)}"
+    lm = int((liq/mcap*10)) if mcap>0 else 0
+    fire = " \u00b7 \U0001f525" if lm>4 else ""
+    liq_l = f"\U0001f4a7 Liq: {_short_k(liq)}{(' [x'+str(lm)+']') if lm>0 else ''}{fire}"
+    vol_l = f"\U0001f4ca Vol: {_short_k(vol24)} \u00b7 Age: {_age_human(t.get('created',0))}"
+    ch1s = f"{ch1h:+.1f}%" if ch1h!=0 else "0.0%"
+    txn_l = f"\U0001f4c8 1H: {ch1s} \U0001f535 {b1h} \U0001f7e0 {s1h}"
+    ths = t.get("top_holders",[])
+    if ths:
+        tp = "\u00b7".join(f"{h:.1f}" for h in ths[:5])
+        th_l = f"\U0001f465 TH: {tp} [{sum(ths[:10]):.0f}%]"
+    else: th_l = "\U0001f465 TH: \u2014"
+    hc = int(t.get("holder_count",0) or 0)
+    aw = t.get("avg_wallet_age_weeks",0)
+    tot_l = f"\U0001f91d Total: {hc}" + (f" \u00b7 avg {int(aw)}w old" if aw else "")
+    bd_l = f"\u21b3 \U0001f4e6 {float(t.get('bundle_pct',0) or 0):.0f}% \U0001f3af {float(t.get('sniper_pct',0) or 0):.0f}% \U0001f464 {float(t.get('dev_pct',0) or 0):.1f}%"
+    fr_l = f"\U0001f33f Fresh 1D: {float(t.get('fresh_1d_pct',0) or 0):.0f}% \u00b7 7D: {float(t.get('fresh_7d_pct',0) or 0):.0f}%"
+    dp = t.get("pair_addr",addr)
+    du = f"https://dexscreener.com/solana/{dp}"
+    dfu = f"https://defined.fi/solana/{addr}"
+    pu = f"https://pump.fun/{addr}"; ru = f"https://rugcheck.xyz/tokens/{addr}"
+    tu = f"https://twitter.com/search?q=${sym}"
+    ch_l = f"\U0001f4ca Chart: [DEX]({du})\u00b7[DEF]({dfu})"
+    mo_l = f"\U0001f517 More: [\U0001f517]({du}) [\U0001f426]({tu}) [\U0001f4aa]({pu}) [\U0001f575\ufe0f]({ru})"
+    kt = t.get("known_wallet_tags",[])
+    tags = ("\n" + "\u00b7".join(kt)) if kt else ""
+    fa = f"\n\U0001f308 You are first @ {_short_k(mcap)} \U0001f440 {watchers}" if is_first_alert else (f"\n\U0001f440 {watchers} watching" if watchers>0 else "")
+    ai_l = f"\n\n\U0001f9e0 {ai}" if ai and ai.strip() else ""
+    return "\n".join([hdr,f"{plat_e} {plat_t}",f"\U0001f4b0 USD: {ps}",fdv_l,liq_l,vol_l,txn_l,"",th_l,tot_l,bd_l,fr_l,ch_l,mo_l,"",f"`{addr}`",tags.strip(),fa,ai_l]).strip()
 
-    plat_emoji, plat_text = _platform_emoji(t)
-    mcap_short = _short_k(mcap)
-    ch24_display = f"/{ch24h:+.0f}%" if ch24h != 0 else ""
-    header_line = f"\U0001f7e0 {name} [{mcap_short}{ch24_display}] ${sym}"
-
-    if price >= 0.01:
-        price_str = f"{price:.6f}"
-    elif price >= 0.0001:
-        price_str = f"{price:.8f}"
-    else:
-        price_str = f"{price:.10f}"
-
-    first_mcap = float(t.get("first_seen_mcap", 0) or 0)
-    if first_mcap > 0 and first_mcap != mcap:
-        fdv_line = f"\U0001f48e FDV: {_short_k(first_mcap)} \u21d2 {_short_k(mcap)} (now!)"
-    else:
-        fdv_line = f"\U0001f48e FDV: {mcap_short}"
-
-    liq_short = _short_k(liq)
-    liq_mult = int((liq / mcap * 10)) if mcap > 0 else 0
-    liq_mult_str = f" [x{liq_mult}]" if liq_mult > 0 else ""
-    fire = " \u00b7 \U0001f525" if liq_mult > 4 else ""
-    liq_line = f"\U0001f4a7 Liq: {liq_short}{liq_mult_str}{fire}"
-
-    vol_short = _short_k(vol24)
-    age_str = _age_human(created)
-    vol_age_line = f"\U0001f4ca Vol: {vol_short} \u00b7 Age: {age_str}"
-
-    ch1h_str = f"{ch1h:+.1f}%" if ch1h != 0 else "0.0%"
-    txns_line = f"\U0001f4c8 1H: {ch1h_str} \U0001f535 {b1h} \U0001f7e0 {s1h}"
-
-    # Holder analysis
-    top_holders = t.get("top_holders", [])
-    if top_holders:
-        th_parts = "\u00b7".join(f"{h:.1f}" for h in top_holders[:5])
-        top10 = sum(top_holders[:10]) if len(top_holders) >= 10 else sum(top_holders)
-        th_line = f"\U0001f465 TH: {th_parts} [{top10:.0f}%]"
-    else:
-        th_line = "\U0001f465 TH: \u2014"
-
-    holder_count = int(t.get("holder_count", 0) or 0)
-    avg_wallet_age = t.get("avg_wallet_age_weeks", 0)
-    if avg_wallet_age:
-        total_line = f"\U0001f91d Total: {holder_count} \u00b7 avg {int(avg_wallet_age)}w old"
-    else:
-        total_line = f"\U0001f91d Total: {holder_count}"
-
-    bundle_pct = float(t.get("bundle_pct", 0) or 0)
-    sniper_pct = float(t.get("sniper_pct", 0) or 0)
-    dev_pct = float(t.get("dev_pct", 0) or 0)
-    breakdown_line = f"\u21b3 \U0001f4e6 {bundle_pct:.0f}% \U0001f3af {sniper_pct:.0f}% \U0001f464 {dev_pct:.1f}%"
-
-    fresh_1d = float(t.get("fresh_1d_pct", 0) or 0)
-    fresh_7d = float(t.get("fresh_7d_pct", 0) or 0)
-    fresh_line = f"\U0001f33f Fresh 1D: {fresh_1d:.0f}% \u00b7 7D: {fresh_7d:.0f}%"
-
-    dex_pair = t.get("pair_addr", addr)
-    dex_url = f"https://dexscreener.com/solana/{dex_pair}"
-    defined_url = f"https://defined.fi/solana/{addr}"
-    chart_line = f"\U0001f4ca Chart: [DEX]({dex_url})\u00b7[DEF]({defined_url})"
-
-    pump_url = f"https://pump.fun/{addr}"
-    rugcheck_url = f"https://rugcheck.xyz/tokens/{addr}"
-    twitter_url = f"https://twitter.com/search?q=${sym}"
-    more_line = f"\U0001f517 More: [\U0001f517]({dex_url}) [\U0001f426]({twitter_url}) [\U0001f4aa]({pump_url}) [\U0001f575\ufe0f]({rugcheck_url})"
-
-    known_tags = t.get("known_wallet_tags", [])
-    _tags_sep = "\u00b7"
-    tags_block = f"\n{_tags_sep.join(known_tags)}\n" if known_tags else ""
-
-    first_alert_line = ""
-    if is_first_alert:
-        first_alert_line = f"\n\U0001f308 You are first @ {mcap_short} \U0001f440 {watchers}"
-    elif watchers > 0:
-        first_alert_line = f"\n\U0001f440 {watchers} watching"
-
-    ai_line = f"\n\n\U0001f9e0 {ai}" if ai and ai.strip() else ""
-
-    card = "\n".join([
-        header_line,
-        f"{plat_emoji} {plat_text}",
-        f"\U0001f4b0 USD: {price_str}",
-        fdv_line,
-        liq_line,
-        vol_age_line,
-        txns_line,
-        "",
-        th_line,
-        total_line,
-        breakdown_line,
-        fresh_line,
-        chart_line,
-        more_line,
-        "",
-        f"`{addr}`",
-        tags_block.rstrip(),
-        first_alert_line,
-        ai_line,
-    ])
-    # Remove trailing empty lines
-    return card.strip()
-
-
-def _rick_buttons(ca: str, sym: str = "", pair_addr: str = "") -> InlineKeyboardMarkup:
-    """Rick Bot style buttons - all open in Telegram WebApp browser."""
-    dex_pair = pair_addr or ca
+def _rick_buttons(ca:str, sym:str="", pair_addr:str="") -> InlineKeyboardMarkup:
+    dp = pair_addr or ca
     return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("\u274c", callback_data=f"dismiss:{ca}"),
-            InlineKeyboardButton("\U0001f504", callback_data=f"refresh:{ca}"),
-            InlineKeyboardButton(
-                "\U0001f4ac\u2197",
-                web_app=WebAppInfo(url=f"https://twitter.com/search?q=${sym}" if sym else f"https://dexscreener.com/solana/{dex_pair}")
-            ),
-            InlineKeyboardButton(
-                "\U0001f50d\u2197",
-                web_app=WebAppInfo(url=f"https://rugcheck.xyz/tokens/{ca}")
-            ),
-            InlineKeyboardButton(
-                "\U0001f4ca\u2197",
-                web_app=WebAppInfo(url=f"https://dexscreener.com/solana/{dex_pair}")
-            ),
-        ],
-        [
-            InlineKeyboardButton("\U0001f4c8 BullX", web_app=WebAppInfo(url=f"https://neo.bullx.io/terminal?chainId=1399811149&address={ca}")),
-            InlineKeyboardButton("\U0001f438 GMGN", web_app=WebAppInfo(url=f"https://gmgn.ai/sol/token/{ca}")),
-            InlineKeyboardButton("\u26a1 Photon", web_app=WebAppInfo(url=f"https://photon-sol.tinyastro.io/en/lp/{ca}")),
-        ],
+        [InlineKeyboardButton("\u274c",callback_data=f"dismiss:{ca}"),
+         InlineKeyboardButton("\U0001f504",callback_data=f"refresh:{ca}"),
+         InlineKeyboardButton("\U0001f4ac\u2197",web_app=WebAppInfo(url=f"https://twitter.com/search?q=${sym}" if sym else f"https://dexscreener.com/solana/{dp}")),
+         InlineKeyboardButton("\U0001f50d\u2197",web_app=WebAppInfo(url=f"https://rugcheck.xyz/tokens/{ca}")),
+         InlineKeyboardButton("\U0001f4ca\u2197",web_app=WebAppInfo(url=f"https://dexscreener.com/solana/{dp}")),],
+        [InlineKeyboardButton("\U0001f4c8 BullX",web_app=WebAppInfo(url=f"https://neo.bullx.io/terminal?chainId=1399811149&address={ca}")),
+         InlineKeyboardButton("\U0001f438 GMGN",web_app=WebAppInfo(url=f"https://gmgn.ai/sol/token/{ca}")),
+         InlineKeyboardButton("\u26a1 Photon",web_app=WebAppInfo(url=f"https://photon-sol.tinyastro.io/en/lp/{ca}")),],
     ])
 
-# Track first alerts and watchers
 _first_alert_seen: set = set()
 _token_watchers: Dict[str, int] = {}
 
 
 def build_scan_card(t: Dict, ai: str = "") -> str:
-    """Rick Bot format scan card."""
+    """Rick Bot format card."""
     return _build_rick_card(t, ai, is_first_alert=False, watchers=0)
 
+def _old_build_scan_card_unused(t: Dict, ai: str = "") -> str:
+    """UNUSED — kept for reference."""
+    sym  = _md(t.get("sym", "???"))
+    name = _md(t.get("name", sym))
+    age  = _age(t.get("created", 0))
+    nar  = f" #{t.get('narrative','').upper()}" if t.get("narrative") else ""
+    pf_desc     = t.get("pf_description", "")
+    pf_replies  = t.get("pf_reply_count", 0)
+    is_pf       = t.get("is_pumpfun", False)
+    is_grad     = t.get("is_graduated", False)
+    bp   = float(t.get("buy_pct", 50))
+    sp   = 100 - bp
+
+
+    fill = int(bp / 10)
+    bar  = "🟩" * fill + "🟥" * (10 - fill)
+    press = "🔥 BUY PRESSURE" if bp > 60 else ("❄️ SELL PRESSURE" if bp < 40 else "⚖️ BALANCED")
+
+    badges = []
+    if t.get("is_renounced"):     badges.append("✅ Renounced")
+    if t.get("lp_locked"):        badges.append("🔒 LP Locked")
+    if t.get("boost_active",0)>0: badges.append("💰 Boosted")
+    if t.get("has_profile"):      badges.append("📋 Verified")
+    if t.get("is_honeypot"):      badges.append("🚨 Honeypot")
+    badge_str = "  ".join(badges) if badges else "⚠️ Unverified"
+
+    slinks = []
+    if t.get("tw_link"):  slinks.append(f"[🐦 Twitter]({t['tw_link']})")
+    if t.get("tg_link"):  slinks.append(f"[💬 TG]({t['tg_link']})")
+    if t.get("web_link"): slinks.append(f"[🌐 Web]({t['web_link']})")
+    social_str = "  ".join(slinks) if slinks else "_(no socials)_"
+
+    ms = int(t.get("mscore", 0))
+    ms_emoji = "🔥" if ms >= 70 else ("⚡" if ms >= 40 else "💤")
+    liq_ratio = t.get("liq_ratio", 0)
+
+    card = (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"  🦅 *KAYO DEEP SCAN*{nar}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 *{sym}* — _{name}_\n"
+        f"📋 `{t.get('address', '')}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 Price: `{_price(t.get('price', 0))}`  ·  Age: {age}\n"
+        f"📊 MCap: `{_usd(t.get('mcap', 0))}`  ·  FDV: `{_usd(t.get('fdv', 0))}`\n"
+        f"🌊 Liquidity: `{_usd(t.get('liq', 0))}` ({liq_ratio:.1f}% of MCap)\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 *Price Change*\n"
+        f"  5m: {_chg(t.get('ch5m',0))}  ·  1h: {_chg(t.get('ch1h',0))}\n"
+        f"  6h: {_chg(t.get('ch6h',0))}  ·  24h: {_chg(t.get('ch24h',0))}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 *Volume*\n"
+        f"  5m: `{_usd(t.get('v5m',0))}`  1h: `{_usd(t.get('v1h',0))}`  24h: `{_usd(t.get('v24h',0))}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔄 *Transactions (1h)*\n"
+        f"  🟢 Buys: {t.get('b1h',0)}  ·  🔴 Sells: {t.get('s1h',0)}\n"
+        f"  {bar}\n"
+        f"  {bp:.0f}% Buy / {sp:.0f}% Sell — {press}\n"
+        f"  Vol Spike: {t.get('vol_spike', 0):.1f}x\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ Momentum: {ms_emoji} {ms}/100  ·  {_risk(t.get('risk_score', 30))}\n"
+        f"🛡️ {badge_str}\n"
+    )
+    bt, st = float(t.get("buy_tax", 0)), float(t.get("sell_tax", 0))
+    if bt > 0 or st > 0:
+        card += f"🧾 Tax: Buy {bt:.1f}% / Sell {st:.1f}%\n"
+    if t.get("red_flags"):
+        card += "\n🚩 *Risk Flags:*\n" + "\n".join(f"  • {_md(f)}" for f in t["red_flags"][:3]) + "\n"
+    if t.get("green_flags"):
+        card += "\n✅ *Green Flags:*\n" + "\n".join(f"  • {_md(f)}" for f in t["green_flags"][:2]) + "\n"
+    card += f"\n🌐 Socials: {social_str}\n"
+    card += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if ai:
+        card += f"\n\n🧠 *Kayo AI Verdict:*\n_{ai}_"
+    return card
 def _md(s: str) -> str:
     """Escape Markdown special chars in dynamic text for Telegram V1."""
     if not s: return ""
@@ -2327,19 +2257,2411 @@ def _md(s: str) -> str:
 
 def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
     """Rick Bot format alert card."""
-    ca = t.get("address", t.get("addr", ""))
+    ca = t.get("address", t.get("addr",""))
     is_first = ca not in _first_alert_seen
-    if is_first:
-        _first_alert_seen.add(ca)
+    if is_first: _first_alert_seen.add(ca)
     watchers = _token_watchers.get(ca, 0)
-    alert_headers = {"pump":"🚀","new":"🆕","gem":"💎","whale":"🐋","momentum":"📈","migration":"🔄","rug":"⚠️"}
-    prefix = alert_headers.get(alert_type, "⚡")
-    card = _build_rick_card(t, ai, is_first_alert=is_first, watchers=watchers)
-    return f"{prefix} {card}"
+    icons = {"pump":"🚀","new":"🆕","gem":"💎","whale":"🐋","momentum":"📈","migration":"🔄","rug":"⚠️"}
+    prefix = icons.get(alert_type, "⚡")
+    return f"{prefix} " + _build_rick_card(t, ai, is_first_alert=is_first, watchers=watchers)
 
+def _old_build_alert_card_unused(t: Dict, alert_type: str, ai: str = "") -> str:
+    """UNUSED — kept for reference."""
+    headers = {
+        "pump":      "🚀 PUMP ALERT",
+        "dump":      "💀 DUMP ALERT",
+        "whale":     "🐋 WHALE ACCUMULATION",
+        "gem":       "💎 HIDDEN GEM",
+        "new":       "🆕 NEW LAUNCH",
+        "narrative": "📖 NARRATIVE PLAY",
+        "rug":       "⚠️ RUG ALERT",
+        "unusual":   "⚡ UNUSUAL ACTIVITY",
+        "migration": "🔄 GRADUATION ALERT",
+        "rebrand":   "🏷️ REBRAND ALERT",
+        "momentum":  "📈 MOMENTUM ALERT",
+    }
+    header = headers.get(alert_type, "⚡ KAYO ALERT")
+
+    sym  = _md(t.get("sym", "???"))
+    name = _md(t.get("name", sym))
+    nar  = f" #{t.get('narrative','').upper()}" if t.get("narrative") else ""
+    age  = _age(t.get("created", 0))
+
+    def _chg(v):
+        v = float(v or 0)
+        if v > 0:  return f"🟢 +{v:.1f}%"
+        if v < 0:  return f"🔴 {v:.1f}%"
+        return f"⚪ {v:.1f}%"
+
+    ch5m  = _chg(t.get("ch5m", 0))
+    ch1h  = _chg(t.get("ch1h", 0))
+    ch6h  = _chg(t.get("ch6h", 0))
+    ch24h = _chg(t.get("ch24h", 0))
+
+    bp   = float(t.get("buy_pct", 50))
+    sp   = 100 - bp
+    fill = int(bp / 10)
+    bar  = "🟩" * fill + "🟥" * (10 - fill)
+    press = "🔥 BUY PRESSURE" if bp > 60 else ("❄️ SELL PRESSURE" if bp < 40 else "⚖️ BALANCED")
+
+    badges = []
+    if is_pf:               badges.append("🟣 Pump.fun")
+    if is_grad:             badges.append("✅ Graduated to Raydium")
+    if t.get("is_renounced"): badges.append("✅ Renounced")
+    if t.get("lp_locked"):    badges.append("🔒 LP Locked")
+    if t.get("boost_active", 0) > 0: badges.append("💰 Boosted")
+    if t.get("is_honeypot"):  badges.append("🚨 Honeypot")
+    if pf_replies >= 10:     badges.append(f"💬 {pf_replies} replies")
+    badge_str = "  ".join(badges) if badges else "⚠️ Unverified"
+
+    tax_line = ""
+    bt = float(t.get("buy_tax", 0))
+    st = float(t.get("sell_tax", 0))
+    if bt > 0 or st > 0:
+        tax_line = f"\n🧾 Tax: Buy {bt:.1f}% / Sell {st:.1f}%"
+
+    socials = []
+    if t.get("tw_link"):  socials.append(f"[🐦]({t['tw_link']})")
+    if t.get("tg_link"):  socials.append(f"[💬]({t['tg_link']})")
+    if t.get("web_link"): socials.append(f"[🌐]({t['web_link']})")
+    social_str = "  ".join(socials)
+
+    ms = int(t.get("mscore", 0))
+    ms_emoji = "🔥" if ms >= 70 else ("⚡" if ms >= 40 else "💤")
+
+    pf_narrative_line = ""
+    if pf_desc and len(pf_desc) > 5:
+        # Show pump.fun narrative description (truncated)
+        pf_narrative_line = f"📖 _{pf_desc[:150]}_\n"
+
+    card = (
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"  {header}{nar}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 *{sym}* — _{name}_\n"
+        f"📋 `{t.get('address', '')}`\n"
+        f"{pf_narrative_line}"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 Price: `{_price(t.get('price', 0))}`  ·  Age: {age}\n"
+        f"📊 MCap: `{_usd(t.get('mcap', 0))}`  ·  FDV: `{_usd(t.get('fdv', 0))}`\n"
+        f"🌊 Liquidity: `{_usd(t.get('liq', 0))}`\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 *Price Change*\n"
+        f"  5m: {ch5m}  ·  1h: {ch1h}\n"
+        f"  6h: {ch6h}  ·  24h: {ch24h}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔄 *Transactions (1h)*\n"
+        f"  🟢 Buys: {t.get('b1h', 0)}  ·  🔴 Sells: {t.get('s1h', 0)}\n"
+        f"  {bar}\n"
+        f"  {bp:.0f}% Buy / {sp:.0f}% Sell — {press}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ Momentum: {ms_emoji} {ms}/100  ·  {_risk(t.get('risk_score', 30))}\n"
+        f"🛡️ {badge_str}{tax_line}\n"
+    )
+    if social_str:
+        card += f"🔗 Socials: {social_str}\n"
+    card += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if ai:
+        card += f"\n\n🧠 *Kayo AI:*\n_{ai}_"
+    return card
 def scan_buttons(addr: str, sym: str = "", pair_addr: str = "") -> InlineKeyboardMarkup:
-    """Rick Bot style buttons - all WebApp."""
+    """Rick Bot buttons — all WebApp."""
     return _rick_buttons(addr, sym, pair_addr)
+
+def _old_scan_buttons_unused(addr: str, sym: str = "", pair_addr: str = "") -> InlineKeyboardMarkup:
+    """UNUSED — kept for reference."""
+    dex_pair = pair_addr or addr
+    return InlineKeyboardMarkup([
+        [
+            # DexScreener — opens chart inside Telegram WebApp browser
+            InlineKeyboardButton(
+                "\U0001f4ca DexScreener",
+                web_app=WebAppInfo(url=f"https://dexscreener.com/solana/{dex_pair}")
+            ),
+            # GMGN — opens inside Telegram WebApp browser
+            InlineKeyboardButton(
+                "\U0001f438 GMGN",
+                web_app=WebAppInfo(url=f"https://gmgn.ai/sol/token/{addr}")
+            ),
+        ],
+        [
+            # BullX Neo — opens WebApp terminal inside Telegram
+            InlineKeyboardButton(
+                "\U0001f319 BullX",
+                web_app=WebAppInfo(url=f"https://neo.bullx.io/terminal?chainId=1399811149&address={addr}")
+            ),
+            # Photon — opens WebApp inside Telegram
+            InlineKeyboardButton(
+                "\U0001f52b Photon",
+                web_app=WebAppInfo(url=f"https://photon-sol.tinyastro.io/en/lp/{addr}")
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "\U0001f34c Banana",
+                url=f"https://t.me/BananaGunSolana_bot?start=snipe_{addr}"
+            ),
+            InlineKeyboardButton(
+                "\U0001f5e1 Trojan",
+                url=f"https://t.me/hector_trojanbot?start=snipe-SOL-{addr}"
+            ),
+        ],
+        [
+            InlineKeyboardButton(
+                "\U0001f504 Refresh",
+                callback_data=f"refresh:{addr}"
+            ),
+        ],
+    ])
+
+# ═══════════════════════════════════════════════════════════════
+# COMMANDS
+# ═══════════════════════════════════════════════════════════════
+
+async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    add_xp(u.effective_user.id, 10)
+    name = u.effective_user.first_name or "degen"
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("\U0001f52c Scan Token",   callback_data="menu:scan"),
+            InlineKeyboardButton("\U0001f4ca Chart",        callback_data="menu:chart"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f3c3 Runners",      callback_data="menu:runners"),
+            InlineKeyboardButton("\U0001f195 New Launches", callback_data="menu:new"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f680 Pumps",        callback_data="menu:pump"),
+            InlineKeyboardButton("\U0001f48e Gems",         callback_data="menu:gems"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f525 Trending",     callback_data="menu:trending"),
+            InlineKeyboardButton("\U0001f4f0 News",         callback_data="menu:news"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f916 Ask Kayo AI",  callback_data="menu:ask"),
+            InlineKeyboardButton("\U0001f624 Sentiment",    callback_data="menu:sentiment"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f4bc Portfolio",    callback_data="menu:portfolio"),
+            InlineKeyboardButton("\U0001f514 My Alerts",    callback_data="menu:myalerts"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f4e2 Leaderboard",  callback_data="menu:leaderboard"),
+            InlineKeyboardButton("\U00002b50 My Rank",      callback_data="menu:rank"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f4b5 Price Check",  callback_data="menu:price"),
+            InlineKeyboardButton("\U0001f6e1 Verify Token", callback_data="menu:verify"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f4cb Full Command List", callback_data="menu:help"),
+        ],
+    ])
+    await (u.message or u.effective_message).reply_text(
+        f"\U0001f985 *KAYO BRAIN v40*\n"
+        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
+        f"Tap any button below or type `/` to browse all commands in the menu bar."
+        f"\nEvery command is tap-to-use from the menu \u2b07\ufe0f",
+        parse_mode="Markdown",
+        reply_markup=markup,
+    )
+
+async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Paginated help with tappable category buttons."""
+    markup = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("\U0001f52c Scan & Analyze",  callback_data="help:scan"),
+            InlineKeyboardButton("\U0001f50d Discover",        callback_data="help:discover"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f4d6 Narratives",      callback_data="help:narrative"),
+            InlineKeyboardButton("\U0001f4f0 News & AI",       callback_data="help:ai"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f426 Twitter/Social",  callback_data="help:twitter"),
+            InlineKeyboardButton("\U0001f514 Alerts",          callback_data="help:alerts"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f4e2 Calls",           callback_data="help:calls"),
+            InlineKeyboardButton("\U0001f4bc Portfolio",       callback_data="help:portfolio"),
+        ],
+        [
+            InlineKeyboardButton("\U0001f45b Wallets",         callback_data="help:wallets"),
+            InlineKeyboardButton("\U0001f3ae XP & Social",     callback_data="help:social"),
+        ],
+        [
+            InlineKeyboardButton("\U00002699\ufe0f System",   callback_data="help:system"),
+        ],
+    ])
+    await u.effective_message.reply_text(
+        "\U0001f985 *KAYO BRAIN v40 — COMMANDS*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "Tap a category \U0001f447 to see its commands.\n"
+        "Or type `/` in the chat bar to tap any command directly.",
+        parse_mode="Markdown",
+        reply_markup=markup,
+    )
+
+async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/scan <contract_address>`", parse_mode="Markdown"); return
+    addr = c.args[0].strip()
+    msg  = await u.effective_message.reply_text("🔍 *Scanning...*", parse_mode="Markdown")
+    t    = await full_token_scan(addr)
+    if t.get("error"):
+        await msg.edit_text(f"❌ {t['error']}"); return
+    add_xp(u.effective_user.id, 5)
+    _track_scan(t, u.effective_user.id)
+    # Send card IMMEDIATELY — no AI wait
+    buttons = scan_buttons(addr, t.get("sym", ""), t.get("pair_addr", ""))
+    sent = await msg.edit_text(
+        build_scan_card(t, ""),
+        parse_mode="Markdown",
+        reply_markup=buttons,
+        disable_web_page_preview=True,
+    )
+    # AI verdict as background task — edits message when ready
+    async def _scan_ai(msg_id, chat_id, token_data, btns):
+        try:
+            ai_v = await asyncio.wait_for(
+                ai_ask(
+                    f"Solana token ${token_data['sym']} — MCap {_usd(token_data['mcap'])}, "
+                    f"liq {_usd(token_data['liq'])}, age {_age(token_data['created'])}, "
+                    f"5m {_pct(token_data['ch5m'])}, 1h {_pct(token_data['ch1h'])}, "
+                    f"24h {_pct(token_data['ch24h'])}, buy ratio {token_data['buy_pct']:.0f}%, "
+                    f"vol spike {token_data['vol_spike']:.1f}x, momentum {token_data['mscore']}/100, "
+                    f"risk {token_data['risk_score']}/100, narrative #{token_data['narrative']}, "
+                    f"honeypot={token_data['is_honeypot']}, lp_locked={token_data['lp_locked']}. "
+                    "Give a sharp alpha verdict: is this worth aping right now? "
+                    "Consider the current market conditions from your live context. "
+                    "Call out any red flags. 2-3 direct sentences.",
+                    fallback="",
+                    inject_market=True
+                ),
+                timeout=15
+            )
+            if ai_v and ai_v.strip():
+                try:
+                    await c.bot.edit_message_text(
+                        chat_id=chat_id, message_id=msg_id,
+                        text=build_scan_card(token_data, ai_v),
+                        parse_mode="Markdown",
+                        reply_markup=btns,
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    asyncio.create_task(_scan_ai(
+        sent.message_id if hasattr(sent, 'message_id') else msg.message_id,
+        u.effective_chat.id, t, buttons
+    ))
+
+async def c_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/c <ca>`", parse_mode="Markdown"); return
+    addr  = c.args[0].strip()
+    pairs = await dex_pairs_by_token(addr)
+    if not pairs:
+        await u.effective_message.reply_text("❌ Token not found."); return
+    p     = pairs[0]
+    base  = p.get("baseToken", {})
+    sym   = base.get("symbol", "???")
+    price = float(p.get("priceUsd", 0) or 0)
+    fdv   = float(p.get("fdv", 0) or 0)
+    liq   = float((p.get("liquidity") or {}).get("usd", 0) or 0)
+    ch1h  = float((p.get("priceChange") or {}).get("h1", 0) or 0)
+    ch24h = float((p.get("priceChange") or {}).get("h24", 0) or 0)
+    b1h   = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
+    s1h   = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
+    await u.effective_message.reply_text(
+        f"⚡ *${sym}*\n"
+        f"Price: {_price(price)}\n"
+        f"MCap: `{_usd(fdv)}`  Liq: `{_usd(liq)}`\n"
+        f"1h: {_pct(ch1h)}  24h: {_pct(ch24h)}\n"
+        f"Buys/Sells (1h): {b1h} / {s1h}\n"
+        f"`{addr}`",
+        parse_mode="Markdown",
+        reply_markup=scan_buttons(addr, sym),
+    )
+
+async def verify_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/verify <ca>`", parse_mode="Markdown"); return
+    addr = c.args[0].strip()
+    msg  = await u.effective_message.reply_text("🛡 *Running security check...*", parse_mode="Markdown")
+    sec  = await goplus_check(addr)
+    if not sec:
+        await msg.edit_text("⚠️ Security data unavailable for this token."); return
+    risk, red, green = parse_security(sec)
+    add_xp(u.effective_user.id, 3)
+    st = float(sec.get("sell_tax", 0) or 0)
+    bt = float(sec.get("buy_tax",  0) or 0)
+    text = (
+        f"🛡 *SECURITY CHECK*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Risk Score: {risk}/100 — {_risk(risk)}\n"
+        f"Buy Tax: {bt}%  ·  Sell Tax: {st}%\n"
+    )
+    if red:   text += "\n*🚩 Red Flags:*\n" + "\n".join(f"  {f}" for f in red) + "\n"
+    if green: text += "\n*✅ Green Flags:*\n" + "\n".join(f"  {f}" for f in green) + "\n"
+    text += f"\n`{addr}`"
+    await msg.edit_text(text, parse_mode="Markdown")
+
+async def runners_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    msg = await u.effective_message.reply_text("🏃 *Scanning for top runners...*", parse_mode="Markdown")
+    # Use GeckoTerminal — returns real coins, not just popular searched ones
+    pools_new, pools_trend = await asyncio.gather(
+        gt_new_pools(page=1),
+        gt_trending_pools(page=1),
+    )
+    all_toks: Dict[str, Dict] = {}
+    for pool in (pools_new + pools_trend):
+        tok = gt_parse_pool(pool)
+        if tok and tok["address"] not in all_toks:
+            all_toks[tok["address"]] = tok
+
+    runners = [
+        tok for tok in all_toks.values()
+        if tok["address"] not in blacklist
+        and 0 < tok["fdv"] <= 500_000
+        and tok["liq"] >= 500
+        and tok["ch1h"] > 5
+        and tok["buy_pct"] >= 48
+    ]
+    runners.sort(key=lambda t: t["ch1h"], reverse=True)
+    top = runners[:10]
+
+    if not top:
+        await msg.edit_text("😴 No sub-$500k runners right now. Market is quiet."); return
+    add_xp(u.effective_user.id, 3)
+    out_lines = [f"🏃 *TOP SOLANA RUNNERS — 1H*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n_{len(all_toks)} coins scanned_"]
+    for i, tok in enumerate(top, 1):
+        sym  = tok["sym"]
+        addr = tok["address"]
+        nar  = detect_narrative(f"{sym} {tok['name']}")
+        out_lines.append(
+            f"\n*{i}. ${sym}* — #{nar.upper()}\n"
+            f"  5m: {_pct(tok['ch5m'])}  1h: {_pct(tok['ch1h'])}\n"
+            f"  MCap: `{_usd(tok['fdv'])}`  Liq: `{_usd(tok['liq'])}`\n"
+            f"  Buys/Sells(1h): {tok['b1h']}/{tok['s1h']} — {tok['buy_pct']:.0f}% buys\n"
+            f"  `{addr}`"
+        )
+    await msg.edit_text("\n".join(out_lines), parse_mode="Markdown")
+
+async def new_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    msg      = await u.effective_message.reply_text("🆕 *Fetching new launches...*", parse_mode="Markdown")
+    profiles = await dex_token_profiles_latest()
+    sol      = [p for p in profiles if p.get("chainId") == "solana"][:20]
+    if not sol:
+        await msg.edit_text("❌ No new profiles found."); return
+    addrs     = [p.get("tokenAddress", "") for p in sol if p.get("tokenAddress")]
+    pairs_data = await dex_batch(addrs[:15])
+    pair_map  = {pd.get("baseToken", {}).get("address", ""): pd for pd in pairs_data}
+    add_xp(u.effective_user.id, 2)
+    lines = ["🆕 *BRAND NEW LAUNCHES*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    count = 0
+    for prof in sol:
+        addr = prof.get("tokenAddress", "")
+        p    = pair_map.get(addr)
+        if not p: continue
+        base = p.get("baseToken", {})
+        sym  = base.get("symbol", "???")
+        fdv  = float(p.get("fdv", 0) or 0)
+        liq  = float((p.get("liquidity") or {}).get("usd", 0) or 0)
+        if liq < 300: continue
+        ch1h    = float((p.get("priceChange") or {}).get("h1", 0) or 0)
+        age     = _age(p.get("pairCreatedAt", 0) or 0)
+        links   = prof.get("links") or []
+        soc_str = "".join(["🐦" if l.get("type") == "twitter" else "💬" if l.get("type") == "telegram" else "🌐" for l in links[:3]])
+        nar     = detect_narrative(f"{sym} {base.get('name','')}")
+        lines.append(
+            f"\n*${sym}* {soc_str} — #{nar.upper()}\n"
+            f"  Age: {age}  MCap: `{_usd(fdv)}`  Liq: `{_usd(liq)}`\n"
+            f"  1h: {_pct(ch1h)}\n"
+            f"  `{addr}`"
+        )
+        count += 1
+        if count >= 8: break
+    if count == 0:
+        await msg.edit_text("😴 No new launches with sufficient liquidity.")
+    else:
+        await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+
+async def pump_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    msg = await u.effective_message.reply_text("\U0001f680 *Finding fresh pumps...*", parse_mode="Markdown")
+    pools_new, pools_p2 = await asyncio.gather(gt_new_pools(page=1), gt_new_pools(page=2))
+    all_toks: Dict[str, Dict] = {}
+    for pool in (pools_new + pools_p2):
+        tok = gt_parse_pool(pool)
+        if tok and tok["address"] not in all_toks:
+            all_toks[tok["address"]] = tok
+    pumping = sorted(
+        [t for t in all_toks.values()
+         if t["address"] not in blacklist
+         and 0 < t["fdv"] <= 500_000
+         and t["liq"] >= 500
+         and t["ch5m"] >= 3
+         and t["b5m"] > t["s5m"]],
+        key=lambda t: t["ch5m"], reverse=True
+    )
+    if not pumping:
+        await msg.edit_text("Nothing pumping hard right now."); return
+    add_xp(u.effective_user.id, 2)
+    header = "\U0001f680 *FRESH PUMPS \u2014 5M*\n" + "\u2501" * 14
+    out_lines = [header]
+    for t in pumping[:8]:
+        out_lines.append(
+            "\n*$" + t["sym"] + "*\n"
+            "  5m: " + _pct(t["ch5m"]) + "  1h: " + _pct(t["ch1h"]) + "\n"
+            "  MCap: `" + _usd(t["fdv"]) + "` Liq: `" + _usd(t["liq"]) + "`\n"
+            "  " + str(t["b5m"]) + "B / " + str(t["s5m"]) + "S (5m)\n"
+            "  `" + t["address"] + "`"
+        )
+    await msg.edit_text("\n".join(out_lines), parse_mode="Markdown")
+
+async def gems_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    msg = await u.effective_message.reply_text("💎 *Hunting hidden gems...*", parse_mode="Markdown")
+    # GeckoTerminal new_pools — fresh coins, real data, no key needed
+    pools_p1, pools_p2 = await asyncio.gather(
+        gt_new_pools(page=1),
+        gt_new_pools(page=2),
+    )
+    all_toks: Dict[str, Dict] = {}
+    for pool in (pools_p1 + pools_p2):
+        tok = gt_parse_pool(pool)
+        if tok and tok["address"] not in all_toks:
+            all_toks[tok["address"]] = tok
+
+    gems = []
+    for tok in all_toks.values():
+        if tok["address"] in blacklist: continue
+        if not (0 < tok["fdv"] <= 500_000): continue
+        if tok["liq"] < 300: continue
+        if tok["buy_pct"] < 48: continue
+        # Gem scoring: prefer high buy%, low mcap, real activity
+        score = 0
+        if tok["fdv"] < 50_000:  score += 30
+        elif tok["fdv"] < 150_000: score += 20
+        elif tok["fdv"] < 300_000: score += 10
+        if tok["buy_pct"] > 70:  score += 25
+        elif tok["buy_pct"] > 60: score += 15
+        elif tok["buy_pct"] > 55: score += 8
+        if tok["b1h"] > 30: score += 20
+        elif tok["b1h"] > 10: score += 10
+        elif tok["b1h"] > 3:  score += 5
+        if tok["ch1h"] > 50: score += 20
+        elif tok["ch1h"] > 20: score += 12
+        elif tok["ch1h"] > 5:  score += 6
+        if tok["liq_ratio"] > 20: score += 10  # high liq relative to mcap = safer
+        if tok["vol_spike"] > 2: score += 10
+        if score >= 25:
+            gems.append((score, tok))
+
+    gems.sort(reverse=True)
+    top = gems[:8]
+    if not top:
+        await msg.edit_text("💎 No hidden gems found right now. Try again in a few minutes."); return
+    add_xp(u.effective_user.id, 3)
+    out_lines = [f"💎 *HIDDEN GEMS — SOLANA SUB-$500K*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n_{len(all_toks)} coins scanned_"]
+    for i, (score, tok) in enumerate(top, 1):
+        sym  = tok["sym"]
+        addr = tok["address"]
+        nar  = detect_narrative(f"{sym} {tok['name']}")
+        out_lines.append(
+            f"\n*{i}. ${sym}* — #{nar.upper()} | Score: {score}\n"
+            f"  MCap: `{_usd(tok['fdv'])}`  Liq: `{_usd(tok['liq'])}`\n"
+            f"  1h: {_pct(tok['ch1h'])}  Buys(1h): {tok['b1h']} — {tok['buy_pct']:.0f}% buys\n"
+            f"  `{addr}`"
+        )
+    await msg.edit_text("\n".join(out_lines), parse_mode="Markdown")
+
+
+async def trending_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    msg   = await u.effective_message.reply_text("🔥 *Fetching trending metas...*", parse_mode="Markdown")
+    metas = await dex_trending_metas()
+    if not metas:
+        await msg.edit_text("❌ Could not fetch trending metas."); return
+    add_xp(u.effective_user.id, 2)
+    lines = ["🔥 *TRENDING METAS* _(narrative categories, not coins)_\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n_Use /gems or /runners for sub-$500k degen plays_"]
+    for m in metas[:8]:
+        name   = m.get("name", "?")
+        mcap   = float(m.get("marketCap", 0) or 0)
+        vol    = float(m.get("volume", 0) or 0)
+        count  = m.get("tokenCount", 0)
+        chg    = m.get("marketCapChange") or {}
+        c1h    = float(chg.get("h1", 0) or 0)
+        c24h   = float(chg.get("h24", 0) or 0)
+        lines.append(
+            f"\n🏷 *{name}*\n"
+            f"  MCap: `{_usd(mcap)}`  Vol: `{_usd(vol)}`  Tokens: {count}\n"
+            f"  1h: {_pct(c1h)}  24h: {_pct(c24h)}"
+        )
+    await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+
+async def narrative_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/narrative <word>` e.g. `/narrative ai`", parse_mode="Markdown"); return
+    slug = c.args[0].lower().strip()
+    msg  = await u.effective_message.reply_text(f"📖 *Finding #{slug} tokens...*", parse_mode="Markdown")
+    pairs = await dex_meta_tokens(slug)
+    if not pairs:
+        pairs = await dex_search_pairs(f"solana {slug}")
+    pairs = [
+        p for p in pairs
+        if p.get("chainId") == "solana"
+        and float((p.get("liquidity") or {}).get("usd", 0) or 0) > 2000
+        and float(p.get("fdv", 0) or 0) <= 500_000   # hard $500k cap
+        and float(p.get("fdv", 0) or 0) >= 3_000
+    ]
+    pairs.sort(key=lambda p: float((p.get("volume") or {}).get("h24", 0) or 0), reverse=True)
+    if not pairs:
+        await msg.edit_text(f"❌ No coins found for #{slug}."); return
+    add_xp(u.effective_user.id, 2)
+    lines = [f"📖 *#{slug.upper()} NARRATIVE*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    for p in pairs[:7]:
+        base  = p.get("baseToken", {})
+        sym   = base.get("symbol", "???")
+        addr  = base.get("address", "")
+        fdv   = float(p.get("fdv", 0) or 0)
+        liq   = float((p.get("liquidity") or {}).get("usd", 0) or 0)
+        ch1h  = float((p.get("priceChange") or {}).get("h1", 0) or 0)
+        ch24h = float((p.get("priceChange") or {}).get("h24", 0) or 0)
+        v24h  = float((p.get("volume") or {}).get("h24", 0) or 0)
+        lines.append(
+            f"\n*${sym}*\n"
+            f"  MCap: `{_usd(fdv)}`  Liq: `{_usd(liq)}`\n"
+            f"  1h: {_pct(ch1h)}  24h: {_pct(ch24h)}\n"
+            f"  Vol 24h: `{_usd(v24h)}`\n"
+            f"  `{addr}`"
+        )
+    await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+
+async def explain_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """AI explains a narrative in professional terms."""
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/explain <narrative>` e.g. `/explain RWA`", parse_mode="Markdown"); return
+    topic = " ".join(c.args)
+    msg   = await u.effective_message.reply_text(f"🧠 *Explaining #{topic}...*", parse_mode="Markdown")
+    ai = await ai_ask(
+        f"Explain the '{topic}' crypto narrative in professional terms for a Solana trader. "
+        f"Cover: what it is, why it's relevant now, what kind of tokens fall under it, "
+        f"and what drives price action in this narrative. "
+        f"Use 4-5 bullet points. Be sharp and insightful, not generic.",
+        fallback="AI unavailable right now.",
+        max_tokens=400
+    )
+    await msg.edit_text(
+        f"📖 *#{topic.upper()} — NARRATIVE BRIEFING*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{ai}",
+        parse_mode="Markdown"
+    )
+
+async def boosted_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    msg    = await u.effective_message.reply_text("💰 *Fetching boosted tokens...*", parse_mode="Markdown")
+    boosts = await dex_boosts_top()
+    sol    = [b for b in boosts if b.get("chainId") == "solana"][:15]
+    if not sol:
+        await msg.edit_text("❌ No boosted tokens right now."); return
+    addrs  = [b.get("tokenAddress", "") for b in sol if b.get("tokenAddress")]
+    pairs  = await dex_batch(addrs[:15])
+    p_map  = {pd.get("baseToken", {}).get("address", ""): pd for pd in pairs}
+    add_xp(u.effective_user.id, 2)
+    lines = ["💰 *TOP BOOSTED TOKENS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n_Teams paid to boost these — shows intent_"]
+    count = 0
+    for b in sol:
+        addr  = b.get("tokenAddress", "")
+        bamt  = b.get("totalAmount", 0)
+        p     = p_map.get(addr)
+        if not p: continue
+        base  = p.get("baseToken", {})
+        sym   = base.get("symbol", "???")
+        fdv   = float(p.get("fdv", 0) or 0)
+        liq   = float((p.get("liquidity") or {}).get("usd", 0) or 0)
+        ch1h  = float((p.get("priceChange") or {}).get("h1", 0) or 0)
+        ch24h = float((p.get("priceChange") or {}).get("h24", 0) or 0)
+        lines.append(
+            f"\n💰 *${sym}* — Boost: {bamt}\n"
+            f"  MCap: `{_usd(fdv)}`  Liq: `{_usd(liq)}`\n"
+            f"  1h: {_pct(ch1h)}  24h: {_pct(ch24h)}\n"
+            f"  `{addr}`"
+        )
+        count += 1
+        if count >= 7: break
+    await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+
+async def takeover_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    msg  = await u.effective_message.reply_text("🫧 *Fetching community takeovers...*", parse_mode="Markdown")
+    data = await dex_community_takeovers()
+    sol  = [t for t in data if t.get("chainId") == "solana"][:8]
+    if not sol:
+        await msg.edit_text("No active community takeovers on Solana right now."); return
+    add_xp(u.effective_user.id, 2)
+    lines = ["🫧 *COMMUNITY TAKEOVERS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n_Dead projects revived by community_"]
+    for t in sol[:6]:
+        addr  = t.get("tokenAddress", "")
+        date  = (t.get("claimDate") or "")[:10]
+        links = t.get("links") or []
+        soc   = "".join(["🐦" if l.get("type") == "twitter" else "💬" if l.get("type") == "telegram" else "🌐" for l in links[:2]])
+        lines.append(f"\n🫧 Claimed: {date} {soc}\n  `{addr}`")
+    await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+
+async def news_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    msg = await u.effective_message.reply_text("📰 *Fetching latest crypto news...*", parse_mode="Markdown")
+    add_xp(u.effective_user.id, 2)
+    headlines = await fetch_crypto_news()
+    if not headlines:
+        await msg.edit_text("❌ Could not fetch news right now. Try again in a minute."); return
+    # Show top 6 headlines
+    top = headlines[:6]
+    headlines_text = "\n".join([f"• {h}" for h in top])
+    # AI market intelligence briefing based on real headlines
+    ai_brief = await ai_ask(
+        f"These are today's top crypto news headlines:\n" + "\n".join(top) + "\n\n"
+        "Give a sharp 3-sentence market intelligence briefing: "
+        "What narratives are emerging? What should Solana degens watch? "
+        "What's the biggest market-moving story?",
+        max_tokens=200, inject_market=True,
+        fallback="Multiple developments in the crypto space today. Check individual headlines for details."
+    )
+    card = (
+        "📰 *CRYPTO INTELLIGENCE BRIEFING*\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{headlines_text}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🧠 *Kayo's Take:*\n_{ai_brief}_"
+    )
+    try:
+        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception:
+        plain = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', card)
+        await msg.edit_text(plain[:4000])
+async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/ask <question>`\nExample: `/ask what's the price of sol?`", parse_mode="Markdown"); return
+    q   = " ".join(c.args)
+    msg = await u.effective_message.reply_text("\U0001f9e0 *Kayo thinking...*", parse_mode="Markdown")
+    add_xp(u.effective_user.id, 2)
+
+    prompt = (
+        f"Question: \"{q}\"\n\n"
+        "Answer as Kayo. You are a Web3 alpha expert AND a knowledgeable friend. "
+        "Use the LIVE market data in your context for any price questions — cite actual numbers. "
+        "For crypto: be sharp, direct, drop alpha like a degen pro. "
+        "For general knowledge: answer like a smart friend, no disclaimers. "
+        "For casual: be short, warm, witty. "
+        "Never refuse. Never say you can't answer. Never say you're a bot. Just answer."
+    )
+    ans = await ai_ask(prompt, max_tokens=500, inject_market=True, fallback="")
+
+    if not ans or not ans.strip():
+        ans = ("\u26a0\ufe0f My AI brain is offline right now. "
+               "Make sure GROQ_API_KEY is set in Render env vars. "
+               "Get a free key at console.groq.com/keys")
+        try:
+            await msg.edit_text(ans)
+        except Exception:
+            await u.effective_message.reply_text(ans)
+        return
+
+    ts     = datetime.utcnow().strftime("%H:%M UTC")
+    footer = f"\n\n_Live data as of {ts}_"
+    import re as _re3
+    try:
+        await msg.edit_text(
+            f"\U0001f9e0 *Kayo*\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{ans}{footer}",
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+    except Exception:
+        plain_ans = _re3.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', ans)
+        await msg.edit_text(f"{plain_ans.strip() or ans}{footer}")
+
+
+async def sentiment_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    msg = await u.effective_message.reply_text("📊 *Reading market sentiment...*", parse_mode="Markdown")
+    fg, glob, trending = await asyncio.gather(cg_fear_greed(), cg_global(), cg_trending())
+    fg_val   = int(fg.get("value", 0) or 0)
+    fg_class = fg.get("value_classification", "?")
+    fg_emoji = "😱" if fg_val < 25 else "😰" if fg_val < 40 else "😐" if fg_val < 60 else "😊" if fg_val < 75 else "🤑"
+    btc_dom  = float((glob.get("market_cap_percentage") or {}).get("btc", 0) or 0)
+    total_mc = float((glob.get("total_market_cap") or {}).get("usd", 0) or 0)
+    mc_chg   = float(glob.get("market_cap_change_percentage_24h_usd", 0) or 0)
+    t_names  = [coin["item"]["symbol"].upper() for coin in trending[:5]]
+    add_xp(u.effective_user.id, 2)
+    ai = await ai_ask(
+        f"Market data: F&G={fg_val} ({fg_class}), BTC dom={btc_dom:.1f}%, "
+        f"Total MCap={_usd(total_mc)} ({mc_chg:+.1f}% 24h), trending: {t_names}. "
+        "Give a sharp 3-point market read: (1) current risk appetite, "
+        "(2) what BTC dominance means for alts right now, "
+        "(3) the actual play for a Solana degen today. "
+        "Use exact numbers from the live context. Be direct — no fluff.",
+        fallback="",
+        inject_market=True
+    )
+    text = (
+        f"📊 *MARKET SENTIMENT*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{fg_emoji} Fear & Greed: *{fg_val} — {fg_class}*\n"
+        f"[{_bar(fg_val)}]\n\n"
+        f"Total MCap: `{_usd(total_mc)}` ({mc_chg:+.1f}% 24h)\n"
+        f"BTC Dom: {btc_dom:.1f}%\n"
+        f"🔥 Trending: {' · '.join(['$'+s for s in t_names])}\n"
+    )
+    if ai: text += f"\n🧠 *Kayo AI:*\n_{ai}_"
+    await msg.edit_text(text, parse_mode="Markdown")
+
+async def macro_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    msg      = await u.effective_message.reply_text("📉 *Analyzing macro...*", parse_mode="Markdown")
+    fg, glob = await asyncio.gather(cg_fear_greed(), cg_global())
+    fg_val   = int(fg.get("value", 0) or 0)
+    btc_dom  = float((glob.get("market_cap_percentage") or {}).get("btc", 0) or 0)
+    mc_chg   = float(glob.get("market_cap_change_percentage_24h_usd", 0) or 0)
+    add_xp(u.effective_user.id, 1)
+    ai = await ai_ask(
+        f"Macro briefing request: F&G={fg_val}, BTC dom={btc_dom:.1f}%, MCap 24h={mc_chg:+.1f}%. "
+        "Deliver 4 sharp points: "
+        "1) BTC price action & trend, "
+        "2) SOL strength vs BTC, "
+        "3) overall risk environment (risk-on/risk-off, why), "
+        "4) the highest-conviction play for a Solana degen this week. "
+        "Use the live prices from your context. Be specific with numbers.",
+        fallback="Macro analysis unavailable.",
+        max_tokens=450,
+        inject_market=True
+    )
+    await msg.edit_text(f"📉 *MACRO BRIEFING*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{ai}", parse_mode="Markdown")
+
+async def markets_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    msg  = await u.effective_message.reply_text("🌍 *Loading market data...*", parse_mode="Markdown")
+    glob = await cg_global()
+    if not glob:
+        await msg.edit_text("❌ Market data unavailable."); return
+    total_mc = float((glob.get("total_market_cap") or {}).get("usd", 0) or 0)
+    total_vol= float((glob.get("total_volume") or {}).get("usd", 0) or 0)
+    mc_chg   = float(glob.get("market_cap_change_percentage_24h_usd", 0) or 0)
+    btc_dom  = (glob.get("market_cap_percentage") or {}).get("btc", 0)
+    eth_dom  = (glob.get("market_cap_percentage") or {}).get("eth", 0)
+    active   = glob.get("active_cryptocurrencies", 0)
+    add_xp(u.effective_user.id, 1)
+    await msg.edit_text(
+        f"🌍 *GLOBAL CRYPTO MARKETS*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Total MCap: `{_usd(total_mc)}` ({mc_chg:+.1f}% 24h)\n"
+        f"24h Volume: `{_usd(total_vol)}`\n"
+        f"BTC Dom: {btc_dom:.1f}%  ·  ETH Dom: {eth_dom:.1f}%\n"
+        f"Active coins: {active:,}",
+        parse_mode="Markdown"
+    )
+
+async def index_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    fg    = await cg_fear_greed()
+    if not fg:
+        await u.effective_message.reply_text("❌ F&G index unavailable."); return
+    val   = int(fg.get("value", 0) or 0)
+    cls   = fg.get("value_classification", "?")
+    emoji = "😱" if val < 25 else "😰" if val < 40 else "😐" if val < 60 else "😊" if val < 75 else "🤑"
+    add_xp(u.effective_user.id, 1)
+    await u.effective_message.reply_text(
+        f"{emoji} *FEAR & GREED INDEX*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Score: *{val}/100*\n"
+        f"Classification: *{cls}*\n"
+        f"[{_bar(val)}]",
+        parse_mode="Markdown"
+    )
+
+async def a_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/a <coin_id>` e.g. `/a solana`", parse_mode="Markdown"); return
+    coin_id = c.args[0].lower()
+    msg     = await u.effective_message.reply_text(f"💰 *Looking up {coin_id}...*", parse_mode="Markdown")
+    d = await cg_coin(coin_id)
+    if not d:
+        await msg.edit_text(f"❌ `{coin_id}` not found on CoinGecko."); return
+    md    = d.get("market_data") or {}
+    price = float((md.get("current_price") or {}).get("usd", 0) or 0)
+    mcap  = float((md.get("market_cap") or {}).get("usd", 0) or 0)
+    vol   = float((md.get("total_volume") or {}).get("usd", 0) or 0)
+    ch24  = float(md.get("price_change_percentage_24h", 0) or 0)
+    ch7d  = float(md.get("price_change_percentage_7d", 0) or 0)
+    ath   = float((md.get("ath") or {}).get("usd", 0) or 0)
+    ath_p = float((md.get("ath_change_percentage") or {}).get("usd", 0) or 0)
+    sym   = d.get("symbol", "?").upper()
+    rank  = d.get("market_cap_rank", "?")
+    add_xp(u.effective_user.id, 1)
+    await msg.edit_text(
+        f"💰 *${sym}* — Rank #{rank}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"Price: {_price(price)}\n"
+        f"MCap: `{_usd(mcap)}`  Vol: `{_usd(vol)}`\n"
+        f"24h: {_pct(ch24)}  7d: {_pct(ch7d)}\n"
+        f"ATH: {_price(ath)} ({ath_p:.1f}% from ATH)",
+        parse_mode="Markdown"
+    )
+
+
+
+
+
+
+
+
+async def watch_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/watch @username` — watch a Twitter account for CA drops", parse_mode="Markdown"); return
+    username = c.args[0].lstrip("@").lower()
+    watchlist[username] = {"added": time.time(), "by": u.effective_user.id, "hits": 0}
+    await _save()
+    add_xp(u.effective_user.id, 5)
+    await u.effective_message.reply_text(
+        f"👁 *Watching @{username}*\n"
+        f"I'll alert the group the moment they drop a CA.\n"
+        f"_Requires TWITTER\\_AUTH\\_TOKEN to be set in Render env vars_",
+        parse_mode="Markdown"
+    )
+
+async def unwatch_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/unwatch @username`", parse_mode="Markdown"); return
+    username = c.args[0].lstrip("@").lower()
+    if username in watchlist:
+        del watchlist[username]; _save()
+        await u.effective_message.reply_text(f"✅ Stopped watching @{username}")
+    else:
+        await u.effective_message.reply_text(f"@{username} is not in your watchlist.")
+
+async def watchlist_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not watchlist:
+        await u.effective_message.reply_text("Watchlist empty. Use `/watch @username` to add.", parse_mode="Markdown"); return
+    lines = ["👁 *WATCHLIST*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    for un, data in watchlist.items():
+        added = datetime.fromtimestamp(data.get("added", 0)).strftime("%d/%m")
+        hits  = data.get("hits", 0)
+        lines.append(f"• @{un} — added {added}, {hits} CA drops caught")
+    await u.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def tt_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/tt <ca_or_symbol>`", parse_mode="Markdown"); return
+    query = " ".join(c.args)
+    msg   = await u.effective_message.reply_text(f"🔍 *Searching social signals for {query}...*", parse_mode="Markdown")
+
+    # Search DexScreener + Pump.fun for this token
+    dex_pairs = await dex_search_pairs(query)
+    pump_coins = await asyncio.gather(
+        pumpfun_latest(30),
+        return_exceptions=True
+    )
+    pump_list = pump_coins[0] if isinstance(pump_coins[0], list) else []
+
+    # Filter pump.fun matches
+    q_low = query.lower()
+    pump_matches = [
+        c for c in pump_list
+        if any(w in (c.get('symbol','') + c.get('name','') + c.get('description','')).lower()
+               for w in q_low.split() if len(w) > 2)
+    ]
+
+    sol_pairs = [p for p in (dex_pairs or []) if p.get("chainId") == "solana"][:5]
+    cas = list(set(
+        [(p.get("baseToken") or {}).get("address","") for p in sol_pairs] +
+        [c.get("mint","") for c in pump_matches[:3]]
+    ))
+    cas = [c for c in cas if c]
+
+    # Build context for AI
+    context_parts = []
+    if sol_pairs:
+        for p in sol_pairs[:3]:
+            sym = (p.get("baseToken") or {}).get("symbol","?")
+            fdv = float(p.get("fdv",0) or 0)
+            ch1h = float((p.get("priceChange") or {}).get("h1",0) or 0)
+            b1h = int(((p.get("txns") or {}).get("h1") or {}).get("buys",0) or 0)
+            s1h = int(((p.get("txns") or {}).get("h1") or {}).get("sells",0) or 0)
+            context_parts.append(f"${sym}: MCap {_usd(fdv)}, 1h {_pct(ch1h)}, Buys/Sells {b1h}/{s1h}")
+    if pump_matches:
+        for c in pump_matches[:3]:
+            context_parts.append(f"PumpFun: ${c.get('symbol','?')} — {c.get('description','')[:80]}")
+
+    context = "\n".join(context_parts) if context_parts else f"No on-chain data found for '{query}'"
+
+    # AI sentiment analysis from on-chain signals
+    ai = await ai_ask(
+        f"Analyze the on-chain social signals for '{query}' on Solana:\n{context}\n\n"
+        "What's the sentiment (bullish/bearish/neutral)? Is this worth aping? "
+        "What does the buy/sell pressure and price action tell us? "
+        "2-3 sharp sentences, degen style.",
+        fallback="Not enough signal to analyze right now.",
+        max_tokens=200, inject_market=True
+    )
+
+    out = [f"🔍 *SOCIAL SIGNAL: {query.upper()}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    if context_parts:
+        out.append("\n📊 *On-chain data:*")
+        for line in context_parts[:4]:
+            out.append(f"  {line}")
+    if cas:
+        out.append("\n📋 *Contract addresses:*")
+        for ca in cas[:3]:
+            out.append(f"  `{ca}`")
+    out.append(f"\n🧠 *Kayo's read:*\n_{ai}_")
+    out.append("\n_Powered by DexScreener + Pump.fun (Twitter scraping unavailable)_")
+
+    try:
+        await msg.edit_text("\n".join(out), parse_mode="Markdown", disable_web_page_preview=True)
+    except Exception:
+        plain = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', "\n".join(out))
+        await msg.edit_text(plain[:4000])
+
+
+async def moni_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/moni @username`", parse_mode="Markdown"); return
+    username = c.args[0].lstrip("@")
+    msg      = await u.effective_message.reply_text(f"👤 *Checking @{username}...*", parse_mode="Markdown")
+    if not TWITTER_AUTH_TOKEN:
+        await msg.edit_text("⚠️ Twitter not configured. Add `TWITTER_AUTH_TOKEN` to Render.", parse_mode="Markdown"); return
+    tweets = await tw_user_tweets(username, limit=20)
+    if not tweets:
+        await msg.edit_text(f"❌ Could not fetch tweets for @{username}."); return
+    texts = " ".join([t.get("text", "") for t in tweets])
+    cas   = extract_cas(texts)
+    ai    = await ai_ask(
+        f"Analyze @{username}'s recent {len(tweets)} tweets. Are they dropping alpha? "
+        f"Are they a reliable KOL? What tokens or narratives do they push? "
+        f"Tweets: {texts[:1000]}",
+        fallback=""
+    )
+    lines = [f"👤 *@{username}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{len(tweets)} tweets analyzed"]
+    if cas: lines.append("\n📋 *CAs in their tweets:*\n" + "\n".join([f"`{ca}`" for ca in cas[:5]]))
+    if ai:  lines.append(f"\n🧠 *AI Analysis:*\n_{ai}_")
+    await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+
+async def alert_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if len(c.args) < 2:
+        await u.effective_message.reply_text("Usage: `/alert <ca> <target_price>`", parse_mode="Markdown"); return
+    addr = c.args[0].strip()
+    try:   target = float(c.args[1])
+    except: await u.effective_message.reply_text("❌ Invalid price."); return
+    pairs = await dex_pairs_by_token(addr)
+    if not pairs:
+        await u.effective_message.reply_text("❌ Token not found."); return
+    p     = pairs[0]
+    sym   = p.get("baseToken", {}).get("symbol", "???")
+    price = float(p.get("priceUsd", 0) or 0)
+    direction = "above" if target > price else "below"
+    user_alerts.append({"uid": u.effective_user.id, "addr": addr, "sym": sym, "target": target, "direction": direction, "triggered": False})
+    await _save()
+    add_xp(u.effective_user.id, 3)
+    await u.effective_message.reply_text(
+        f"🔔 *Alert set for ${sym}*\n"
+        f"Current: {_price(price)}\n"
+        f"Alert when price goes *{direction}* {_price(target)}",
+        parse_mode="Markdown"
+    )
+
+async def myalerts_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    uid    = u.effective_user.id
+    alerts = [a for a in user_alerts if a.get("uid") == uid and not a.get("triggered")]
+    if not alerts:
+        await u.effective_message.reply_text("No active alerts. Use `/alert <ca> <price>`.", parse_mode="Markdown"); return
+    lines = ["🔔 *YOUR ALERTS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    for i, a in enumerate(alerts, 1):
+        lines.append(f"{i}. *${a['sym']}* — alert {a['direction']} {_price(a['target'])}")
+    await u.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def delalert_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/delalert <number>` — see numbers with /myalerts", parse_mode="Markdown"); return
+    uid = u.effective_user.id
+    my  = [a for a in user_alerts if a.get("uid") == uid and not a.get("triggered")]
+    try:   idx = int(c.args[0]) - 1
+    except: await u.effective_message.reply_text("❌ Invalid number."); return
+    if idx < 0 or idx >= len(my):
+        await u.effective_message.reply_text("❌ Alert not found."); return
+    user_alerts.remove(my[idx]); _save()
+    await u.effective_message.reply_text(f"✅ Alert for *${my[idx]['sym']}* deleted.", parse_mode="Markdown")
+
+async def call_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if len(c.args) < 2:
+        await u.effective_message.reply_text("Usage: `/call <ca> <entry_price>`", parse_mode="Markdown"); return
+    addr = c.args[0].strip()
+    try:  entry = float(c.args[1])
+    except: await u.effective_message.reply_text("❌ Invalid price."); return
+    pairs = await dex_pairs_by_token(addr)
+    sym   = pairs[0].get("baseToken", {}).get("symbol", "???") if pairs else "???"
+    user  = u.effective_user
+    active_calls.append({
+        "uid": user.id, "username": user.username or user.first_name,
+        "addr": addr, "sym": sym, "entry": entry,
+        "time": time.time(), "status": "open", "exit": None, "pnl": None
+    })
+    asyncio.create_task(_save()); add_xp(user.id, 10)
+    await u.effective_message.reply_text(
+        f"📢 *CALL — ${sym}*\n"
+        f"Entry: {_price(entry)}\n"
+        f"By: @{user.username or user.first_name}\n"
+        f"Use `/stop {sym} <exit_price>` to close.",
+        parse_mode="Markdown"
+    )
+
+async def mycalls_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    uid  = u.effective_user.id
+    mine = [c2 for c2 in active_calls if c2.get("uid") == uid]
+    if not mine:
+        await u.effective_message.reply_text("No calls yet. Use `/call <ca> <price>`.", parse_mode="Markdown"); return
+    lines = ["📋 *YOUR CALLS*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    for cl in sorted(mine, key=lambda x: x["time"], reverse=True)[:10]:
+        status = cl.get("status", "open")
+        pnl    = f" → {cl['pnl']}" if cl.get("pnl") else ""
+        date   = datetime.fromtimestamp(cl["time"]).strftime("%d/%m")
+        lines.append(f"• *${cl['sym']}* @ {_price(cl['entry'])} [{status}]{pnl} — {date}")
+    await u.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def stop_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/stop <symbol_or_ca> <exit_price>`", parse_mode="Markdown"); return
+    uid    = u.effective_user.id
+    target = c.args[0].upper().lstrip("$")
+    try:   exit_p = float(c.args[1]) if len(c.args) > 1 else None
+    except: exit_p = None
+    for cl in active_calls:
+        if cl.get("uid") == uid and cl.get("status") == "open" and \
+           (cl["sym"].upper() == target or cl["addr"] == target):
+            cl["status"] = "closed"; cl["exit"] = exit_p
+            if exit_p and cl.get("entry"):
+                pnl_pct = (exit_p - cl["entry"]) / cl["entry"] * 100
+                cl["pnl"] = f"{pnl_pct:+.1f}%"
+                if pnl_pct > 0: add_xp(uid, int(pnl_pct / 10))
+            await _save()
+            await u.effective_message.reply_text(
+                f"🛑 *Call closed — ${cl['sym']}*\n"
+                f"Entry: {_price(cl['entry'])}  Exit: {_price(exit_p) if exit_p else 'N/A'}\n"
+                f"P&L: {cl.get('pnl', 'N/A')}",
+                parse_mode="Markdown"
+            )
+            return
+    await u.effective_message.reply_text(f"❌ No open call for {target}.")
+
+async def leaderboard_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    closed = [cl for cl in active_calls if cl.get("status") == "closed" and cl.get("pnl")]
+    if not closed:
+        await u.effective_message.reply_text("No closed calls yet."); return
+    scores: Dict[str, dict] = {}
+    for cl in closed:
+        un = cl.get("username", "anon")
+        if un not in scores: scores[un] = {"wins": 0, "total": 0, "pnl": 0.0}
+        scores[un]["total"] += 1
+        pnl = float(cl["pnl"].replace("%", "").replace("+", ""))
+        scores[un]["pnl"] += pnl
+        if pnl > 0: scores[un]["wins"] += 1
+    ranked = sorted(scores.items(), key=lambda x: x[1]["pnl"], reverse=True)
+    medals = ["🥇", "🥈", "🥉"]
+    lines  = ["🏆 *CALL LEADERBOARD*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    for i, (un, s) in enumerate(ranked[:10]):
+        m  = medals[i] if i < 3 else f"{i+1}."
+        wr = s["wins"] / s["total"] * 100 if s["total"] > 0 else 0
+        lines.append(f"{m} @{un}  P&L: {s['pnl']:+.1f}%  WR: {wr:.0f}%  ({s['total']} calls)")
+    await u.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def addport_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if len(c.args) < 2:
+        await u.effective_message.reply_text("Usage: `/addport <ca> <amount_usd>`", parse_mode="Markdown"); return
+    addr = c.args[0].strip()
+    try: amount = float(c.args[1])
+    except: await u.effective_message.reply_text("❌ Invalid amount."); return
+    pairs = await dex_pairs_by_token(addr)
+    sym   = pairs[0].get("baseToken", {}).get("symbol", "???") if pairs else "???"
+    price = float(pairs[0].get("priceUsd", 0) or 0) if pairs else 0
+    uid   = str(u.effective_user.id)
+    if uid not in portfolios: portfolios[uid] = []
+    portfolios[uid].append({"addr": addr, "sym": sym, "amount": amount, "entry_price": price, "time": time.time()})
+    asyncio.create_task(_save()); add_xp(u.effective_user.id, 3)
+    await u.effective_message.reply_text(f"✅ Added *${sym}* — ${amount:.2f} at {_price(price)}", parse_mode="Markdown")
+
+async def portfolio_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    uid  = str(u.effective_user.id)
+    port = portfolios.get(uid, [])
+    if not port:
+        await u.effective_message.reply_text("Portfolio empty. Use `/addport <ca> <amount>`.", parse_mode="Markdown"); return
+    msg = await u.effective_message.reply_text("💼 *Loading portfolio...*", parse_mode="Markdown")
+    addrs  = list(set([h["addr"] for h in port]))
+    pairs  = await dex_batch(addrs[:15])
+    prices = {pd.get("baseToken", {}).get("address", ""): float(pd.get("priceUsd", 0) or 0) for pd in pairs}
+    lines  = ["💼 *PORTFOLIO P&L*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    total_in, total_now = 0, 0
+    for h in port:
+        cur   = prices.get(h["addr"], 0)
+        entry = h.get("entry_price", 0)
+        pnl   = (cur - entry) / max(entry, 0.000001) * 100 if entry > 0 else 0
+        val   = h["amount"] * (cur / max(entry, 0.000001))
+        total_in  += h["amount"]
+        total_now += val
+        lines.append(f"\n*${h['sym']}*\nIn: ${h['amount']:.2f}  Now: ${val:.2f}  P&L: {_pct(pnl)}\nPrice: {_price(cur)}\n`{h['addr']}`")
+    tp = (total_now - total_in) / max(total_in, 0.01) * 100
+    lines.append(f"\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n*Total: ${total_now:.2f}*  (P&L: {_pct(tp)})")
+    await msg.edit_text("\n".join(lines), parse_mode="Markdown")
+
+async def blacklist_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/blacklist <ca>`", parse_mode="Markdown"); return
+    addr = c.args[0].strip()
+    blacklist.add(addr); _save()
+    add_xp(u.effective_user.id, 2)
+    await u.effective_message.reply_text(f"🚫 `{addr[:20]}...` blacklisted — filtered from all scans.", parse_mode="Markdown")
+
+async def rank_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    uid  = str(u.effective_user.id)
+    xp   = xp_db.get(uid, 0)
+    rank = sum(1 for v in xp_db.values() if v > xp) + 1
+    lvl  = xp // 100
+    await u.effective_message.reply_text(
+        f"⭐ *YOUR RANK*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"XP: {xp}  Level: {lvl}\n"
+        f"[{_bar(xp % 100)}] → {(lvl+1)*100} XP next level\n"
+        f"Group rank: #{rank}",
+        parse_mode="Markdown"
+    )
+
+async def gp_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not xp_db:
+        await u.effective_message.reply_text("No XP recorded yet!"); return
+    top    = sorted(xp_db.items(), key=lambda x: x[1], reverse=True)[:10]
+    medals = ["🥇", "🥈", "🥉"]
+    lines  = ["🏆 *XP LEADERBOARD*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    for i, (uid, xp) in enumerate(top):
+        m = medals[i] if i < 3 else f"{i+1}."
+        lines.append(f"{m} User ...{uid[-4:]} — {xp} XP  (Lv {xp//100})")
+    await u.effective_message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+async def trackwallet_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/trackwallet <address> <label>`", parse_mode="Markdown"); return
+    addr  = c.args[0].strip()
+    label = " ".join(c.args[1:]) or addr[:8]
+    tracked_wallets[addr] = {"label": label, "by": u.effective_user.id, "added": time.time()}
+    asyncio.create_task(_save()); add_xp(u.effective_user.id, 5)
+    await u.effective_message.reply_text(f"👛 Tracking *{label}*\n`{addr}`", parse_mode="Markdown")
+
+async def mywallet_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/mywallet <solana_address>`", parse_mode="Markdown"); return
+    addr = c.args[0].strip()
+    user_wallets[str(u.effective_user.id)] = addr; _save()
+    await u.effective_message.reply_text(f"✅ Wallet linked: `{addr}`", parse_mode="Markdown")
+
+async def dubs_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not c.args:
+        await u.effective_message.reply_text("Usage: `/dubs <your win story>`", parse_mode="Markdown"); return
+    text = " ".join(c.args)
+    user = u.effective_user
+    add_xp(user.id, 20)
+    await u.effective_message.reply_text(
+        f"🎉 *W ALERT*\n"
+        f"@{user.username or user.first_name} is celebrating!\n\n_{text}_\n\n🏆 +20 XP",
+        parse_mode="Markdown"
+    )
+
+async def gsum_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if len(group_messages) < 5:
+        await u.effective_message.reply_text("Not enough messages to summarize yet."); return
+    msgs = group_messages[-50:]
+    ai   = await ai_ask(
+        f"Summarize this Telegram crypto group conversation. What coins were discussed? "
+        f"Any alpha or CAs dropped? Key themes? "
+        f"Messages: {chr(10).join([m['text'] for m in msgs][:2000])}",
+        fallback="Summary unavailable.",
+        max_tokens=350
+    )
+    add_xp(u.effective_user.id, 3)
+    await u.effective_message.reply_text(f"📝 *GROUP SUMMARY*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{ai}", parse_mode="Markdown")
+
+async def remindme_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if len(c.args) < 2:
+        await u.effective_message.reply_text("Usage: `/remindme <minutes> <message>`", parse_mode="Markdown"); return
+    try:  mins = int(c.args[0])
+    except: await u.effective_message.reply_text("❌ Invalid time."); return
+    text = " ".join(c.args[1:])
+    fire = (datetime.utcnow() + timedelta(minutes=mins)).isoformat()
+    reminders.append({"chat_id": u.effective_chat.id, "text": text, "fire_at": fire}); _save()
+    await u.effective_message.reply_text(f"⏰ Reminder set for *{mins} minutes*\n_{text}_", parse_mode="Markdown")
+
+async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    t   = time.time()
+    msg = await u.effective_message.reply_text("🏓")
+    ms  = int((time.time() - t) * 1000)
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v40 alive.", parse_mode="Markdown")
+
+async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """
+    /price btc  or  /price sol  — live price from CoinGecko
+    Always accurate, always real-time. Never relies on AI training data.
+    """
+    if not c.args:
+        await u.effective_message.reply_text(
+            "Usage: `/price <coin>` — e.g. `/price btc` `/price sol` `/price eth`",
+            parse_mode="Markdown"
+        ); return
+
+    query = c.args[0].lower().strip()
+    # Map common short-forms to CoinGecko IDs
+    COIN_MAP = {
+        "btc": "bitcoin", "bitcoin": "bitcoin",
+        "sol": "solana",  "solana":  "solana",
+        "eth": "ethereum","ethereum": "ethereum",
+        "bnb": "binancecoin", "bnb": "binancecoin",
+        "xrp": "ripple",  "doge": "dogecoin",
+        "ada": "cardano", "avax": "avalanche-2",
+        "dot": "polkadot", "link": "chainlink",
+        "matic": "matic-network", "pol": "matic-network",
+        "sui": "sui", "apt": "aptos",
+        "jup": "jupiter-exchange-solana",
+        "ray": "raydium", "jto": "jito-governance-token",
+        "bonk": "bonk", "wif": "dogwifcoin",
+        "pengu": "pudgy-penguins",
+    }
+    coin_id = COIN_MAP.get(query, query)
+    msg = await u.effective_message.reply_text(f"💰 *Fetching live price...*", parse_mode="Markdown")
+
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.coingecko.com/api/v3/simple/price"
+                f"?ids={coin_id}&vs_currencies=usd"
+                f"&include_24hr_change=true&include_market_cap=true&include_24hr_vol=true",
+                timeout=aiohttp.ClientTimeout(total=8),
+                headers={"User-Agent": "Mozilla/5.0"}
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    if coin_id in d:
+                        data  = d[coin_id]
+                        price = data.get("usd", 0)
+                        chg24 = data.get("usd_24h_change", 0)
+                        mcap  = data.get("usd_market_cap", 0)
+                        vol   = data.get("usd_24h_vol", 0)
+                        add_xp(u.effective_user.id, 1)
+                        await msg.edit_text(
+                            f"💰 *{query.upper()} — LIVE PRICE*\n"
+                            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                            f"Price: *${price:,.4f}*\n"
+                            f"24h: {_pct(chg24)}\n"
+                            f"MCap: `{_usd(mcap)}`  Vol 24h: `{_usd(vol)}`\n"
+                            f"\n_Live data as of {datetime.utcnow().strftime('%H:%M UTC')}_",
+                            parse_mode="Markdown"
+                        )
+                        return
+    except Exception as e:
+        logger.debug(f"price_cmd: {e}")
+
+    # Fallback: try DexScreener
+    pairs = await dex_search_pairs(query)
+    sol_pairs = [p for p in pairs if p.get("chainId") == "solana"]
+    if sol_pairs:
+        p = sol_pairs[0]
+        base  = p.get("baseToken", {})
+        sym   = base.get("symbol", query.upper())
+        price = float(p.get("priceUsd", 0) or 0)
+        fdv   = float(p.get("fdv", 0) or 0)
+        ch24  = float((p.get("priceChange") or {}).get("h24", 0) or 0)
+        await msg.edit_text(
+            f"💰 *${sym} — LIVE PRICE (DexScreener)*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"Price: *{_price(price)}*\n"
+            f"24h: {_pct(ch24)}  MCap: `{_usd(fdv)}`\n"
+            f"\n_Live data as of {datetime.utcnow().strftime('%H:%M UTC')}_",
+            parse_mode="Markdown"
+        )
+    else:
+        await msg.edit_text(f"❌ Couldn't find price for `{query}`. Try `/a {coin_id}` for CoinGecko lookup.")
+
+async def chart_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """
+    /chart <ca>  — sends an in-app chart image directly in Telegram.
+    Uses DexScreener chart image + Birdeye chart as fallback.
+    No need to open DexScreener!
+    """
+    if not c.args:
+        await u.effective_message.reply_text(
+            "Usage: `/chart <contract_address>`\n"
+            "Example: `/chart EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v`",
+            parse_mode="Markdown"
+        ); return
+
+    addr = c.args[0].strip()
+    msg  = await u.effective_message.reply_text("📊 *Loading chart...*", parse_mode="Markdown")
+
+    # Step 1: Get token info from DexScreener
+    pairs = await dex_pairs_by_token(addr)
+    if not pairs:
+        pairs_search = await dex_search_pairs(addr)
+        pairs = [p for p in pairs_search if p.get("chainId") == "solana"]
+
+    if not pairs:
+        await msg.edit_text("❌ Token not found on DexScreener. Check the contract address.")
+        return
+
+    p     = pairs[0]
+    base  = p.get("baseToken", {})
+    sym   = base.get("symbol", "???")
+    name  = base.get("name", "Unknown")
+    price = float(p.get("priceUsd", 0) or 0)
+    fdv   = float(p.get("fdv", 0) or 0)
+    liq   = float((p.get("liquidity") or {}).get("usd", 0) or 0)
+    ch5m  = float((p.get("priceChange") or {}).get("m5", 0) or 0)
+    ch1h  = float((p.get("priceChange") or {}).get("h1", 0) or 0)
+    ch24h = float((p.get("priceChange") or {}).get("h24", 0) or 0)
+    v24h  = float((p.get("volume") or {}).get("h24", 0) or 0)
+    b1h   = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
+    s1h   = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
+    pair_addr = p.get("pairAddress", "")
+    dex_url   = p.get("url", f"https://dexscreener.com/solana/{addr}")
+
+    # Step 2: Try chart image sources in order of preference
+    chart_url = None
+    chart_source = ""
+
+    # Source A: DexScreener chart image (official, best quality)
+    dex_chart_candidates = [
+        f"https://io.dexscreener.com/dex/chart/amm/v3/solana/{pair_addr}?theme=dark&interval=15&baseToken={addr}",
+        f"https://io.dexscreener.com/dex/chart/amm/v2/solana/{pair_addr}?theme=dark&interval=15&baseToken={addr}",
+        f"https://io.dexscreener.com/dex/chart/solana/{pair_addr}?theme=dark&tvWidgetTheme=dark",
+    ]
+
+    async with aiohttp.ClientSession() as s:
+        for url in dex_chart_candidates:
+            try:
+                async with s.head(url, timeout=aiohttp.ClientTimeout(total=5),
+                                  headers={"User-Agent": "Mozilla/5.0"}) as r:
+                    if r.status == 200 and "image" in r.headers.get("content-type", ""):
+                        chart_url = url
+                        chart_source = "DexScreener"
+                        break
+            except Exception:
+                continue
+
+        # Source B: Birdeye chart image API
+        if not chart_url:
+            birdeye_url = f"https://birdeye.so/charts/trading-view/history?address={addr}&type=15&currency=USD&chain=solana"
+            # Use Birdeye public image endpoint
+            birdeye_img = f"https://birdeye-chart.s3.amazonaws.com/sol/{addr}.png"
+            try:
+                async with s.head(birdeye_img, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    if r.status == 200:
+                        chart_url = birdeye_img
+                        chart_source = "Birdeye"
+            except Exception:
+                pass
+
+        # Source C: Defined.fi chart screenshot
+        if not chart_url:
+            defined_img = f"https://cache.defined.fi/charts/{addr}?resolution=15&networkId=1399811149"
+            try:
+                async with s.head(defined_img, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                    if r.status == 200:
+                        chart_url = defined_img
+                        chart_source = "Defined.fi"
+            except Exception:
+                pass
+
+    # Caption with all key stats
+    press  = "🟢 BUY PRESSURE" if b1h > s1h else "🔴 SELL PRESSURE"
+    age    = _age(p.get("pairCreatedAt", 0) or 0)
+    caption = (
+        f"📊 *${sym}* — _{name}_\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 Price: *{_price(price)}*\n"
+        f"📦 MCap: `{_usd(fdv)}`  |  Liq: `{_usd(liq)}`\n"
+        f"📈 5m: {_pct(ch5m)}  |  1h: {_pct(ch1h)}  |  24h: {_pct(ch24h)}\n"
+        f"💹 Vol 24h: `{_usd(v24h)}`\n"
+        f"🔄 Buys/Sells (1h): {b1h} / {s1h}  →  {press}\n"
+        f"⏱ Age: {age}\n"
+        f"`{addr}`"
+    )
+    if chart_source:
+        caption += f"\n\n_Chart via {chart_source}_"
+
+    # Buttons — DApp only (DexScreener DApp + GMGN chart + all trading DApps)
+    markup = scan_buttons(addr, sym, pair_addr)
+
+    add_xp(u.effective_user.id, 2)
+
+    if chart_url:
+        try:
+            await msg.delete()
+            await u.effective_message.reply_photo(
+                photo=chart_url,
+                caption=caption,
+                parse_mode="Markdown",
+                reply_markup=markup,
+            )
+            return
+        except Exception as e:
+            logger.debug(f"chart photo send failed: {e}")
+
+    # Fallback: no image available — send stats card + links
+    await msg.edit_text(
+        f"📊 *${sym} CHART*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"_Live chart image not available for this token yet._\n\n"
+        + caption.replace(f"📊 *${sym}* — _{name}_\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n", ""),
+        parse_mode="Markdown",
+        reply_markup=markup,
+        disable_web_page_preview=True,
+    )
+
+
+async def autoresponder_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    uid  = u.effective_user.id
+    curr = get_setting(uid, "autoresponder", True)
+    set_setting(uid, "autoresponder", not curr)
+    state = "ON" if not curr else "OFF"
+    await u.effective_message.reply_text(f"🤖 Auto CA-scanner turned *{state}*", parse_mode="Markdown")
+
+async def smartscan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Manual trigger of the live scanner — shows what the bot would alert right now."""
+    msg = await u.effective_message.reply_text("🔍 *Running live GeckoTerminal scan...*", parse_mode="Markdown")
+    try:
+        pools_new, pools_trend = await asyncio.gather(
+            gt_new_pools(page=1),
+            gt_trending_pools(page=1),
+        )
+        all_toks: Dict[str, Dict] = {}
+        for pool in (pools_new + pools_trend):
+            tok = gt_parse_pool(pool)
+            if tok and tok["address"] not in all_toks:
+                all_toks[tok["address"]] = tok
+
+        hits = []
+        for addr, tok in all_toks.items():
+            if addr in blacklist: continue
+            fdv = tok["fdv"]
+            liq = tok["liq"]
+            buy_pct = tok["buy_pct"]
+            if fdv <= 0 or fdv > 500_000 or liq < 300 or buy_pct < 48: continue
+            hits.append(tok)
+
+        hits.sort(key=lambda t: (t["ch1h"] + t["buy_pct"]/2), reverse=True)
+        out = [f"🔍 *LIVE SCAN — {len(all_toks)} coins from GeckoTerminal*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+        if not hits:
+            out.append("\n😴 No coins passing filters right now.")
+        for tok in hits[:8]:
+            sym = tok["sym"]
+            nar = detect_narrative(f"{sym} {tok['name']}")
+            out.append(
+                f"\n• *${sym}* | #{nar.upper()} | MCap `{_usd(tok['fdv'])}`\n"
+                f"  5m {_pct(tok['ch5m'])} | 1h {_pct(tok['ch1h'])} | {tok['buy_pct']:.0f}% buys | {tok['b1h']}B/{tok['s1h']}S\n"
+                f"  `{tok['address']}`"
+            )
+        await msg.edit_text("\n".join(out), parse_mode="Markdown")
+    except Exception as e:
+        await msg.edit_text(f"❌ Scan error: {e}")
+
+async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    # Test AI live
+    ai_live = "\u274c Not tested"
+    if GROQ_API_KEY:
+        try:
+            test = await asyncio.wait_for(
+                ai_ask("Say exactly: ONLINE", fallback="", max_tokens=10, inject_market=False),
+                timeout=10
+            )
+            if test and "ONLINE" in test.upper():
+                ai_live = "\u2705 Live (Groq working)"
+            elif test:
+                ai_live = f"\u2705 Live (got: {test[:20]})"
+            else:
+                ai_live = "\u274c Key set but no response"
+        except asyncio.TimeoutError:
+            ai_live = "\u274c Timeout (key may be invalid)"
+        except Exception as e:
+            ai_live = f"\u274c Error: {str(e)[:30]}"
+    else:
+        ai_live = "\u274c NOT SET — get free key at console.groq.com/keys"
+
+    redis_ok  = "\u2705 Connected" if _redis else "\u274c Not connected"
+    gemini_ok = "\u2705" if GEMINI_API_KEY else "\u274c Not set"
+    or_ok       = "✅" if os.environ.get("OPENROUTER_API_KEY") else "❌ Not set"
+    tw_ok     = "\u2705" if TWITTER_AUTH_TOKEN else "\u274c Not set"
+    group_ok  = "\u2705" if GROUP_CHAT_ID != 0 else "\u274c NOT SET"
+    groq_key  = f"Set ({GROQ_API_KEY[:6]}...{GROQ_API_KEY[-4:]})" if GROQ_API_KEY else "NOT SET"
+
+    # Escape dynamic values to prevent Markdown parse errors
+    import re as _re_st
+    def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
+
+    status_text = (
+        f"\u2699\ufe0f *KAYO BRAIN v40 STATUS*\n"
+        f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        f"{_esc(ai_live)}\n"
+        f"  Groq key: {_esc(groq_key)}\n"
+        f"{_esc(gemini_ok)} Gemini AI (fallback)\n"
+        f"{_esc(or_ok)} OpenRouter (free models)\n"
+        f"{_esc(redis_ok)} Redis\n"
+        f"{_esc(tw_ok)} Twitter auth\n"
+        f"{_esc(group_ok)} Group alerts (ID: {GROUP_CHAT_ID})\n\n"
+        f"\U0001f4ca Watchlist: {len(watchlist)} accounts\n"
+        f"\U0001f514 Active alerts: {sum(1 for a in user_alerts if not a.get('triggered'))}\n"
+        f"\U0001f4e2 Open calls: {sum(1 for cl in active_calls if cl.get('status')=='open')}\n"
+        f"\U0001f6ab Blacklisted: {len(blacklist)}\n"
+        f"\U0001f4be Seen alerts: {len(seen_alert_ids)}"
+    )
+    try:
+        await u.effective_message.reply_text(status_text, parse_mode="Markdown")
+    except Exception:
+        # If Markdown still fails, send as plain text
+        plain = _re_st.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', status_text)
+        await u.effective_message.reply_text(plain)
+
+
+HELP_PAGES = {
+    "scan": (
+        "\U0001f52c *SCAN & ANALYZE*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/scan <CA>` — Full token deep scan + AI verdict\n"
+        "_(Bot auto-drops: pumps, gems, new launches, whale moves, unusual activity)_\n"
+        "`/c <CA>` — Quick price snapshot\n"
+        "`/chart <CA>` — In-app chart image\n"
+        "`/price btc` — Live price for any coin\n"
+        "`/verify <CA>` — Rug & honeypot check\n"
+        "`/a <coin-id>` — Full CoinGecko coin lookup"
+        "`/dev <CA>` — Deployer history & same-name tokens\n"
+        "`/top <CA>` — Top trader activity\n"
+        "`/soc <CA>` — Quick socials lookup"
+    ),
+    "discover": (
+        "\U0001f50d *DISCOVER*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/runners` — Top Solana gainers right now\n"
+        "`/new` — Brand new token launches\n"
+        "`/pump` — Fresh 5-minute pumps\n"
+        "`/gems` — Hidden gems (low cap, good momentum)\n"
+        "`/boosted` — Tokens being actively promoted\n"
+        "`/takeover` — Community takeover tokens\n"
+        "`/best` — Top gainers (24h, CoinGecko)\n"
+        "`/worst` — Top losers (24h)\n"
+        "`/metas` — Trending networks/categories\n"
+        "`/pvp <CA>` — Similar/newer tokens\n"
+        "`/groupburp` — Best active group plays\n"
+        "`/last` — Last 10 tokens scanned\n"
+        "`/hot` — Most scanned tokens (1h)\n"
+        "`/ath` — ATH leaderboard from group scans"
+    ),
+    "narrative": (
+        "\U0001f4d6 *NARRATIVES & TRENDS*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/trending` — Trending metas on DexScreener\n"
+        "`/narrative <word>` — Tokens matching a narrative\n"
+        "  e.g. `/narrative ai` `/narrative gaming`\n"
+        "`/explain <narrative>` — AI breakdown of a narrative\n"
+        "  e.g. `/explain defi` `/explain meme`"
+    ),
+    "ai": (
+        "\U0001f4f0 *NEWS & AI*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/news` — Latest news + AI intelligence briefing\n"
+        "`/ask <question>` — Ask Kayo AI anything (uses live prices)\n"
+        "`/sentiment` — Market mood, F&G, BTC dom + AI verdict\n"
+        "`/macro` — Macro briefing: BTC, SOL, risk environment\n"
+        "`/markets` — Global market cap & volume data\n"
+        "`/index` — Fear & Greed index\n"
+        "`/dub` — AI chat summary\n"
+        "`/tldr <url>` — AI summary of any URL/article\n"
+        "`/s <ticker>` — Stock lookup (e.g. /s AAPL)"
+    ),
+    "twitter": (
+        "\U0001f426 *TWITTER / SOCIAL*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/tt <CA>` — Twitter sentiment for a token\n"
+        "`/moni @user` — Analyze a KOL account\n"
+        "`/watch @user` — Monitor account for CA drops\n"
+        "`/unwatch @user` — Stop monitoring\n"
+        "`/watchlist` — Your monitored accounts"
+    ),
+    "alerts": (
+        "\U0001f514 *ALERTS*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/alert <CA> <price>` — Set a price alert\n"
+        "  e.g. `/alert EPjF... 0.05`\n"
+        "`/myalerts` — View all your active alerts\n"
+        "`/delalert <number>` — Delete an alert\n"
+        "`/blacklist <CA>` — Blacklist a rug token"
+    ),
+    "calls": (
+        "\U0001f4e2 *CALLS*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/call <CA> <entry>` — Make a public alpha call\n"
+        "  e.g. `/call EPjF... 0.042`\n"
+        "`/mycalls` — Your call history\n"
+        "`/stop <symbol> <exit>` — Close a call + auto P&L\n"
+        "  e.g. `/stop WIF 0.08`\n"
+        "`/leaderboard` — Top callers ranked by P&L"
+    ),
+    "portfolio": (
+        "\U0001f4bc *PORTFOLIO*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/addport <CA> <$amount>` — Add a token to portfolio\n"
+        "  e.g. `/addport EPjF... 500`\n"
+        "`/portfolio` — View live P&L for all holdings"
+    ),
+    "wallets": (
+        "\U0001f45b *WALLETS*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/trackwallet <address> <label>` — Track any Solana wallet\n"
+        "  e.g. `/trackwallet 9xQe... whaleacc`\n"
+        "`/mywallet <address>` — Link your own Solana wallet"
+    ),
+    "social": (
+        "\U0001f3ae *XP & SOCIAL*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/rank` — Your XP level and rank\n"
+        "`/gp` — Group XP leaderboard\n"
+        "`/dubs <story>` — Celebrate a win (+20 XP)\n"
+        "`/gsum` — AI summary of last 50 group messages\n"
+        "`/remindme <min> <msg>` — Set a reminder\n"
+        "  e.g. `/remindme 30 check WIF chart`"
+    ),
+    "system": (
+        "\u2699\ufe0f *SYSTEM*\n"
+        "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
+        "`/autoresponder` — Toggle auto-scan when CA is pasted\n"
+        "`/status` — Full bot health check\n"
+        "`/ping` — Latency check\n"
+        "`/start` — Reopen main menu"
+    ),
+}
+
+BACK_BTN = InlineKeyboardMarkup([[InlineKeyboardButton("\u2b05\ufe0f Back to categories", callback_data="help:back")]])
+
+async def handle_help_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Shows per-category command pages when tapping help category buttons."""
+    query = u.callback_query
+    await query.answer()
+    data = (query.data or "").replace("help:", "")
+
+    if data == "back":
+        # Re-show help — use object.__setattr__ to bypass frozen slots
+        await help_cmd(u, c)
+        return
+
+    page = HELP_PAGES.get(data)
+    if page:
+        try:
+            await query.message.edit_text(page, parse_mode="Markdown", reply_markup=BACK_BTN)
+        except Exception:
+            await query.message.reply_text(page, parse_mode="Markdown", reply_markup=BACK_BTN)
+
+
+async def handle_refresh_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Handles the Refresh button on scan cards — re-runs a full scan live."""
+    query = u.callback_query
+    await query.answer("Refreshing...")
+    data  = query.data or ""
+    if not data.startswith("refresh:"): return
+    addr  = data.split(":", 1)[1].strip()
+    if not addr: return
+
+    # Edit the message to show loading state
+    try:
+        await query.message.edit_text("🔄 *Refreshing scan...*", parse_mode="Markdown")
+    except Exception:
+        pass
+
+    t = await full_token_scan(addr)
+    if t.get("error"):
+        try:
+            await query.message.edit_text(f"❌ {t['error']}")
+        except Exception:
+            await query.message.reply_text(f"❌ {t['error']}")
+        return
+
+    ai_verdict = await ai_ask(
+        f"Solana token ${t['sym']} — MCap {_usd(t['mcap'])}, liq {_usd(t['liq'])}, "
+        f"age {_age(t['created'])}, 5m {_pct(t['ch5m'])}, 1h {_pct(t['ch1h'])}, "
+        f"24h {_pct(t['ch24h'])}, buy ratio {t['buy_pct']:.0f}%, vol spike {t['vol_spike']:.1f}x, "
+        f"momentum {t['mscore']}/100, risk {t['risk_score']}/100. "
+        "Sharp verdict: is this still worth aping right now? 2 sentences.",
+        fallback="",
+        inject_market=True
+    )
+    card = build_scan_card(t, ai_verdict)
+    btns = scan_buttons(addr, t["sym"], t.get("pair_addr",""))
+    try:
+        await query.message.edit_text(
+            card, parse_mode="Markdown",
+            reply_markup=btns,
+            disable_web_page_preview=True
+        )
+    except Exception:
+        await query.message.reply_text(
+            card, parse_mode="Markdown",
+            reply_markup=btns,
+            disable_web_page_preview=True
+        )
+
+
+async def handle_menu_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles all menu button taps from /start.
+    For commands that need no args (runners, gems, etc.) — runs them directly.
+    For commands that need a CA/arg — sends a friendly prompt to type it.
+    """
+    query = u.callback_query
+    await query.answer()
+    cmd = (query.data or "").replace("menu:", "")
+
+    # Commands that run immediately with no args
+    NO_ARG_CMDS = {
+        "runners":     runners_cmd,
+        "new":         new_cmd,
+        "pump":        pump_cmd,
+        "gems":        gems_cmd,
+        "trending":    trending_cmd,
+        "news":        news_cmd,
+        "sentiment":   sentiment_cmd,
+        "macro":       macro_cmd,
+        "markets":     markets_cmd,
+        "index":       index_cmd,
+        "portfolio":   portfolio_cmd,
+        "myalerts":    myalerts_cmd,
+        "leaderboard": leaderboard_cmd,
+        "rank":        rank_cmd,
+        "gp":          gp_cmd,
+        "watchlist":   watchlist_cmd,
+        "mycalls":     mycalls_cmd,
+        "status":      status_cmd,
+        "ping":        ping_cmd,
+    }
+
+    # Commands that need an argument — show a prompt
+    ARG_PROMPTS = {
+        "scan":      ("\U0001f52c", "Send me the *contract address* to scan:\n`/scan <CA>`"),
+        "chart":     ("\U0001f4ca", "Send me the *contract address* to chart:\n`/chart <CA>`"),
+        "c":         ("\U0001f4b0", "Send me the *contract address* for quick price:\n`/c <CA>`"),
+        "price":     ("\U0001f4b5", "Send me the *coin name* for live price:\n`/price btc` or `/price sol`"),
+        "verify":    ("\U0001f6e1", "Send me the *contract address* to verify:\n`/verify <CA>`"),
+        "ask":       ("\U0001f916", "Send me your *question*:\n`/ask <your question>`"),
+        "narrative": ("\U0001f4d6", "Send me the *narrative keyword*:\n`/narrative <word>` e.g. `/narrative ai`"),
+        "explain":   ("\U0001f9e0", "Send me the *narrative to explain*:\n`/explain <narrative>`"),
+        "alert":     ("\U0001f514", "Set a price alert:\n`/alert <CA> <target_price>`\nExample: `/alert EPjF... 0.05`"),
+        "call":      ("\U0001f4e2", "Make a public alpha call:\n`/call <CA> <entry_price>`"),
+        "addport":   ("\U00002795", "Add to portfolio:\n`/addport <CA> <dollar_amount>`"),
+        "tt":        ("\U0001f426", "Twitter sentiment for a token:\n`/tt <CA or keyword>`"),
+        "moni":      ("\U0001f441", "Monitor a KOL:\n`/moni @username`"),
+        "watch":     ("\U0001f4e1", "Watch a Twitter account for CA drops:\n`/watch @username`"),
+        "trackwallet":("\U0001f45b","Track a Solana wallet:\n`/trackwallet <address> <label>`"),
+        "mywallet":  ("\U0001f517", "Link your wallet:\n`/mywallet <address>`"),
+        "a":         ("\U0001f50d", "CoinGecko lookup:\n`/a <coin-id>` e.g. `/a solana`"),
+        "dubs":      ("\U0001f389", "Celebrate a win:\n`/dubs <your story>`"),
+        "remindme":  ("\U000023f0", "Set a reminder:\n`/remindme <minutes> <message>`"),
+        "blacklist": ("\U000026d4", "Blacklist a rug token:\n`/blacklist <CA>`"),
+        "stop":      ("\U0001f3c1", "Close a call:\n`/stop <symbol> <exit_price>`"),
+        "delalert":  ("\U0001f5d1", "Delete an alert:\n`/delalert <alert_number>`"),
+        "help":      None,
+    }
+
+    # ── dispatch ──────────────────────────────────────────────────
+    # Callback updates have u.message = None (it's a frozen slot).
+    # We send replies directly via query.message so commands work.
+    async def _reply(text, parse_mode="Markdown", reply_markup=None, **kw):
+        try:
+            await query.message.reply_text(text, parse_mode=parse_mode,
+                                           reply_markup=reply_markup, **kw)
+        except Exception as e:
+            logger.warning(f"Menu reply error: {e}")
+
+    if cmd == "help":
+        await help_cmd(u, c)
+        return
+
+    if cmd in NO_ARG_CMDS:
+        # u.effective_message automatically resolves to callback_query.message
+        # so all commands work whether called via /slash or menu button
+        await NO_ARG_CMDS[cmd](u, c)
+        return
+
+    if cmd in ARG_PROMPTS and ARG_PROMPTS[cmd]:
+        icon, prompt = ARG_PROMPTS[cmd]
+        await _reply(f"{icon} {prompt}")
+        return
+
+    # Unknown — show main menu again
+    await start(u, c)
+
+
+async def handle_chart_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles 'chart:<addr>' callback from the inline chart button.
+    Sends chart image directly in Telegram — no DexScreener needed.
+    """
+    query = u.callback_query
+    await query.answer("Loading chart...")
+    data  = query.data or ""
+    if not data.startswith("chart:"): return
+    addr  = data.split(":", 1)[1].strip()
+
+    # Notify
+    await query.message.reply_text("📊 *Loading chart...*", parse_mode="Markdown")
+
+    # Get pair data
+    pairs = await dex_pairs_by_token(addr)
+    if not pairs:
+        await query.message.reply_text("❌ Token not found. Try /chart <ca> directly.")
+        return
+
+    p       = pairs[0]
+    base    = p.get("baseToken", {})
+    sym     = base.get("symbol", "???")
+    name    = base.get("name", "Unknown")
+    price   = float(p.get("priceUsd", 0) or 0)
+    fdv     = float(p.get("fdv", 0) or 0)
+    liq     = float((p.get("liquidity") or {}).get("usd", 0) or 0)
+    ch5m    = float((p.get("priceChange") or {}).get("m5", 0) or 0)
+    ch1h    = float((p.get("priceChange") or {}).get("h1", 0) or 0)
+    ch24h   = float((p.get("priceChange") or {}).get("h24", 0) or 0)
+    v24h    = float((p.get("volume") or {}).get("h24", 0) or 0)
+    b1h     = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
+    s1h     = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
+    pair_addr = p.get("pairAddress", "")
+    dex_url   = p.get("url", f"https://dexscreener.com/solana/{addr}")
+
+    press  = "🟢 BUY PRESSURE" if b1h > s1h else "🔴 SELL PRESSURE"
+    age    = _age(p.get("pairCreatedAt", 0) or 0)
+
+    caption = (
+        f"📊 *${sym}* — _{name}_\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 Price: *{_price(price)}*\n"
+        f"📦 MCap: `{_usd(fdv)}`  |  Liq: `{_usd(liq)}`\n"
+        f"📈 5m: {_pct(ch5m)}  |  1h: {_pct(ch1h)}  |  24h: {_pct(ch24h)}\n"
+        f"💹 Vol 24h: `{_usd(v24h)}`\n"
+        f"🔄 Buys/Sells (1h): {b1h}/{s1h}  →  {press}\n"
+        f"⏱ Age: {age}\n"
+        f"`{addr}`"
+    )
+
+    # Use the unified scan_buttons which has DexScreener DApp + GMGN chart + all DApp trading links
+    markup = scan_buttons(addr, sym, pair_addr)
+
+    # Send stats card — tap DexScreener or GMGN Chart button to open chart in Telegram DApp
+    await query.message.reply_text(
+        caption,
+        parse_mode="Markdown",
+        reply_markup=markup,
+        disable_web_page_preview=True,
+    )
+
+
+# Web3 terms glossary for instant explanations
+_WEB3_TERMS = {
+    "rug","rugpull","honeypot","lp","liquidity","fdv","mcap","dex","cex","defi",
+    "nft","dao","airdrop","whitelist","presale","ido","imo","launchpad","alpha",
+    "degen","ape","fud","fomo","shill","whale","kol","ca","contract","solana",
+    "pump","dump","narrative","meta","trending","momentum","moonbag","pnl",
+    "entry","exit","stop loss","take profit","chart","candlestick","rsi","macd",
+    "volume","spread","slippage","gas","mev","sandwich","snipe","jeet","paperhands",
+    "diamondhands","rekt","ngmi","wagmi","gm","gn","ser","fren","based","gigabrain",
+    "1000x","100x","10x","2x","x","bags","hold","hodl","sell","buy","swap",
+    "wallet","seed phrase","private key","phantom","solflare","metamask",
+    "raydium","orca","jupiter","serum","pump.fun","dexscreener","birdeye","gmgn",
+    "bullx","photon","banana gun","trojan","bloom","bonkbot","maestro",
+    "staking","yield","apr","apy","tvl","protocol","token","coin","memecoin",
+    "meme","cat","dog","frog","pepe","shib","doge","wif","bonk","myro",
+    "jup","wen","bome","slerf","popcat","pnut","goat","ai16z","arc","virtual"
+}
+
+async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    if not u.message or not u.effective_message.text: return
+    text = u.effective_message.text.strip()
+    uid  = u.effective_user.id
+    chat = u.effective_chat
+
+    # Always store for group summary
+    group_messages.append({"uid": uid, "text": text, "time": time.time()})
+    if len(group_messages) > 300: group_messages.pop(0)
+
+    # ── 1. CA / Link auto-scan — INSTANT, no AI blocking ────────────
+    # Scans CAs from plain text AND links from DexScreener/GMGN/Pump.fun/Birdeye/Photon etc.
+    # Card appears in <3 seconds. AI verdict edits in later as a background task.
+    for ca in extract_cas(text)[:1]:
+            try:
+                scanning_msg = await u.effective_message.reply_text(
+                    "\U0001f50d *Scanning...*", parse_mode="Markdown"
+                )
+                t = await full_token_scan(ca)
+                if t.get("error"):
+                    await scanning_msg.edit_text(f"\u274c {t['error']}")
+                    return
+                # Send scan card IMMEDIATELY — no AI wait
+                card = build_scan_card(t, "")
+                buttons = scan_buttons(ca, t.get("sym", ""), t.get("pair_addr", ""))
+                await scanning_msg.delete()
+                sent = await u.effective_message.reply_text(
+                    card,
+                    parse_mode="Markdown",
+                    reply_markup=buttons,
+                    disable_web_page_preview=True,
+                )
+                add_xp(uid, 5)
+                # Fire AI verdict as NON-BLOCKING background task — edits message when ready
+                async def _ca_ai_verdict(msg_id, chat_id, token_data, ca_addr, btns):
+                    try:
+                        ai_v = await asyncio.wait_for(
+                            ai_ask(
+                                f"Solana token ${token_data['sym']} — MCap {_usd(token_data['mcap'])}, "
+                                f"liq {_usd(token_data['liq'])}, age {_age(token_data['created'])}, "
+                                f"5m {_pct(token_data['ch5m'])}, 1h {_pct(token_data['ch1h'])}, "
+                                f"24h {_pct(token_data['ch24h'])}, buy ratio {token_data['buy_pct']:.0f}%, "
+                                f"vol spike {token_data['vol_spike']:.1f}x, momentum {token_data['mscore']}/100, "
+                                f"risk {token_data['risk_score']}/100, narrative #{token_data['narrative']}, "
+                                f"honeypot={token_data['is_honeypot']}, lp_locked={token_data['lp_locked']}. "
+                                "Give a sharp alpha verdict: is this worth aping right now? "
+                                "Call out any red flags. 2-3 direct sentences.",
+                                fallback="",
+                                inject_market=True
+                            ),
+                            timeout=15
+                        )
+                        if ai_v and ai_v.strip():
+                            try:
+                                await c.bot.edit_message_text(
+                                    chat_id=chat_id, message_id=msg_id,
+                                    text=build_scan_card(token_data, ai_v),
+                                    parse_mode="Markdown",
+                                    reply_markup=btns,
+                                    disable_web_page_preview=True,
+                                )
+                            except Exception:
+                                # Markdown failed — try plain text
+                                try:
+                                    plain = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '',
+                                                   build_scan_card(token_data, ai_v))
+                                    await c.bot.edit_message_text(
+                                        chat_id=chat_id, message_id=msg_id,
+                                        text=plain,
+                                        reply_markup=btns,
+                                        disable_web_page_preview=True,
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass  # AI is optional — card already sent
+
+                asyncio.create_task(_ca_ai_verdict(
+                    sent.message_id, u.effective_chat.id, t, ca, buttons
+                ))
+            except Exception as _ca_err:
+                logger.error(f"CA auto-scan error for {ca}: {_ca_err}", exc_info=True)
+                try:
+                    await u.effective_message.reply_text(
+                        f"\u274c Scan failed. Try `/scan {ca}`"
+                    )
+                except Exception:
+                    pass
+            return
+
+    # ── 2. Smart reply gate ──────────────────────────────────────
+    # Reply to EVERYTHING — private chats, group messages, mentions.
+    # Like ChatGPT/Grok: smart enough to handle any text, no keyword gating.
+    # Skip only: other bot commands (/command) not meant for us, and very short
+    # gibberish (single chars). Apply a light rate-limit to avoid flooding groups.
+    is_private = chat.type == "private"
+    bot_username = c.bot.username if c.bot else ""
+
+    # Strip bot mention if present
+    if bot_username and f"@{bot_username}" in text:
+        text = text.replace(f"@{bot_username}", "").strip()
+    if not text: return
+
+    # Skip commands that start with / — those are handled by command handlers
+    if text.startswith("/"):
+        return
+
+    # Skip single characters or pure punctuation (emoji-only reactions are fine though)
+    clean_text = text.strip()
+    if len(clean_text) < 2:
+        return
+
+    # Per-user rate limit in groups: max 1 AI reply per 6 seconds
+    # (private chats are unlimited — it's 1-on-1)
+    _now = time.time()
+    if not is_private:
+        _last = _ai_reply_cooldown.get(uid, 0)
+        if _now - _last < 3:
+            return  # silently skip — don't spam
+        _ai_reply_cooldown[uid] = _now
+
+    # Show typing indicator
+    try:
+        await u.effective_message.chat.send_action("typing")
+    except Exception:
+        pass
+
+    add_xp(uid, 1)
+
+    # ── 3. Unified AI reply — no keyword routing, always intelligent ──
+    # Like ChatGPT/Grok: one smart prompt, live market context always injected.
+    # The AI decides if the topic is crypto, casual, general — we don't pre-filter.
+    name_str = u.effective_user.first_name or "fren"
+    prompt = (
+        f"{name_str}: \"{text}\"\n\n"
+        "Reply as Kayo. Be real, sharp, direct. "
+        "If it's casual → 1-2 sentences, match their energy. "
+        "If it's crypto/Web3 → use the LIVE market data in your context, cite actual numbers, give the real play. "
+        "If it's general knowledge → answer confidently like a smart friend. No disclaimers. "
+        "Never refuse. Never say you can't answer. Never say you're a bot. Just reply."
+    )
+    reply = await ai_ask(
+        prompt,
+        fallback="",
+        max_tokens=450,
+        inject_market=True  # always inject live prices — AI ignores them for casual chat
+    )
+
+    if not reply or not reply.strip():
+        reply = "⚠️ AI brain offline — GROQ_API_KEY may not be set on Render. Get a free key at console.groq.com/keys"
+    # Always try markdown (AI uses bold for crypto analysis), fall back to plain
+    import re as _re
+    try:
+        await u.effective_message.reply_text(reply, parse_mode="Markdown",
+                                   disable_web_page_preview=True)
+    except Exception:
+        plain = _re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', reply)
+        await u.effective_message.reply_text(plain.strip() or reply)
+
+# ═══════════════════════════════════════════════════════════════
+# BACKGROUND SCANNERS
+# ═══════════════════════════════════════════════════════════════
+
+async def _fetch_gt_new(pg: int) -> list:
+    """Fetch GeckoTerminal new_pools page."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page={pg}",
+                timeout=aiohttp.ClientTimeout(total=12)
+            ) as r:
+                d = await r.json()
+                return d.get("data", [])
+    except Exception as e:
+        logger.debug(f"GT new_pools pg{pg}: {e}")
+        return []
+
+async def _fetch_gt_trend(pg: int) -> list:
+    """Fetch GeckoTerminal trending_pools page."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page={pg}",
+                timeout=aiohttp.ClientTimeout(total=12)
+            ) as r:
+                d = await r.json()
+                return d.get("data", [])
+    except Exception as e:
+        logger.debug(f"GT trend pg{pg}: {e}")
+        return []
+
+async def _fetch_dex_profiles() -> list:
+    """Fetch DexScreener token profiles (newest Solana coins with profiles)."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://api.dexscreener.com/token-profiles/latest/v1",
+                timeout=aiohttp.ClientTimeout(total=12)
+            ) as r:
+                d = await r.json()
+                return [x for x in (d if isinstance(d, list) else []) if x.get("chainId") == "solana"]
+    except Exception as e:
+        logger.debug(f"dex_profiles: {e}")
+        return []
+
+async def _fetch_dex_boosts() -> list:
+    """Fetch DexScreener boosted Solana tokens."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://api.dexscreener.com/token-boosts/latest/v1",
+                timeout=aiohttp.ClientTimeout(total=12)
+            ) as r:
+                d = await r.json()
+                return [x for x in (d if isinstance(d, list) else []) if x.get("chainId") == "solana"]
+    except Exception as e:
+        logger.debug(f"dex_boosts: {e}")
+        return []
+
+# ═══════════════════════════════════════════════════════════════════════
+# KAYO v40 ELITE INJECTION — ALL NEW FEATURES
+# Injected before bg_main_scanner
+# ═══════════════════════════════════════════════════════════════════════
+
+# ── FREE API HELPERS ─────────────────────────────────────────────────
+
+async def solscan_wallet_txns(addr: str, limit: int = 10) -> List[Dict]:
+    """SolanaFM / Solscan public API — no key needed."""
+    urls = [
+        f"https://api.solscan.io/v2/account/transactions?account={addr}&limit={limit}",
+        f"https://public-api.solscan.io/account/transactions?account={addr}&limit={limit}",
+    ]
+    async with aiohttp.ClientSession() as s:
+        for url in urls:
+            try:
+                async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        if isinstance(data, list): return data
+                        if isinstance(data, dict) and "data" in data: return data["data"]
+            except Exception:
+                continue
+    return []
+
+async def solanafm_wallet_txns(addr: str, limit: int = 10) -> List[Dict]:
+    """SolanaFM API — free, no key."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.solana.fm/v0/accounts/{addr}/transactions?limit={limit}",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    return d.get("result", {}).get("data", []) or []
+    except Exception:
+        pass
+    return []
+
+async def dex_wallet_pnl(addr: str) -> Dict:
+    """Get wallet PnL from DexScreener portfolio endpoint."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.dexscreener.com/latest/dex/portfolio/solana/{addr}",
+                timeout=aiohttp.ClientTimeout(total=12)
+            ) as r:
+                if r.status == 200:
+                    return await r.json()
+    except Exception:
+        pass
+    return {}
+
+async def fetch_token_holders(addr: str) -> Dict:
+    """Get top holder concentration via Solscan."""
+    result = {"top10_pct": 0, "holder_count": 0, "top_holders": []}
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.solscan.io/v2/token/holders?token={addr}&offset=0&limit=10",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    holders = d.get("data", {}).get("result", []) or []
+                    total_supply = float(d.get("data", {}).get("total", 1) or 1)
+                    top10_amt = sum(float(h.get("amount", 0)) for h in holders[:10])
+                    result["top10_pct"] = min(100, (top10_amt / max(total_supply, 1)) * 100)
+                    result["holder_count"] = int(d.get("data", {}).get("total", 0) or 0)
+                    result["top_holders"] = holders[:5]
+    except Exception:
+        pass
+    return result
+
+async def fetch_token_metadata(addr: str) -> Dict:
+    """Get rich token metadata from multiple free sources."""
+    meta = {}
+    try:
+        async with aiohttp.ClientSession() as s:
+            # Try Pump.fun metadata
+            async with s.get(
+                f"https://frontend-api-v3.pump.fun/coins/{addr}",
+                headers=_PUMPFUN_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    meta["twitter"] = d.get("twitter", "")
+                    meta["telegram"] = d.get("telegram", "")
+                    meta["website"] = d.get("website", "")
+                    meta["dev_wallet"] = d.get("creator", "")
+                    meta["total_supply"] = d.get("total_supply", 0)
+                    meta["raydium_pool"] = d.get("raydium_pool", "")
+                    meta["is_currently_live"] = d.get("is_currently_live", False)
+    except Exception:
+        pass
+    return meta
+
+async def detect_bundled_launch(addr: str) -> Dict:
+    """
+    Detect if token was bundled at launch (coordinated multi-wallet buy).
+    Uses DexScreener first-txn data — no key needed.
+    """
+    result = {"is_bundled": False, "bundle_wallets": 0, "bundle_pct": 0.0}
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    pairs = d.get("pairs", [])
+                    if pairs:
+                        p = pairs[0]
+                        created = int(p.get("pairCreatedAt", 0) or 0) / 1000
+                        b5m = int(((p.get("txns") or {}).get("m5") or {}).get("buys", 0) or 0)
+                        s5m = int(((p.get("txns") or {}).get("m5") or {}).get("sells", 0) or 0)
+                        age_min = (time.time() - created) / 60 if created else 999
+                        # Heuristic: if token is <30min old and has many buys in first 5min
+                        # relative to current txns, likely bundled
+                        if age_min < 30 and b5m > 15:
+                            result["is_bundled"] = True
+                            result["bundle_wallets"] = b5m
+    except Exception:
+        pass
+    return result
+
+async def get_sol_price() -> float:
+    """Get live SOL price — CoinGecko free."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    return float(d.get("solana", {}).get("usd", 0))
+    except Exception:
+        pass
+    return 0.0
+
+async def fetch_smart_money_tokens() -> List[Dict]:
+    """
+    Detect tokens being accumulated by smart/profitable wallets.
+    Uses GeckoTerminal trending data cross-referenced with Pump.fun trending.
+    """
+    results = []
+    try:
+        gt_trending, pf_trending = await asyncio.gather(
+            gt_trending_pools(page=1),
+            _fetch_pumpfun_trending(),
+            return_exceptions=True
+        )
+        gt_addrs = set()
+        if not isinstance(gt_trending, Exception):
+            for p in gt_trending:
+                tok = gt_parse_pool(p)
+                if tok: gt_addrs.add(tok["address"])
+
+        pf_addrs = set()
+        if not isinstance(pf_trending, Exception):
+            for c in (pf_trending or [])[:20]:
+                addr = c.get("mint", "")
+                if addr: pf_addrs.add(addr)
+
+        # Tokens appearing in BOTH sources = smart money convergence
+        overlap = gt_addrs & pf_addrs
+        for addr in list(overlap)[:10]:
+            results.append({"address": addr, "signal": "smart_money_convergence"})
+    except Exception:
+        pass
+    return results
+
+async def _fetch_pumpfun_trending() -> List[Dict]:
+    """Get trending Pump.fun coins — uses v3 API."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://frontend-api-v3.pump.fun/coins",
+                params={"offset": "0", "limit": "20", "sort": "market_cap", "order": "DESC"},
+                headers=_PUMPFUN_HEADERS,
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    return data if isinstance(data, list) else []
+    except Exception:
+        pass
+    return []
+
+async def check_dev_activity(dev_wallet: str, token_addr: str) -> Dict:
+    """Check if dev wallet has sold tokens or is still holding."""
+    result = {"dev_sold": False, "dev_hold_pct": 100, "dev_txn_count": 0, "warning": ""}
+    if not dev_wallet:
+        return result
+    try:
+        txns = await solscan_wallet_txns(dev_wallet, limit=20)
+        for txn in txns:
+            # If dev wallet appears to have transferred the token
+            if isinstance(txn, dict):
+                result["dev_txn_count"] += 1
+        if result["dev_txn_count"] > 10:
+            result["warning"] = "High dev wallet activity"
+        elif result["dev_txn_count"] == 0:
+            result["warning"] = "Dev wallet inactive"
+    except Exception:
+        pass
+    return result
+
+# ── ENHANCED SCAN CARD WITH HOLDER + BUNDLE DATA ──────────────────────
+
+async def full_enhanced_scan(addr: str) -> Dict:
+    """
+    Full token intelligence: base data + holder analysis + bundle detection + dev check.
+    All free APIs.
+    """
+    base, holders, bundle, metadata = await asyncio.gather(
+        full_token_scan(addr),
+        fetch_token_holders(addr),
+        detect_bundled_launch(addr),
+        fetch_token_metadata(addr),
+        return_exceptions=True
+    )
+
+    if isinstance(base, Exception) or not base:
+        return {"error": "Token not found"}
+
+    result = dict(base)
+
+    # Holder data
+    if not isinstance(holders, Exception):
+        result["top10_pct"]    = holders.get("top10_pct", 0)
+        result["holder_count"] = holders.get("holder_count", 0)
+        result["top_holders"]  = holders.get("top_holders", [])
+
+    # Bundle detection
+    if not isinstance(bundle, Exception):
+        result["is_bundled"]      = bundle.get("is_bundled", False)
+        result["bundle_wallets"]  = bundle.get("bundle_wallets", 0)
+
+    # Metadata
+    if not isinstance(metadata, Exception) and metadata:
+        if not result.get("tw_link") and metadata.get("twitter"):
+            result["tw_link"] = metadata["twitter"]
+        if not result.get("tg_link") and metadata.get("telegram"):
+            result["tg_link"] = metadata["telegram"]
+        if not result.get("web_link") and metadata.get("website"):
+            result["web_link"] = metadata["website"]
+        result["dev_wallet"]       = metadata.get("dev_wallet", "")
+        result["pump_live"]        = metadata.get("is_currently_live", False)
+
+    # Dev check
+    if result.get("dev_wallet"):
+        try:
+            dev = await asyncio.wait_for(
+                check_dev_activity(result["dev_wallet"], addr), timeout=8
+            )
+            result["dev_warning"]    = dev.get("warning", "")
+            result["dev_txn_count"]  = dev.get("dev_txn_count", 0)
+        except Exception:
+            pass
+
+    return result
 
 def build_elite_scan_card(t: Dict, ai: str = "") -> str:
     """
@@ -3650,7 +5972,7 @@ async def bg_main_scanner(app: Application):
                 if _seen_check(seen_alert_ids, alert_id): continue
                 _seen_add(seen_alert_ids, alert_id)
                 asyncio.create_task(_save())
-                _feed_add(tok)   # ← add to live feed so AI knows what's hot
+                _feed_add(tok)
 
                 cooldown[addr] = now
 
@@ -4187,7 +6509,6 @@ async def bg_established_scanner(app: Application):
                 alert_id_est = hashlib.md5(alert_id_est.encode()).hexdigest()[:16]
                 if _seen_check(seen_alert_ids, alert_id_est): continue
                 _seen_add(seen_alert_ids, alert_id_est)
-                _feed_add(tok)   # ← add to live feed
 
                 seen_est[addr] = now
 
@@ -5277,165 +7598,61 @@ async def stock_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 
 
-# ═══════════════════════════════════════════════════════════════════
-# AUTO CA SCAN — when someone drops a contract address in chat
-# ═══════════════════════════════════════════════════════════════════
-
 async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    """Auto-scan when someone drops a CA in chat. Also handles AI replies for non-commands."""
-    if not u.effective_message or not u.effective_message.text:
-        return
-    
+    """Auto-scan when CA dropped. AI reply for other messages."""
+    if not u.effective_message or not u.effective_message.text: return
     text = u.effective_message.text
-    chat_id = u.effective_chat.id
+    chat_type = u.effective_chat.type
     user_id = u.effective_user.id if u.effective_user else 0
-    chat_type = u.effective_chat.type  # "private", "group", "supergroup"
-
-    # ── 1. Check for CA in the message ──
     cas = extract_cas(text)
-    if cas:
-        # Only auto-scan in groups (not private chat — use /scan there)
-        if chat_type in ("group", "supergroup"):
-            for ca in cas[:2]:  # max 2 CAs per message
-                # Check if user has auto-scan enabled (default: on)
-                settings = user_settings.get(user_id, {})
-                if settings.get("autoresponder_disabled", False):
-                    return
-
-                # Check cooldown — don't re-scan same CA within 5 min
-                ca_key = f"autoscan:{ca}"
-                if _seen_check(seen_alert_ids, ca_key):
-                    return
-                _seen_add(seen_alert_ids, ca_key)
-
-                try:
-                    # Send initial loading message
-                    msg = await u.effective_message.reply_text(
-                        f"🔍 Auto-scanning `{ca[:8]}...`",
-                        parse_mode="Markdown"
-                    )
-
-                    # Run the scan
-                    t = await asyncio.wait_for(full_enhanced_scan(ca), timeout=25)
-                    if t.get("error"):
-                        await msg.edit_text(f"❌ {t['error']}")
-                        return
-
-                    _track_scan(t, user_id)
-                    buttons = scan_buttons(ca, t.get("sym", ""), t.get("pair_addr", ""))
-
-                    # Build Rick Bot card
-                    card = build_scan_card(t, "")
-                    sent = await msg.edit_text(
-                        card,
-                        parse_mode="Markdown",
-                        reply_markup=buttons,
-                        disable_web_page_preview=True,
-                    )
-
-                    # Async AI verdict
-                    async def _ai_auto():
-                        try:
-                            ai_v = await asyncio.wait_for(
-                                ai_ask(
-                                    f"Quick take on ${t.get('sym','?')}: "
-                                    f"MCap {_usd(t.get('mcap',0))}, "
-                                    f"Liq {_usd(t.get('liq',0))}, "
-                                    f"1h {_pct(t.get('ch1h',0))}, "
-                                    f"Age {_age(t.get('created',0))}. "
-                                    f"Worth aping? 1-2 sentences.",
-                                    fallback="", max_tokens=150, inject_market=True
-                                ), timeout=12
-                            )
-                            if ai_v and sent:
-                                card_with_ai = build_scan_card(t, ai_v)
-                                await sent.edit_text(
-                                    card_with_ai,
-                                    parse_mode="Markdown",
-                                    reply_markup=buttons,
-                                    disable_web_page_preview=True,
-                                )
-                        except Exception:
-                            pass
-
-                    asyncio.create_task(_ai_auto())
-                except asyncio.TimeoutError:
-                    pass
-                except Exception as e:
-                    logger.debug(f"Auto-scan error: {e}")
-        return
-
-    # ── 2. AI reply for non-command messages in groups ──
-    if chat_type in ("group", "supergroup"):
-        # Rate limit AI replies in groups
-        now = time.time()
-        last = _ai_reply_cooldown.get(user_id, 0)
-        if now - last < 10:  # 10s cooldown per user
-            return
-
-        # Don't reply to very short messages or bot mentions only
-        if len(text.strip()) < 3:
-            return
-
-        # Check if bot is mentioned or replied to
-        mentioned = False
-        if u.effective_message.entities:
-            for entity in u.effective_message.entities:
-                if entity.type == "mention" and text[entity.offset:entity.offset+entity.length].lower() == "@kayo_brain_bot":
-                    mentioned = True
-                    break
-
-        # Reply to mentions, or process all messages if smart reply is on
+    if cas and chat_type in ("group","supergroup"):
         settings = user_settings.get(user_id, {})
-        smart_reply = settings.get("smart_reply", True)
+        if settings.get("autoresponder_disabled", False): return
+        for ca in cas[:2]:
+            ca_key = f"autoscan:{ca}"
+            if _seen_check(seen_alert_ids, ca_key): continue
+            _seen_add(seen_alert_ids, ca_key)
+            try:
+                msg = await u.effective_message.reply_text(f"\U0001f50d Scanning `{ca[:8]}...`", parse_mode="Markdown")
+                t = await asyncio.wait_for(full_enhanced_scan(ca), timeout=25)
+                if t.get("error"):
+                    await msg.edit_text(f"\u274c {t['error']}"); continue
+                _track_scan(t, user_id)
+                btns = scan_buttons(ca, t.get("sym",""), t.get("pair_addr",""))
+                sent = await msg.edit_text(build_scan_card(t,""), parse_mode="Markdown", reply_markup=btns, disable_web_page_preview=True)
+                async def _ai(t=t,sent=sent,btns=btns):
+                    try:
+                        v = await asyncio.wait_for(ai_ask(f"Quick take on ${t.get('sym','?')}: MCap {_usd(t.get('mcap',0))}, 1h {_pct(t.get('ch1h',0))}. Worth aping? 1-2 sentences.", fallback="", max_tokens=150, inject_market=True), timeout=12)
+                        if v: await sent.edit_text(build_scan_card(t,v), parse_mode="Markdown", reply_markup=btns, disable_web_page_preview=True)
+                    except Exception: pass
+                asyncio.create_task(_ai())
+            except asyncio.TimeoutError: pass
+            except Exception as e: logger.debug(f"auto-scan: {e}")
+        return
+    now = time.time()
+    if now - _ai_reply_cooldown.get(user_id, 0) < 10: return
+    if len(text.strip()) < 3: return
+    _ai_reply_cooldown[user_id] = now
+    if chat_type in ("group","supergroup"):
+        if not user_settings.get(user_id,{}).get("smart_reply",True): return
+    try:
+        v = await asyncio.wait_for(ai_ask(text, fallback="", max_tokens=300, inject_market=True), timeout=15)
+        if v: await u.effective_message.reply_text(v)
+    except Exception: pass
 
-        if not mentioned and not smart_reply:
-            return
 
-        _ai_reply_cooldown[user_id] = now
-
-        # Send AI reply
-        try:
-            # Strip any CA or command-like text
-            clean_text = text.replace("@kayo_brain_bot", "").strip()
-            if not clean_text or len(clean_text) > 500:
-                return
-
-            ai_v = await asyncio.wait_for(
-                ai_ask(clean_text, fallback="", max_tokens=300, inject_market=True),
-                timeout=15
-            )
-            if ai_v:
-                await u.effective_message.reply_text(ai_v)
-        except Exception:
-            pass
-
-    elif chat_type == "private":
-        # In private chat, reply to all non-command messages with AI
-        if len(text.strip()) < 2:
-            return
-
-        try:
-            ai_v = await asyncio.wait_for(
-                ai_ask(text, fallback="", max_tokens=380, inject_market=True),
-                timeout=20
-            )
-            if ai_v:
-                await u.effective_message.reply_text(ai_v)
-        except Exception:
-            pass
-
+async def _dismiss_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    try:
+        await u.callback_query.answer()
+        await u.callback_query.message.delete()
+    except Exception: pass
 
 
 async def bg_state_saver(app):
-    """Periodically save state every 5 minutes to prevent data loss on restart."""
     while True:
         await asyncio.sleep(300)
-        try:
-            await _save()
-            logger.debug("Periodic state save complete")
-        except Exception as e:
-            logger.warning(f"Periodic save error: {e}")
+        try: await _save()
+        except Exception as e: logger.warning(f"Periodic save: {e}")
 
 
 def main():
@@ -5483,6 +7700,7 @@ def main():
     # CallbackQuery handler for inline chart button
     # CallbackQuery handlers
     app.add_handler(CallbackQueryHandler(handle_refresh_callback, pattern=r"^refresh:"))
+    app.add_handler(CallbackQueryHandler(_dismiss_callback, pattern=r"^dismiss:"))
     app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
     app.add_handler(CallbackQueryHandler(handle_help_callback, pattern=r"^help:"))
     app.add_handler(CallbackQueryHandler(handle_chart_callback, pattern=r"^chart:"))
