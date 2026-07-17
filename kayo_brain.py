@@ -149,6 +149,8 @@ async def _save():
             "seen_alert_ids": list(seen_alert_ids.keys())[-3000:],
             "dropped_calls":  dropped_calls,
             "pattern_memory": pattern_memory,
+            "first_alert_seen": list(_first_alert_seen)[-1000:],
+            "token_watchers": dict(list(_token_watchers.items())[-500:]),
         }
         raw = json.dumps(data)
         try:
@@ -201,11 +203,18 @@ async def _load():
         tracked_wallets = d.get("tracked_wallets", {})
         knowledge_base  = d.get("knowledge_base", [])
         reminders       = d.get("reminders", [])
-        seen_alert_ids  = OrderedDict()  # intentionally NOT restored — fresh dedup each session
+        _saved_seen = d.get("seen_alert_ids", [])
+        seen_alert_ids = OrderedDict()
+        for sid in _saved_seen[-3000:]:
+            seen_alert_ids[sid] = 1
         global dropped_calls, pattern_memory
         dropped_calls   = d.get("dropped_calls", {})
         pattern_memory  = d.get("pattern_memory", {})
-        logger.info(f"✅ State loaded — {len(watchlist)} watched, {len(active_calls)} calls, {len(dropped_calls)} tracked drops (seen_alert_ids cleared for fresh session)")
+        # Restore Rick Bot tracking state
+        global _first_alert_seen, _token_watchers
+        _first_alert_seen = set(d.get("first_alert_seen", []))
+        _token_watchers = d.get("token_watchers", {})
+        logger.info(f"✅ State loaded — {len(watchlist)} watched, {len(active_calls)} calls, {len(dropped_calls)} tracked drops (seen_alert_ids restored from saved state)")
         # Prune dropped_calls older than 7 days so it doesn't block forever
         cutoff = time.time() - 604800
         dropped_calls = {k: v for k, v in dropped_calls.items() if v.get("time", 0) > cutoff}
@@ -5180,6 +5189,168 @@ async def stock_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 
 
+
+# ═══════════════════════════════════════════════════════════════════
+# AUTO CA SCAN — when someone drops a contract address in chat
+# ═══════════════════════════════════════════════════════════════════
+
+async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Auto-scan when someone drops a CA in chat. Also handles AI replies for non-commands."""
+    if not u.effective_message or not u.effective_message.text:
+        return
+    
+    text = u.effective_message.text
+    chat_id = u.effective_chat.id
+    user_id = u.effective_user.id if u.effective_user else 0
+    chat_type = u.effective_chat.type  # "private", "group", "supergroup"
+
+    # ── 1. Check for CA in the message ──
+    cas = extract_cas(text)
+    if cas:
+        # Only auto-scan in groups (not private chat — use /scan there)
+        if chat_type in ("group", "supergroup"):
+            for ca in cas[:2]:  # max 2 CAs per message
+                # Check if user has auto-scan enabled (default: on)
+                settings = user_settings.get(user_id, {})
+                if settings.get("autoresponder_disabled", False):
+                    return
+
+                # Check cooldown — don't re-scan same CA within 5 min
+                ca_key = f"autoscan:{ca}"
+                if _seen_check(seen_alert_ids, ca_key):
+                    return
+                _seen_add(seen_alert_ids, ca_key)
+
+                try:
+                    # Send initial loading message
+                    msg = await u.effective_message.reply_text(
+                        f"🔍 Auto-scanning `{ca[:8]}...`",
+                        parse_mode="Markdown"
+                    )
+
+                    # Run the scan
+                    t = await asyncio.wait_for(full_enhanced_scan(ca), timeout=25)
+                    if t.get("error"):
+                        await msg.edit_text(f"❌ {t['error']}")
+                        return
+
+                    _track_scan(t, user_id)
+                    buttons = scan_buttons(ca, t.get("sym", ""), t.get("pair_addr", ""))
+
+                    # Build Rick Bot card
+                    card = build_scan_card(t, "")
+                    sent = await msg.edit_text(
+                        card,
+                        parse_mode="Markdown",
+                        reply_markup=buttons,
+                        disable_web_page_preview=True,
+                    )
+
+                    # Async AI verdict
+                    async def _ai_auto():
+                        try:
+                            ai_v = await asyncio.wait_for(
+                                ai_ask(
+                                    f"Quick take on ${t.get('sym','?')}: "
+                                    f"MCap {_usd(t.get('mcap',0))}, "
+                                    f"Liq {_usd(t.get('liq',0))}, "
+                                    f"1h {_pct(t.get('ch1h',0))}, "
+                                    f"Age {_age(t.get('created',0))}. "
+                                    f"Worth aping? 1-2 sentences.",
+                                    fallback="", max_tokens=150, inject_market=True
+                                ), timeout=12
+                            )
+                            if ai_v and sent:
+                                card_with_ai = build_scan_card(t, ai_v)
+                                await sent.edit_text(
+                                    card_with_ai,
+                                    parse_mode="Markdown",
+                                    reply_markup=buttons,
+                                    disable_web_page_preview=True,
+                                )
+                        except Exception:
+                            pass
+
+                    asyncio.create_task(_ai_auto())
+                except asyncio.TimeoutError:
+                    pass
+                except Exception as e:
+                    logger.debug(f"Auto-scan error: {e}")
+        return
+
+    # ── 2. AI reply for non-command messages in groups ──
+    if chat_type in ("group", "supergroup"):
+        # Rate limit AI replies in groups
+        now = time.time()
+        last = _ai_reply_cooldown.get(user_id, 0)
+        if now - last < 10:  # 10s cooldown per user
+            return
+
+        # Don't reply to very short messages or bot mentions only
+        if len(text.strip()) < 3:
+            return
+
+        # Check if bot is mentioned or replied to
+        mentioned = False
+        if u.effective_message.entities:
+            for entity in u.effective_message.entities:
+                if entity.type == "mention" and text[entity.offset:entity.offset+entity.length].lower() == "@kayo_brain_bot":
+                    mentioned = True
+                    break
+
+        # Reply to mentions, or process all messages if smart reply is on
+        settings = user_settings.get(user_id, {})
+        smart_reply = settings.get("smart_reply", True)
+
+        if not mentioned and not smart_reply:
+            return
+
+        _ai_reply_cooldown[user_id] = now
+
+        # Send AI reply
+        try:
+            # Strip any CA or command-like text
+            clean_text = text.replace("@kayo_brain_bot", "").strip()
+            if not clean_text or len(clean_text) > 500:
+                return
+
+            ai_v = await asyncio.wait_for(
+                ai_ask(clean_text, fallback="", max_tokens=300, inject_market=True),
+                timeout=15
+            )
+            if ai_v:
+                await u.effective_message.reply_text(ai_v)
+        except Exception:
+            pass
+
+    elif chat_type == "private":
+        # In private chat, reply to all non-command messages with AI
+        if len(text.strip()) < 2:
+            return
+
+        try:
+            ai_v = await asyncio.wait_for(
+                ai_ask(text, fallback="", max_tokens=380, inject_market=True),
+                timeout=20
+            )
+            if ai_v:
+                await u.effective_message.reply_text(ai_v)
+        except Exception:
+            pass
+
+
+
+async def bg_state_saver(app):
+    """Periodically save state every 5 minutes to prevent data loss on restart."""
+    while True:
+        await asyncio.sleep(300)
+        try:
+            await _save()
+            logger.debug("Periodic state save complete")
+        except Exception as e:
+            logger.warning(f"Periodic save error: {e}")
+
+
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
@@ -5235,6 +5406,7 @@ def main():
         async with app:
             await app.start()
             await app.updater.start_polling(drop_pending_updates=True)
+            asyncio.create_task(bg_state_saver(app))
             asyncio.create_task(bg_main_scanner(app))
             asyncio.create_task(bg_followup_tracker(app))
             asyncio.create_task(bg_established_scanner(app))
