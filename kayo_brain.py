@@ -4812,6 +4812,62 @@ async def enrich_alert_with_velocity(tok_dict: Dict) -> Dict:
 
 
 
+
+async def quick_rug_check(addr: str) -> Dict:
+    """
+    Fast rug-pull screening for background scanner alerts.
+    Checks: honeypot, buy/sell tax, LP lock status.
+    Returns dict with is_rug, risk_score, red_flags.
+    Uses GoPlus free API with 12s timeout.
+    """
+    result = {"is_rug": False, "risk_score": 0, "red_flags": [], "buy_tax": 0, "sell_tax": 0, "lp_locked": False, "is_honeypot": False}
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.gopluslabs.io/api/v1/token_security/solana?contract_addresses={addr}",
+                timeout=aiohttp.ClientTimeout(total=12)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    sec = (d.get("result") or {}).get(addr, {})
+                    if not sec: return result
+
+                    is_honeypot = sec.get("is_honeypot", "0") == "1"
+                    buy_tax  = float(sec.get("buy_tax", 0) or 0)
+                    sell_tax  = float(sec.get("sell_tax", 0) or 0)
+                    lp_locked = sec.get("is_lock_pool", "0") == "1" or sec.get("lp_locked", "0") == "1"
+                    is_blacklisted = sec.get("is_blacklisted", "0") == "1"
+                    can_take_back = sec.get("can_take_back_ownership", "0") == "1"
+                    is_proxy = sec.get("is_proxy", "0") == "1"
+
+                    risk = 0
+                    flags = []
+                    if is_honeypot:
+                        risk += 80; flags.append("HONEYPOT")
+                    if buy_tax > 10:
+                        risk += 25; flags.append(f"High buy tax {buy_tax:.0f}%")
+                    if sell_tax > 10:
+                        risk += 30; flags.append(f"High sell tax {sell_tax:.0f}%")
+                    if is_blacklisted:
+                        risk += 40; flags.append("Blacklisted function")
+                    if can_take_back:
+                        risk += 20; flags.append("Can reclaim ownership")
+                    if is_proxy:
+                        risk += 15; flags.append("Proxy contract")
+
+                    result = {
+                        "is_rug": risk >= 50 or is_honeypot,
+                        "risk_score": min(100, risk),
+                        "red_flags": flags,
+                        "buy_tax": buy_tax,
+                        "sell_tax": sell_tax,
+                        "lp_locked": lp_locked,
+                        "is_honeypot": is_honeypot,
+                    }
+    except Exception:
+        pass
+    return result
+
 async def bg_main_scanner(app: Application):
     """
     PRIMARY SCANNER — every 60s
@@ -4966,11 +5022,12 @@ async def bg_main_scanner(app: Application):
                 price = float(tok.get("price", 0) or 0)
                 pair_addr = tok.get("pair_addr", "")
 
-                # Quality filter — use effective cap (fdv or mcap or liq*3)
+                # Quality filter — NO RUGS: min $5k cap, real liquidity, real volume
                 eff_cap = max(fdv, mcap, liq * 3)
                 if eff_cap > 500_000: continue          # above $500k cap
-                if eff_cap < 200 and liq < 50: continue  # truly zero — skip
-                if liq < 80: continue                   # need some liquidity
+                if eff_cap < 5_000: continue             # below $5k = rug/dust — SKIP
+                if liq < 2_000: continue                # need $2k+ liquidity to avoid rugs
+                if v1h < 500: continue                   # need $500+ 1h volume — no dead tokens
 
                 avg_5m_vol = v1h / 12 if v1h > 0 else 1
                 vol_spike  = v5m / max(avg_5m_vol, 1)
@@ -5007,12 +5064,12 @@ async def bg_main_scanner(app: Application):
 
                 # ── PUMP.FUN NEW LAUNCH — catch first, these are the freshest ──
                 if is_pumpfun and not is_graduated:
-                    # Active pump.fun bonding curve token with some market cap
-                    if mcap >= 1000 and mcap <= 500_000 and not pairs_map[addr].get("is_banned", False):
-                        # If it has a narrative description, it's a strong signal
-                        if pf_desc or pf_reply_count >= 5:
+                    # Active pump.fun bonding curve token — min $5k mcap to avoid rugs
+                    if mcap >= 5_000 and mcap <= 500_000 and not pairs_map[addr].get("is_banned", False):
+                        # Must have some social engagement OR decent mcap
+                        if pf_desc or pf_reply_count >= 3:
                             alert_type = "new"
-                        elif mcap >= 5000:  # some traction even without description
+                        elif mcap >= 10_000:  # $10k+ = real traction
                             alert_type = "new"
 
                 # ── PUMP.FUN GRADUATION — token just moved to Raydium ──
@@ -5062,6 +5119,20 @@ async def bg_main_scanner(app: Application):
                     if now - dropped_calls[addr].get("time", 0) < 3600: continue
                     if abs(price - dropped_calls[addr].get("entry_price", 0)) / max(dropped_calls[addr].get("entry_price", 1e-12), 1e-12) * 100 < 10: continue
 
+                # ── RUG CHECK — skip tokens that fail security screening ──
+                if not is_pumpfun:  # pump.fun tokens are on bonding curve, can't be honeypot
+                    try:
+                        rug = await asyncio.wait_for(quick_rug_check(addr), timeout=12)
+                        if rug.get("is_rug"):
+                            logger.info(f"[RUG FILTER] ${sym} skipped — {rug.get('red_flags', [])}")
+                            continue
+                        # Enrich tok_dict with security data
+                        tok_dict_rug = rug
+                    except Exception:
+                        tok_dict_rug = None
+                else:
+                    tok_dict_rug = None
+
                 # Dedup
                 alert_id = hashlib.md5(f"{addr}:{alert_type}:{int(now/3600)}".encode()).hexdigest()[:16]
                 if _seen_check(seen_alert_ids, alert_id): continue
@@ -5078,9 +5149,14 @@ async def bg_main_scanner(app: Application):
                     "b5m": b5m, "s5m": s5m, "b1h": b1h, "s1h": s1h,
                     "b24h": 0, "s24h": 0,
                     "buy_pct": buy_pct, "vol_spike": vol_spike,
-                    "risk_score": 30, "red_flags": [], "green_flags": [],
-                    "sell_tax": 0, "buy_tax": 0, "is_honeypot": False,
-                    "lp_locked": False, "is_renounced": False,
+                    "risk_score": (tok_dict_rug.get("risk_score", 30) if tok_dict_rug else 30),
+                    "red_flags": (tok_dict_rug.get("red_flags", []) if tok_dict_rug else []),
+                    "green_flags": [],
+                    "sell_tax": (tok_dict_rug.get("sell_tax", 0) if tok_dict_rug else 0),
+                    "buy_tax": (tok_dict_rug.get("buy_tax", 0) if tok_dict_rug else 0),
+                    "is_honeypot": (tok_dict_rug.get("is_honeypot", False) if tok_dict_rug else False),
+                    "lp_locked": (tok_dict_rug.get("lp_locked", False) if tok_dict_rug else False),
+                    "is_renounced": False,
                     "created": pairs_map[addr].get("created", 0) if is_pumpfun else 0,
                     "narrative": nar,
                     "tw_link": pf_meta.get("tw_link", "") if is_pumpfun else "",
@@ -5394,10 +5470,10 @@ async def bg_new_launch_scanner(app: Application):
                 buy_pct = b1h / max(b1h + s1h, 1) * 100
 
                 eff_fdv = max(fdv, liq * 3)
-                if liq < 200: continue                            # need liquidity
+                if liq < 2_000: continue                          # need $2k+ liquidity — no rugs
                 if eff_fdv > 500_000: continue                    # hard $500k cap
-                if eff_fdv > 0 and eff_fdv < 500: continue        # dust token
-                # fdv=0 is OK for brand new tokens — skip the $2000 floor
+                if eff_fdv < 5_000: continue                     # below $5k = dust/rug
+                if v1h and v1h < 500: continue                   # need some volume
 
                 # Scoring
                 score = 0
@@ -5562,7 +5638,7 @@ async def bg_established_scanner(app: Application):
                 if age_min < 120:   continue  # too new — main scanner handles those
                 if fdv > 500_000:   continue  # above our cap
                 if fdv < 5_000:     continue  # ghost token
-                if liq < 500:      continue  # too thin
+                if liq < 2_000:     continue  # need $2k+ liquidity — no rugs
 
                 avg_5m_vol = v1h / 12 if v1h > 0 else 1
                 vol_spike  = v5m / max(avg_5m_vol, 1)
@@ -5746,7 +5822,7 @@ async def bg_narrative_news_scanner(app: Application):
                         if not addr or addr in blacklist: continue
                         fdv  = float(p.get("fdv", 0) or 0)
                         liq  = float((p.get("liquidity") or {}).get("usd", 0) or 0)
-                        if not (1_000 <= fdv <= 500_000) or liq < 500: continue
+                        if not (5_000 <= fdv <= 500_000) or liq < 2_000: continue
                         ch1h = float((p.get("priceChange") or {}).get("h1", 0) or 0)
                         if ch1h < 5: continue
                         b1h  = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
@@ -5887,8 +5963,8 @@ async def bg_trending_metas_scanner(app: Application):
                 sym     = tok.get("sym", "?")
                 nar     = detect_narrative(f"{tok.get('name','')} {sym}")
 
-                if not (1_000 < fdv <= 500_000):  continue
-                if liq < 500:                      continue
+                if not (5_000 < fdv <= 500_000):  continue
+                if liq < 2_000:                     continue
                 if buy_pct < 52:                   continue
                 if ch1h < 3:                       continue
                 if b1h < 3:                        continue
