@@ -289,6 +289,51 @@ async def fetch_live_price(query: str) -> Dict:
         "drift": "drift-protocol",
         "kmno": "kamino",
         "tensor": "tensor", "tns": "tensor",
+        "tao": "bittensor", "bittensor": "bittensor",
+        "fet": "fetch-ai", "fetch": "fetch-ai",
+        "ocean": "ocean-protocol",
+        "render": "render-token", "rndr": "render-token",
+        "nmr": "numeraire",
+        "olas": "autonolas",
+        "ondo": "ondo-finance",
+        "pendle": "pendle",
+        "gmx": "gmx",
+        "aave": "aave",
+        "ldo": "lido-dao",
+        "mkr": "maker",
+        "crv": "curve-dao-token",
+        "comp": "compound-governance-token",
+        "brett": "based-brett",
+        "degen": "degen-base",
+        "aero": "aerodrome-finance",
+        "blast": "blast",
+        "manta": "manta-network",
+        "linea": "linea",
+        "scroll": "scroll",
+        "eigen": "eigenlayer", "eigenlayer": "eigenlayer",
+        "ordi": "ordinals",
+        "coq": "coq-inu",
+        "joe": "joe",
+        "cake": "pancakeswap-token",
+        "trx": "tron",
+        "shib": "shiba-inu", "shiba": "shiba-inu",
+        "floki": "floki",
+        "turbo": "turbo",
+        "pengu": "pudgy-penguins",
+        "mfer": "mfer",
+        "higher": "higher",
+        "normie": "normie",
+        "sats": "sats",
+        "rats": "rats",
+        "pol": "pol-token", "polygon": "matic-network",
+        "uni": "uniswap",
+        "inj": "injective-protocol",
+        "sei": "sei-network",
+        "celestia": "celestia",
+        "tia": "celestia",
+        "kas": "kaspa", "kaspa": "kaspa",
+        "kava": "kava",
+        "mina": "mina-protocol",
     }
 
     coin_id = COIN_MAP.get(q) or COIN_MAP.get(query.lower().strip())
@@ -568,17 +613,21 @@ GROQ_MODELS = [
 # ── NARRATIVE/CHAIN TOKEN SEARCH ─────────────────────────────────────
 # Lets the AI answer "what degen coins on Solana?" with REAL live data
 
-async def search_narrative_tokens(narrative: str, chain: str = "solana", limit: int = 15) -> str:
+async def search_narrative_tokens(narrative: str, chain: str = "", limit: int = 20) -> str:
     """
-    Search for tokens by narrative/keyword across DexScreener + GeckoTerminal.
+    Search for tokens by narrative/keyword across DexScreener + GeckoTerminal + Pump.fun.
+    chain="" searches ALL chains. chain="solana" limits to Solana.
     Returns a formatted string of live token data for AI injection.
     """
     narrative = narrative.lower().strip()
     results = []
 
-    # ── 1. DexScreener search by keyword ──
+    # ── 1. DexScreener search across ALL chains ──
     try:
-        pairs = await asyncio.wait_for(dex_search_pairs(narrative), timeout=8)
+        if chain:
+            pairs = await asyncio.wait_for(dex_search_pairs(narrative, chain), timeout=8)
+        else:
+            pairs = await asyncio.wait_for(dex_search_all_chains(narrative, limit), timeout=8)
         for p in pairs[:limit]:
             base = p.get("baseToken", {})
             sym = base.get("symbol", "?")
@@ -590,11 +639,12 @@ async def search_narrative_tokens(narrative: str, chain: str = "solana", limit: 
             ch24 = float((p.get("priceChange") or {}).get("h24", 0) or 0)
             ch1h = float((p.get("priceChange") or {}).get("h1", 0) or 0)
             vol24 = float((p.get("volume") or {}).get("h24", 0) or 0)
+            chain_id = p.get("chainId", "unknown")
             results.append({
                 "sym": sym, "name": name, "addr": addr,
                 "price": price, "mcap": mcap, "liq": liq,
                 "ch24h": ch24, "ch1h": ch1h, "vol24h": vol24,
-                "source": "DexScreener"
+                "chain": chain_id, "source": "DexScreener"
             })
     except Exception:
         pass
@@ -653,13 +703,15 @@ async def search_narrative_tokens(narrative: str, chain: str = "solana", limit: 
 
     # Format for AI injection
     lines = []
-    lines.append(f"[LIVE SOLANA TOKENS — narrative: {narrative}]")
+    chain_label = chain.upper() if chain else "ALL CHAINS"
+    lines.append(f"[LIVE TOKENS — narrative: {narrative} | chain: {chain_label}]")
     for r in unique[:15]:
         mcap_str = f"${r['mcap']:,.0f}" if r['mcap'] > 0 else "N/A"
         ch_str = f"{r['ch24h']:+.1f}%" if r['ch24h'] != 0 else ""
         liq_str = f"${r['liq']:,.0f}" if r['liq'] > 0 else ""
+        chain_tag = f"[{r.get('chain','?').upper()}]" if r.get('chain') else ""
         lines.append(
-            f"  ${r['sym']} ({r['name']}) — MCap {mcap_str} {ch_str} Liq {liq_str} [{r['source']}]"
+            f"  ${r['sym']} {chain_tag} ({r['name']}) — MCap {mcap_str} {ch_str} Liq {liq_str} [{r['source']}]"
         )
     lines.append(f"Total: {len(unique)} tokens found for '{narrative}' on Solana")
     return "\n".join(lines)
@@ -667,63 +719,168 @@ async def search_narrative_tokens(narrative: str, chain: str = "solana", limit: 
 
 # ── NARRATIVE KNOWLEDGE BASE ─────────────────────────────────────────
 NARRATIVE_KB = """
-[SOLANA NARRATIVE KNOWLEDGE BASE — your expertise]
+[WEB3 NARRATIVE KNOWLEDGE BASE — your complete expertise]
 
-Solana is the #1 chain for meme/degen tokens. Key narratives:
+You are a Web3 NATIVE. You know EVERY chain, EVERY narrative, EVERY major token.
 
-DEGEN: High-risk, high-reward meme tokens. Culture of aping first, research later.
-  Notable: BONK, WIF, BOME, POPCAT, PNUT, MOODENG, FARTCOIN, AURA, TROLL, MIKE
+═══ SOLANA ═══
+The #1 chain for meme/degen trading. Low fees (<$0.01), fast finality (~400ms).
+  DEGEN: BONK, WIF, BOME, POPCAT, PNUT, MOODENG, FARTCOIN, AURA, TROLL, MIKE
+  AI/AGENTS: ARC (AI Rig Complex), ZEREBRO, GOAT, AI16Z, GRIFT, RETARDIO
+  DOG: BONK, WIF (dogwifcoin), PONKE, MYRO, NANA, BORK
+  CAT: POPCAT, MEW (cat in a dogs world), SC, MOGRE
+  FROG/PEPE: WIFPEPE, PEPE variants
+  POLITICS: TRUMP (Official Trump), BODEN, KAMA, WALZ, DJT
+  PUMP.FUN: Primary launchpad. ~20,000+ tokens/day, 99% rugs, graduate to Raydium at ~$69k mcap
+  INFRA: SOL, JUP (Jupiter DEX), RAY (Raydium AMM), JTO (Jito staking), PYTH (oracle),
+         WORMHOLE (bridge), DRIFT (perps), KAMINO (lending), TENSOR (NFTs)
+  TOOLS: DexScreener, GMGN, Photon, Birdeye, Jupiter swap
 
-AI/AGENTS: AI-themed tokens on Solana.
-  Notable: ARC (AI Rig Complex), ZEREBRO, GOAT, AI16Z, GRIFT, RETARDIO
+═══ ETHEREUM ═══
+The original smart contract chain. Higher fees, bigger mcap tokens.
+  MEMES: PEPE, SHIB (Shiba Inu), FLOKI, TURBO, MEME, DOGE (original), WIF
+  AI: TAO (Bittensor), FET (Fetch.ai), RENDER, OCEAN, NMR
+  DEFI: UNI (Uniswap), AAVE, LDO (Lido), MKR (Maker), CRV (Curve), COMP (Compound)
+  L2s: ARB (Arbitrum), OP (Optimism), MATIC/POL (Polygon), BASE (Coinbase L2)
+  INFRA: ETH, LINK (Chainlink), WBTC, STETH
+  NARRATIVES: Restaking (eigenlayer), L2 scaling, account abstraction
 
-DOG: Dog-themed meme coins.
-  Notable: BONK, WIF (dogwifcoin), PONKE, MYRO, NANA, BORK
+═══ BASE ═══
+Coinbase's L2. Fast-growing degen ecosystem in 2024-2025.
+  DEGEN: BRETT, DEGEN, HIGHER, MFER, NORMIE, KEYCAT, BRIUN
+  MEMES: BRETT (Base's mascot), DEGEN (tip token), TOSHI, OM
+  AI: VIRTUAL, AI16Z (cross-chain), LUNA
+  INFRA: BASE ETH, AERO (Aerodrome DEX), VELLO
 
-CAT: Cat-themed meme coins.
-  Notable: POPCAT, MEW (cat in a dogs world), SC (Selfie Cat), MOGRE
+═══ SUI ═══
+Move-language L1. Growing degen ecosystem.
+  MEMES: SUIMOB, SCALLOP, BLUB, CETO, SUIPIENS
+  DEFI: NAVI, SUIPAD, SCALLOP (lending), TURBOS (DEX)
+  INFRA: SUI, DEEP, CETUS
 
-FROG/PEPE: Frog/pepe-themed memes.
-  Notable: PEPE (on ETH but Solana versions exist), WIFPEPE
+═══ BSC (Binance Smart Chain) ═══
+Binance's chain. Large retail user base.
+  MEMES: CAKE (PancakeSwap), BNB, BABYDOGE, FLOKI, KISHU
+  DEFI: CAKE, XVS (Venus), BNX, ALPHA
+  INFRA: BNB, BUSD
 
-POLITICS: Political-themed tokens.
-  Notable: TRUMP (Official Trump), BODEN, KAMA, WALZ, DJT
+═══ ARBITRUM ═══
+Top ETH L2 by TVL.
+  MEMES: JUICE, MOON, ARB, XEN
+  DEFI: GMX, RDNT (Radiant), CAMELOT, PENDLE
+  INFRA: ARB
 
-GAMING: Gaming/crypto crossover tokens.
+═══ BITCOIN ═══
+Original chain. BRC-20 and Ordinals brought degen to BTC.
+  BRC-20: ORDI, SATS, RATS, MICE, PIPE
+  ORDINALS: NFT-like inscriptions on BTC
+  RUNES: New token standard (2024)
+  INFRA: BTC, WBTC (wrapped)
 
-META: Self-referential meta tokens about crypto culture itself.
+═══ AVALANCHE ═══
+  MEMES: COQ (Coq Inu), KIMBO, NOCH
+  INFRA: AVAX, JOE (Trader Joe), sAVAX
 
-FOOD/DRINK: Food-themed memes.
+═══ PULSECHAIN ═══
+  MEMES: PLS, HEX, PLSX (fork ecosystem)
 
-PUMP.FUN: The primary launchpad for Solana meme tokens. Most new coins launch here first, then graduate to Raydium when they hit ~$69k market cap.
+═══ TRON ═══
+  MEMES: TRX, BTT
+  DEFI: SUN, JST
 
-KEY SOLANA INFRASTRUCTURE:
-  SOL — the native token
-  JUP — Jupiter (biggest DEX aggregator)
-  RAY — Raydium (main AMM DEX)
-  JTO — Jito (liquid staking)
-  PYTH — Pyth Network (oracle)
-  WORMHOLE — cross-chain bridge
-  DRIFT — perp DEX
-  KAMINO — lending/liquidity
-  TENSOR — NFT marketplace
+═══ POLYGON ═══
+  MEMES: POL (formerly MATIC), DOG
+  INFRA: POL, QUICK (QuickSwap)
 
-SOLANA MEME ECOSYSTEM FACTS:
-  - Pump.fun launches ~20,000+ tokens per day
-  - ~99% are rugs/scams, ~1% graduate to Raydium
-  - Top Solana memes have hit $1B+ market caps (BONK, WIF, POPCAT)
-  - Solana dominates meme coin trading volume due to low fees (<$0.01) and fast finality (~400ms)
-  - Jupiter is the #1 swap aggregator; Raydium is #1 AMM
-  - Birdeye, DexScreener, GMGN, Photon are top charting/trading tools
-  - Most degen activity happens in Telegram groups and on X (Twitter)
+═══ DEGEN NARRATIVES (cross-chain) ═══
+AI/AGENTS: The hottest 2024-2025 narrative. Tokens building AI agents on-chain.
+  Solana: ARC, ZEREBRO, GOAT, AI16Z, GRIFT
+  ETH: TAO (Bittensor), FET, RENDER, OCEAN, NMR, OLAS
+  Base: VIRTUAL, LUNA
+  Sui: DEEP
 
-OTHER CHAINS FOR DEGEN:
-  - ETH: PEPE, SHIB, FLOKI, TURBO, MEME
-  - BASE: BRETT, DEGEN, HIGHER, MFER
-  - SUI: SUIMOB, SCALLOP
-  - BSC: CAKE, BNB memes
-  - Bitcoin: ORDI, SATS (BRC-20)
+MEME COINS: Culture-driven tokens. Can launch on any chain.
+  Dog: DOGE (original), SHIB, BONK, FLOKI, WIF, BORK, BABYDOGE
+  Cat: POPCAT, MEW, CAT
+  Frog: PEPE (ETH), PEPE variants everywhere
+  Political: TRUMP, BODEN, KAMA, WALZ
+  Meta: FARTCOIN, MIKE, TROLL, NORMIE
+
+DEFI: Decentralized finance protocols.
+  UNI (Uniswap), AAVE, CRV (Curve), GMX, PENDLE, JUP (Jupiter), RAY (Raydium)
+
+L2/L3: Layer 2 scaling solutions.
+  ARB, OP, BASE, POL, BLAST, MANTA, LINEA, SCROLL
+
+RESTAKING: EigenLayer ecosystem.
+  ETH, LSTs (Lido, Rocket Pool), AVS tokens
+
+RWA (Real World Assets): Tokenized real-world assets.
+  ONDO, MKR, RIO, RSR
+
+MEME LAUNCHPADS:
+  Pump.fun (Solana) — #1 meme launchpad, bonding curve model
+  Moonshot (multi-chain)
+  Believe (Solana)
+  Sunpump (Tron)
+
+KEY FACTS:
+  - Solana dominates meme coin volume due to low fees
+  - Pump.fun launches 20k+ tokens/day, 99% are rugs
+  - Base is fastest-growing L2 degen ecosystem
+  - ETH has the biggest mcap memes (PEPE, SHIB)
+  - Most degen trading happens on Telegram + X
+  - DexScreener covers ALL chains — not just Solana
+  - CoinGecko covers all major coins across all chains
+  - When asked about ANY chain, you know the degen tokens there
 """
+
+
+
+async def fetch_chain_trending(chain: str = "") -> str:
+    """
+    Fetch trending tokens from CoinGecko (all chains or specific).
+    Returns formatted string for AI injection.
+    """
+    lines = []
+    try:
+        # CoinGecko trending (global, all chains)
+        trending = await asyncio.wait_for(cg_trending(), timeout=8)
+        if trending and "coins" in trending:
+            lines.append("[TRENDING ON COINGECKO — all chains]")
+            for item in trending.get("coins", [])[:10]:
+                coin = item.get("item", {})
+                name = coin.get("name", "?")
+                sym = coin.get("symbol", "?")
+                rank = coin.get("market_cap_rank", "N/A")
+                lines.append(f"  ${sym.upper()} ({name}) — Rank: {rank}")
+            lines.append("")
+    except Exception:
+        pass
+
+    # Also fetch DexScreener trending pairs for the chain
+    try:
+        async with aiohttp.ClientSession() as s:
+            url = "https://api.dexscreener.com/token-boosts/top/v1"
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                if r.status == 200:
+                    boosts = await r.json()
+                    if boosts:
+                        # Filter by chain if specified
+                        if chain:
+                            boosts = [b for b in boosts if b.get("chainId") == chain]
+                        lines.append(f"[DEXSCREENER TOP BOOSTED — {chain.upper() if chain else 'ALL CHAINS'}]")
+                        for b in boosts[:10]:
+                            lines.append(
+                                f"  ${b.get('symbol','?').upper()} — {b.get('name','?')} "
+                                f"[{b.get('chainId','?').upper()}] "
+                                f"MCap ${float(b.get('marketCap',0) or 0):,.0f}"
+                            )
+                        lines.append("")
+    except Exception:
+        pass
+
+    return "\n".join(lines) if lines else ""
 
 
 async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
@@ -749,9 +906,14 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         f"{market_block}"
         f"{NARRATIVE_KB}\n"
         "You are Kayo. You live in a Solana degen Telegram group. Sharp, real, funny. "
-        "You are a Web3 NATIVE — you know every Solana narrative, every major token, "
-        "every chain's degen ecosystem. When someone asks about coins in a narrative "
-        "(degen, AI, dog, cat, meme, politics), you KNOW the space. "
+        "You are a FULL-STACK WEB3 NATIVE. You know EVERY chain — Solana, Ethereum, Base, Sui, "
+        "BSC, Arbitrum, Bitcoin, Avalanche, Polygon, Tron. You know every narrative — degen, AI, "
+        "dog, cat, frog, politics, meme, DeFi, RWA, restaking, L2, NFT. "
+        "When someone asks 'what degen coins on Solana' or 'what's on Base' or 'top AI tokens' — "
+        "you KNOW the tokens, their narratives, their prices, and which chain they're on. "
+        "You have a LIVE WEB3 NARRATIVE KNOWLEDGE BASE above — USE IT. "
+        "You also get live token data injected when you ask about specific narratives/chains. "
+        "Always cite real tokens with real data. Never say you don't know Web3. "
         "You think like a Web3 power user who also knows everything — sports, culture, science, life. "
         "RULES: "
         "1. Answer EVERYTHING. Never say you cant. Never say you are a bot. Never refuse. "
@@ -775,16 +937,21 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
     # ── NARRATIVE DETECTION ──
     # When user asks "what degen coins on Solana?" or "show me AI tokens"
     narrative_keywords_map = {
-        "degen": ["degen", "degen", "ape", "casino", "gamble", "high risk"],
-        "ai": ["ai", "agent", "llm", "gpt", "robot", "autonomous", "machine learning"],
+        "degen": ["degen", "ape", "casino", "gamble", "high risk", "rug", "moonshot"],
+        "ai": ["ai", "agent", "llm", "gpt", "robot", "autonomous", "machine learning", "bittensor", "tao"],
         "dog": ["dog", "doge", "puppy", "shib", "inu", "canine"],
         "cat": ["cat", "kitty", "feline", "meow", "kitten"],
         "frog": ["frog", "pepe", "ribbit"],
-        "politics": ["politic", "trump", "maga", "biden", "election", "president"],
+        "politics": ["politic", "trump", "maga", "biden", "election", "president", "kama", "walz"],
         "meme": ["meme", "funny", "viral", "lol"],
         "gaming": ["game", "gaming", "play", "arcade", "esports"],
         "food": ["food", "drink", "coffee", "pizza", "burger", "snack"],
         "pump": ["pump", "pump.fun", "bonding curve", "just launched"],
+        "defi": ["defi", "lending", "borrowing", "yield", "swap", "amm", "dex", "liquidity"],
+        "rwa": ["rwa", "real world", "tokenized", "treasury", "ondo"],
+        "restaking": ["restake", "restaking", "eigenlayer", "avs"],
+        "l2": ["l2", "layer 2", "scaling", "rollup", "arbitrum", "optimism", "base", "blast"],
+        "nft": ["nft", "ordinals", "brc-20", "runes", "inscription"],
     }
 
     prompt_lower = prompt.lower()
@@ -793,25 +960,68 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         if any(kw in prompt_lower for kw in keywords):
             detected_narratives.append(nar_name)
 
-    # Also detect "sol chain" or "solana" mentions
-    asks_about_solana = any(kw in prompt_lower for kw in ["sol chain", "solana", "sol chain", "$sol", "on sol"])
+    # ── CHAIN DETECTION ──
+    # Detect which chain the user is asking about
+    chain_keywords = {
+        "solana": ["solana", "sol chain", "$sol", "on sol", "solana chain", "pump.fun"],
+        "ethereum": ["ethereum", "eth chain", "$eth", "on eth", "ether", "mainnet"],
+        "base": ["base chain", "on base", "$base", "base l2", "coinbase l2"],
+        "sui": ["sui chain", "on sui", "$sui"],
+        "bsc": ["bsc", "binance chain", "smart chain", "on bsc", "binance"],
+        "arbitrum": ["arbitrum", "arb chain", "on arb", "l2 arb"],
+        "bitcoin": ["bitcoin chain", "btc chain", "on btc", "brc-20", "ordinals", "runes"],
+        "avalanche": ["avalanche", "avax chain", "on avax"],
+        "polygon": ["polygon", "matic chain", "on matic", "pol chain"],
+        "tron": ["tron", "trx chain", "on tron"],
+        "blast": ["blast chain", "on blast"],
+    }
+
+    detected_chain = ""
+    asks_about_solana = False
+    for chain_name, keywords in chain_keywords.items():
+        if any(kw in prompt_lower for kw in keywords):
+            detected_chain = chain_name
+            if chain_name == "solana":
+                asks_about_solana = True
+            break
+
+    # If user asks "what coins on [chain]" or "what degen on [chain]"
+    asks_about_chain = any(kw in prompt_lower for kw in ["what coins", "what degen", "what tokens", "coins on", "tokens on", "what's on", "narratives on", "memes on", "show me", "web3", "crypto market", "all chains", "every chain", "top narratives", "trending"])
 
     narrative_block = ""
-    if detected_narratives:
-        # Fetch live tokens for each detected narrative
-        nar_results = await asyncio.gather(
-            *[search_narrative_tokens(nar) for nar in detected_narratives[:3]],
-            return_exceptions=True
-        )
+    fetch_tasks = []
+
+    # ── If user asks about a specific chain, search that chain ──
+    if detected_chain and (asks_about_chain or detected_narratives):
+        for nar in detected_narratives[:3]:
+            fetch_tasks.append(search_narrative_tokens(nar, chain=detected_chain))
+        # Also fetch trending on that chain
+        fetch_tasks.append(fetch_chain_trending(chain=detected_chain))
+    elif detected_narratives:
+        # No specific chain — search ALL chains
+        for nar in detected_narratives[:3]:
+            fetch_tasks.append(search_narrative_tokens(nar))
+        fetch_tasks.append(fetch_chain_trending())
+    elif asks_about_chain and detected_chain:
+        # Asking "what's on [chain]" without specific narrative
+        fetch_tasks.append(fetch_chain_trending(chain=detected_chain))
+        # Also search for "degen" as default narrative
+        fetch_tasks.append(search_narrative_tokens("degen", chain=detected_chain))
+    elif asks_about_chain:
+        # "what coins are on web3" — fetch global trending
+        fetch_tasks.append(fetch_chain_trending())
+
+    if fetch_tasks:
+        nar_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
         nar_lines = []
-        for nar, result in zip(detected_narratives[:3], nar_results):
+        for result in nar_results:
             if not isinstance(result, Exception) and result:
                 nar_lines.append(result)
         if nar_lines:
             narrative_block = "\n\n" + "\n\n".join(nar_lines) + "\n"
 
     # ── PRICE DETECTION ──
-    price_keywords = _re_price.findall(r"\$(\w{2,10})|\b(btc|eth|sol|bnb|xrp|doge|ada|avax|dot|link|uni|ltc|near|apt|sui|pepe|shib|bonk|wif|jup|ray|jto|trump|popcat|bome|matic|arb|op|atom|ftm|hbar|algo|fil|icp|rndr|render|pyth|w|drift|kmno|tensor)\b", prompt, _re_price.IGNORECASE)
+    price_keywords = _re_price.findall(r"\$(\w{2,10})|\b(btc|eth|sol|bnb|xrp|doge|ada|avax|dot|link|uni|ltc|near|apt|sui|pepe|shib|bonk|wif|jup|ray|jto|trump|popcat|bome|matic|arb|op|atom|ftm|hbar|algo|fil|icp|rndr|render|pyth|w|drift|kmno|tensor|tao|fet|ocean|ondo|pendle|gmx|aave|ldo|mkr|crv|comp|brett|degen|aero|blast|manta|ordi|coq|joe|cake|trx|floki|turbo|sats|pol|inj|sei|tia|kas|kaspa|kava|mina|eigen|nmr|olas|sc|normie|mfer|higher)\b", prompt, _re_price.IGNORECASE)
     if price_keywords:
         # Flatten and deduplicate
         symbols = list(set(
@@ -1055,10 +1265,23 @@ async def dex_pairs_by_token(addr: str) -> List[Dict]:
     d = await _get(f"{_DSX}/token-pairs/v1/solana/{addr}")
     return d if isinstance(d, list) else []
 
-async def dex_search_pairs(query: str) -> List[Dict]:
+async def dex_search_pairs(query: str, chain: str = "solana") -> List[Dict]:
+    """Search DexScreener pairs. chain=None returns ALL chains."""
     d = await _get(f"{_DSX}/latest/dex/search?q={query.replace(' ','+')}")
     if d and "pairs" in d:
-        return [p for p in d["pairs"] if p.get("chainId") == "solana"]
+        if chain:
+            return [p for p in d["pairs"] if p.get("chainId") == chain]
+        return d["pairs"]
+    return []
+
+async def dex_search_all_chains(query: str, limit: int = 30) -> List[Dict]:
+    """Search DexScreener across ALL chains — returns sorted by liquidity."""
+    d = await _get(f"{_DSX}/latest/dex/search?q={query.replace(' ','+')}")
+    if d and "pairs" in d:
+        pairs = d["pairs"]
+        # Sort by liquidity descending
+        pairs.sort(key=lambda p: float((p.get("liquidity") or {}).get("usd", 0) or 0), reverse=True)
+        return pairs[:limit]
     return []
 
 async def dex_token_profiles_latest() -> List[Dict]:
