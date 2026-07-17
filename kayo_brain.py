@@ -818,7 +818,8 @@ def _risk(score: int) -> str:
 
 def _safe_md(text: str) -> str:
     """Escape special chars that break Telegram MarkdownV1."""
-    return text
+    if not text: return ""
+    return re.sub(r'([*_`\[\]])', r'\\\1', str(text))
 
 # ═══════════════════════════════════════════════════════════════
 # DEXSCREENER — ALL ENDPOINTS (no API key)
@@ -2969,7 +2970,7 @@ async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
                             f"Price: *${price:,.4f}*\n"
                             f"24h: {_pct(chg24)}\n"
                             f"MCap: `{_usd(mcap)}`  Vol 24h: `{_usd(vol)}`\n"
-                            f"\n_Live data as of {datetime.utcnow().strftime(chr(37)+chr(72)+chr(58)+chr(37)+chr(77)+chr(32)+chr(85)+chr(84)+chr(67))}_",
+                            f"\n_Live data as of {datetime.utcnow().strftime('%H:%M UTC')}_",
                             parse_mode="Markdown"
                         )
                         return
@@ -2991,7 +2992,7 @@ async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"Price: *{_price(price)}*\n"
             f"24h: {_pct(ch24)}  MCap: `{_usd(fdv)}`\n"
-            f"\n_Live data as of {datetime.utcnow().strftime(chr(37)+chr(72)+chr(58)+chr(37)+chr(77)+chr(32)+chr(85)+chr(84)+chr(67))}_",
+            f"\n_Live data as of {datetime.utcnow().strftime('%H:%M UTC')}_",
             parse_mode="Markdown"
         )
     else:
@@ -3210,7 +3211,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     # Escape dynamic values to prevent Markdown parse errors
     import re as _re_st
-    def _esc(s): return _re_st.sub(r'([*_`\[\]()~>#+=|{}.!\\])', r'\\\1', str(s))
+    def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
         f"\u2699\ufe0f *KAYO BRAIN v40 STATUS*\n"
@@ -6519,20 +6520,47 @@ async def global_error_handler(u: Update, context):
 
 def safe_command(fn):
     """Decorator that wraps any command handler with try/except.
-    If the command crashes, the user gets an error message instead of silence."""
+    If the command crashes, retries with plain text, then shows error."""
     async def wrapper(u: Update, c: ContextTypes.DEFAULT_TYPE):
         try:
             return await fn(u, c)
         except Exception as e:
-            logger.error(f"Command {fn.__name__} failed: {e}", exc_info=True)
+            err_str = str(e)[:120]
+            logger.error(f"Command {fn.__name__} failed: {err_str}", exc_info=True)
+            # Don't spam error messages for every minor failure
             try:
-                if u and u.message:
+                if u and u.effective_message:
+                    # Try plain text — no markdown
                     await u.effective_message.reply_text(
-                        f"⚠️ `{fn.__name__}` failed: {str(e)[:80]}\nTry /help or /ping"
+                        f"⚠️ /{fn.__name__.replace('_cmd','')} hit an error: {err_str}\nTry /help or /ping"
                     )
             except Exception:
                 pass
     return wrapper
+
+
+async def safe_send(target, text: str, parse_mode: str = "Markdown", **kwargs):
+    """Send a message with Markdown, auto-fallback to plain text on parse error."""
+    try:
+        return await target.reply_text(text, parse_mode=parse_mode, **kwargs)
+    except Exception:
+        try:
+            plain = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', text)
+            return await target.reply_text(plain, **kwargs)
+        except Exception:
+            return None
+
+async def safe_edit(msg, text: str, parse_mode: str = "Markdown", **kwargs):
+    """Edit a message with Markdown, auto-fallback to plain text on parse error."""
+    try:
+        return await msg.edit_text(text, parse_mode=parse_mode, **kwargs)
+    except Exception:
+        try:
+            plain = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', text)
+            return await msg.edit_text(plain, **kwargs)
+        except Exception:
+            return None
+
 
 
 # ═══════════════════════════════════════════════════════════════
