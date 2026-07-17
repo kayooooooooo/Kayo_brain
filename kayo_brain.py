@@ -230,7 +230,181 @@ def set_setting(uid, key, val):
 # Fetches BTC/SOL/ETH real-time prices so AI never hallucinates
 # ═══════════════════════════════════════════════════════════════
 _market_ctx_cache: Dict = {"data": None, "ts": 0}
-_MARKET_CTX_TTL = 120   # seconds between refreshes
+_MARKET_CTX_TTL = 45    # seconds — fresher prices
+
+
+# ── UNIVERSAL LIVE PRICE FETCHER ────────────────────────────────────
+# Solana tokens → DexScreener. Major coins → CoinGecko. Always live.
+_CACHE_PRICES: Dict[str, Dict] = {}  # symbol/addr → {price, ts}
+
+async def fetch_live_price(query: str) -> Dict:
+    """
+    Fetch REAL-TIME price for ANY coin or token.
+    Tries: CoinGecko (majors) → DexScreener (Solana tokens) → cache.
+    Returns: {price, change_24h, mcap, vol_24h, source, sym, name}
+    """
+    q = query.lower().strip().lstrip("$")
+    now = time.time()
+
+    # Check cache (10s TTL for price queries)
+    cache_key = q
+    if cache_key in _CACHE_PRICES and (now - _CACHE_PRICES[cache_key].get("ts", 0)) < 10:
+        return _CACHE_PRICES[cache_key]
+
+    result = {"price": 0, "change_24h": 0, "mcap": 0, "vol_24h": 0, "source": "", "sym": q.upper(), "name": ""}
+
+    # ── 1. Try CoinGecko for major coins ──────────────────────────
+    COIN_MAP = {
+        "btc": "bitcoin", "bitcoin": "bitcoin",
+        "sol": "solana", "solana": "solana",
+        "eth": "ethereum", "ethereum": "ethereum",
+        "bnb": "binancecoin", "binancecoin": "binancecoin",
+        "xrp": "ripple", "ripple": "ripple",
+        "doge": "dogecoin", "dogecoin": "dogecoin",
+        "ada": "cardano", "cardano": "cardano",
+        "avax": "avalanche-2", "avalanche": "avalanche-2",
+        "dot": "polkadot", "polkadot": "polkadot",
+        "link": "chainlink", "chainlink": "chainlink",
+        "uni": "uniswap", "uniswap": "uniswap",
+        "ltc": "litecoin", "litecoin": "litecoin",
+        "near": "near", "apt": "aptos", "aptos": "aptos",
+        "sui": "sui", "pepe": "pepe", "shib": "shiba-inu", "shiba-inu": "shiba-inu",
+        "shiba": "shiba-inu",
+        "bonk": "bonk", "wif": "dogwifcoin", "dogwifcoin": "dogwifcoin",
+        "jup": "jupiter-exchange-solana", "jupiter": "jupiter-exchange-solana",
+        "ray": "raydium", "raydium": "raydium",
+        "jto": "jito-governance-token",
+        "trump": "trump-official", "official-trump": "trump-official",
+        "popcat": "popcat", "bome": "book-of-meme",
+        "matic": "matic-network", "pol": "matic-network",
+        "arb": "arbitrum", "op": "optimism",
+        "atom": "cosmos", "ftm": "fantom",
+        "hbar": "hedera-hashgraph", "alg": "algorand", "algo": "algorand",
+        "fil": "filecoin", "icp": "internet-computer",
+        "render": "render-token", "rndr": "render-token",
+        "tiao": "taiyo-2",
+        "ena": "ena", "pyth": "pyth-network",
+        "w": "wormhole", "wormhole": "wormhole",
+        "io": "io-net", "ionet": "io-net",
+        "drift": "drift-protocol",
+        "kmno": "kamino",
+        "tensor": "tensor", "tns": "tensor",
+    }
+
+    coin_id = COIN_MAP.get(q) or COIN_MAP.get(query.lower().strip())
+
+    if coin_id:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    f"https://api.coingecko.com/api/v3/simple/price"
+                    f"?ids={coin_id}&vs_currencies=usd"
+                    f"&include_24hr_change=true&include_market_cap=true&include_24hr_vol=true",
+                    timeout=aiohttp.ClientTimeout(total=8),
+                    headers={"User-Agent": "Mozilla/5.0"}
+                ) as r:
+                    if r.status == 200 and coin_id in (await r.json()):
+                        d = (await r.json())[coin_id]
+                        result = {
+                            "price": float(d.get("usd", 0) or 0),
+                            "change_24h": float(d.get("usd_24h_change", 0) or 0),
+                            "mcap": float(d.get("usd_market_cap", 0) or 0),
+                            "vol_24h": float(d.get("usd_24h_vol", 0) or 0),
+                            "source": "CoinGecko",
+                            "sym": q.upper(),
+                            "name": coin_id,
+                        }
+                        if result["price"] > 0:
+                            result["ts"] = now
+                            _CACHE_PRICES[cache_key] = result
+                            return result
+        except Exception:
+            pass
+
+    # ── 2. Try DexScreener (Solana token by symbol or CA) ────────
+    try:
+        async with aiohttp.ClientSession() as s:
+            # If it looks like a CA (32-44 base58), search by token address
+            if len(query) >= 32 and query[0] in "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz":
+                ds_url = f"https://api.dexscreener.com/latest/dex/tokens/{query}"
+            else:
+                # Search by symbol
+                ds_url = f"https://api.dexscreener.com/latest/dex/search?q={query}"
+
+            async with s.get(ds_url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    pairs = d.get("pairs") or d.get("pair") or []
+                    if pairs:
+                        # Find the Solana pair with highest liquidity
+                        sol_pairs = [p for p in pairs if p.get("chainId") == "solana"]
+                        all_pairs = sol_pairs if sol_pairs else pairs
+                        best = max(all_pairs, key=lambda p: float((p.get("liquidity") or {}).get("usd", 0) or 0))
+
+                        price = float(best.get("priceUsd", 0) or 0)
+                        if price > 0:
+                            chg = best.get("priceChange", {}) or {}
+                            result = {
+                                "price": price,
+                                "change_24h": float(chg.get("h24", 0) or 0),
+                                "change_1h": float(chg.get("h1", 0) or 0),
+                                "change_5m": float(chg.get("m5", 0) or 0),
+                                "mcap": float(best.get("marketCap", 0) or best.get("fdv", 0) or 0),
+                                "vol_24h": float((best.get("volume") or {}).get("h24", 0) or 0),
+                                "liq": float((best.get("liquidity") or {}).get("usd", 0) or 0),
+                                "source": "DexScreener",
+                                "sym": (best.get("baseToken") or {}).get("symbol", q.upper()),
+                                "name": (best.get("baseToken") or {}).get("name", ""),
+                                "addr": (best.get("baseToken") or {}).get("address", ""),
+                                "ts": now,
+                            }
+                            _CACHE_PRICES[cache_key] = result
+                            return result
+    except Exception:
+        pass
+
+    # ── 3. Check broader market context cache as last resort ──────
+    if _market_ctx_cache.get("data"):
+        # Try to find the symbol in the cached context
+        cached = _market_ctx_cache["data"]
+        for line in cached.split("\n"):
+            if q.upper() in line and "$" in line:
+                # Extract price from line like "📈 BTC: $67,234 (1.2%)"
+                import re as _re
+                m = _re.search(r"\$([0-9,]+\.?[0-9]*)", line)
+                if m:
+                    price_str = m.group(1).replace(",", "")
+                    try:
+                        result = {
+                            "price": float(price_str),
+                            "change_24h": 0,
+                            "mcap": 0,
+                            "vol_24h": 0,
+                            "source": "Cache",
+                            "sym": q.upper(),
+                            "ts": now,
+                        }
+                        return result
+                    except Exception:
+                        pass
+
+    result["ts"] = now
+    _CACHE_PRICES[cache_key] = result
+    return result
+
+
+async def fetch_multiple_prices(queries: List[str]) -> Dict[str, Dict]:
+    """Fetch multiple prices in parallel — used for AI context enrichment."""
+    results = await asyncio.gather(
+        *[fetch_live_price(q) for q in queries],
+        return_exceptions=True
+    )
+    out = {}
+    for q, r in zip(queries, results):
+        if not isinstance(r, Exception) and r.get("price", 0) > 0:
+            out[q] = r
+    return out
+
 
 async def get_live_market_context() -> str:
     """
@@ -249,7 +423,7 @@ async def get_live_market_context() -> str:
                 "https://api.coingecko.com/api/v3/simple/price"
                 "?ids=bitcoin,solana,ethereum,binancecoin,ripple,cardano,avalanche-2,"
                 "dogecoin,polkadot,chainlink,uniswap,litecoin,near,aptos,sui,"
-                "pepe,shiba-inu,bonk,dogwifcoin,jupiter,raydium,jito-governance-token,"
+                "pepe,shiba-inu,bonk,dogwifcoin,jupiter-exchange-solana,raydium,jito-governance-token,"
                 "trump-official,popcat,book-of-meme"
                 "&vs_currencies=usd"
                 "&include_24hr_change=true"
@@ -295,7 +469,7 @@ async def get_live_market_context() -> str:
                             "polkadot":"DOT","chainlink":"LINK","uniswap":"UNI","litecoin":"LTC",
                             "near":"NEAR","aptos":"APT","sui":"SUI","pepe":"PEPE",
                             "shiba-inu":"SHIB","bonk":"BONK","dogwifcoin":"WIF",
-                            "jupiter":"JUP","raydium":"RAY","jito-governance-token":"JTO",
+                            "jupiter-exchange-solana":"JUP","raydium":"RAY","jito-governance-token":"JTO",
                             "trump-official":"TRUMP","popcat":"POPCAT","book-of-meme":"BOME",
                         }
                         sym = sym_map.get(name_id, name_id.upper()[:6])
@@ -310,7 +484,7 @@ async def get_live_market_context() -> str:
                         "bitcoin","ethereum","solana","binancecoin","ripple",
                         "cardano","avalanche-2","dogecoin","polkadot","chainlink",
                         "near","aptos","sui","pepe","shiba-inu","bonk","dogwifcoin",
-                        "jupiter","raydium","trump-official","popcat","book-of-meme"
+                        "jupiter-exchange-solana","raydium","trump-official","popcat","book-of-meme"
                     ]
                     coin_lines = [_fmt_coin(cid, d, d) for cid in coin_ids]
                     coin_lines = [x for x in coin_lines if x]
@@ -339,7 +513,36 @@ async def get_live_market_context() -> str:
     except Exception as e:
         logger.debug(f"market_ctx: {e}")
 
-    # fallback minimal context
+    # ── FALLBACK: If CoinGecko failed, fetch from DexScreener ──
+    try:
+        async with aiohttp.ClientSession() as s:
+            # Fetch SOL, top Solana tokens from DexScreener as fallback
+            async with s.get(
+                "https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112",
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    pairs = d.get("pairs", [])
+                    if pairs:
+                        sol_price = float(pairs[0].get("priceUsd", 0) or 0)
+                        if sol_price > 0:
+                            ctx = (
+                                f"[LIVE MARKET — {datetime.utcnow().strftime('%d %b %Y %H:%M UTC')} — via DexScreener]\n"
+                                f"SOL: ${sol_price:,.2f}\n"
+                                f"(CoinGecko rate limited — only SOL price available)\n"
+                                f"---\n"
+                                f"You are Kayo — a sharp Solana alpha intelligence. "
+                                f"Use the SOL price above. For other coins, use DexScreener data if you have it. "
+                                f"Be honest if you don't have a price."
+                            )
+                            _market_ctx_cache["data"] = ctx
+                            _market_ctx_cache["ts"] = now
+                            return ctx
+    except Exception:
+        pass
+
+    # Final fallback
     ctx = (
         f"[LIVE MARKET DATA - {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}]\n"
         f"(Price data temporarily unavailable - use DexScreener/CoinGecko as source.)\n"
@@ -395,6 +598,53 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         "FORMAT: Plain text mostly. *bold* only for key crypto numbers."
     )
     system_msg = {"role": "system", "content": system_content}
+
+    # ── ON-DEMAND PRICE ENRICHMENT ──────────────────────────────
+    # If the user's prompt mentions specific coin symbols, fetch their
+    # LIVE prices RIGHT NOW so the AI always has up-to-date data.
+    import re as _re_price
+    # Extract potential coin symbols ($BONK, SOL, btc, etc.)
+    price_keywords = _re_price.findall(r"\$(\w{2,10})|\b(btc|eth|sol|bnb|xrp|doge|ada|avax|dot|link|uni|ltc|near|apt|sui|pepe|shib|bonk|wif|jup|ray|jto|trump|popcat|bome|matic|arb|op|atom|ftm|hbar|algo|fil|icp|rndr|render|pyth|w|drift|kmno|tensor)\b", prompt, _re_price.IGNORECASE)
+    if price_keywords:
+        # Flatten and deduplicate
+        symbols = list(set(
+            (m[0] or m[1]).lower() for m in price_keywords if m[0] or m[1]
+        ))[:8]  # max 8 coins to avoid rate limits
+        if symbols:
+            live_prices = await asyncio.gather(
+                *[fetch_live_price(s) for s in symbols],
+                return_exceptions=True
+            )
+            price_lines = []
+            for s, p in zip(symbols, live_prices):
+                if not isinstance(p, Exception) and p.get("price", 0) > 0:
+                    icon = "📈" if p.get("change_24h", 0) >= 0 else "📉"
+                    chg = p.get("change_24h", 0)
+                    src = p.get("source", "")
+                    if p["price"] >= 1000:
+                        price_str = f"${p['price']:,.0f}"
+                    elif p["price"] >= 1:
+                        price_str = f"${p['price']:,.2f}"
+                    elif p["price"] >= 0.001:
+                        price_str = f"${p['price']:.4f}"
+                    else:
+                        price_str = f"${p['price']:.8f}"
+                    line = f"{icon} {p.get('sym', s.upper())}: {price_str} ({chg:+.1f}% 24h)"
+                    if p.get("mcap", 0) > 0:
+                        line += f" | MCap {_usd(p['mcap'])}"
+                    line += f" [{src}]"
+                    price_lines.append(line)
+            if price_lines:
+                # Prepend fresh prices to the system message
+                fresh_block = (
+                    f"\n\n[ON-DEMAND LIVE PRICES — fetched just now]\n"
+                    + "\n".join(price_lines)
+                    + "\nUse THESE prices — they are more recent than the context above.\n"
+                )
+                system_msg = {
+                    "role": "system",
+                    "content": system_content + fresh_block
+                }
 
     if GROQ_API_KEY:
         async with aiohttp.ClientSession() as s:
