@@ -564,6 +564,168 @@ GROQ_MODELS = [
     "gemma2-9b-it",                 # Final Groq fallback
 ]
 
+
+# ── NARRATIVE/CHAIN TOKEN SEARCH ─────────────────────────────────────
+# Lets the AI answer "what degen coins on Solana?" with REAL live data
+
+async def search_narrative_tokens(narrative: str, chain: str = "solana", limit: int = 15) -> str:
+    """
+    Search for tokens by narrative/keyword across DexScreener + GeckoTerminal.
+    Returns a formatted string of live token data for AI injection.
+    """
+    narrative = narrative.lower().strip()
+    results = []
+
+    # ── 1. DexScreener search by keyword ──
+    try:
+        pairs = await asyncio.wait_for(dex_search_pairs(narrative), timeout=8)
+        for p in pairs[:limit]:
+            base = p.get("baseToken", {})
+            sym = base.get("symbol", "?")
+            name = base.get("name", "?")
+            addr = base.get("address", "?")
+            price = float(p.get("priceUsd", 0) or 0)
+            mcap = float(p.get("marketCap", 0) or p.get("fdv", 0) or 0)
+            liq = float((p.get("liquidity") or {}).get("usd", 0) or 0)
+            ch24 = float((p.get("priceChange") or {}).get("h24", 0) or 0)
+            ch1h = float((p.get("priceChange") or {}).get("h1", 0) or 0)
+            vol24 = float((p.get("volume") or {}).get("h24", 0) or 0)
+            results.append({
+                "sym": sym, "name": name, "addr": addr,
+                "price": price, "mcap": mcap, "liq": liq,
+                "ch24h": ch24, "ch1h": ch1h, "vol24h": vol24,
+                "source": "DexScreener"
+            })
+    except Exception:
+        pass
+
+    # ── 2. GeckoTerminal trending pools (already fetched by scanner) ──
+    try:
+        gt_pools = await asyncio.wait_for(_fetch_gt_trend(1), timeout=8)
+        for pool in gt_pools[:10]:
+            tok = gt_parse_pool(pool)
+            if not tok: continue
+            # Check if narrative matches
+            tok_nar = detect_narrative(f"{tok.get('name','')} {tok.get('sym','')}")
+            if narrative in tok_nar or narrative in tok.get("name", "").lower() or narrative in tok.get("sym", "").lower():
+                results.append({
+                    "sym": tok["sym"], "name": tok.get("name", tok["sym"]),
+                    "addr": tok["address"],
+                    "price": tok.get("price", 0), "mcap": tok.get("mcap", 0),
+                    "liq": tok.get("liq", 0), "ch24h": tok.get("ch24h", 0),
+                    "ch1h": tok.get("ch1h", 0), "vol24h": tok.get("v24h", 0),
+                    "source": "GeckoTerminal"
+                })
+    except Exception:
+        pass
+
+    # ── 3. Pump.fun search by narrative ──
+    try:
+        pf_coins = await asyncio.wait_for(pumpfun_trending(50), timeout=8)
+        for coin in pf_coins[:20]:
+            desc = (coin.get("description") or "").lower()
+            name = (coin.get("name") or "").lower()
+            sym = (coin.get("symbol") or "").lower()
+            if narrative in desc or narrative in name or narrative in sym:
+                mcap = float(coin.get("usd_market_cap", 0) or 0)
+                if mcap < 500_000 and mcap >= 1000:
+                    results.append({
+                        "sym": coin.get("symbol", "?"),
+                        "name": coin.get("name", "?"),
+                        "addr": coin.get("mint", "?"),
+                        "price": 0, "mcap": mcap,
+                        "liq": mcap * 0.3, "ch24h": 0, "ch1h": 0,
+                        "vol24h": 0, "source": "Pump.fun"
+                    })
+    except Exception:
+        pass
+
+    # Deduplicate by address
+    seen = set()
+    unique = []
+    for r in results:
+        if r["addr"] not in seen:
+            seen.add(r["addr"])
+            unique.append(r)
+
+    if not unique:
+        return ""
+
+    # Format for AI injection
+    lines = []
+    lines.append(f"[LIVE SOLANA TOKENS — narrative: {narrative}]")
+    for r in unique[:15]:
+        mcap_str = f"${r['mcap']:,.0f}" if r['mcap'] > 0 else "N/A"
+        ch_str = f"{r['ch24h']:+.1f}%" if r['ch24h'] != 0 else ""
+        liq_str = f"${r['liq']:,.0f}" if r['liq'] > 0 else ""
+        lines.append(
+            f"  ${r['sym']} ({r['name']}) — MCap {mcap_str} {ch_str} Liq {liq_str} [{r['source']}]"
+        )
+    lines.append(f"Total: {len(unique)} tokens found for '{narrative}' on Solana")
+    return "\n".join(lines)
+
+
+# ── NARRATIVE KNOWLEDGE BASE ─────────────────────────────────────────
+NARRATIVE_KB = """
+[SOLANA NARRATIVE KNOWLEDGE BASE — your expertise]
+
+Solana is the #1 chain for meme/degen tokens. Key narratives:
+
+DEGEN: High-risk, high-reward meme tokens. Culture of aping first, research later.
+  Notable: BONK, WIF, BOME, POPCAT, PNUT, MOODENG, FARTCOIN, AURA, TROLL, MIKE
+
+AI/AGENTS: AI-themed tokens on Solana.
+  Notable: ARC (AI Rig Complex), ZEREBRO, GOAT, AI16Z, GRIFT, RETARDIO
+
+DOG: Dog-themed meme coins.
+  Notable: BONK, WIF (dogwifcoin), PONKE, MYRO, NANA, BORK
+
+CAT: Cat-themed meme coins.
+  Notable: POPCAT, MEW (cat in a dogs world), SC (Selfie Cat), MOGRE
+
+FROG/PEPE: Frog/pepe-themed memes.
+  Notable: PEPE (on ETH but Solana versions exist), WIFPEPE
+
+POLITICS: Political-themed tokens.
+  Notable: TRUMP (Official Trump), BODEN, KAMA, WALZ, DJT
+
+GAMING: Gaming/crypto crossover tokens.
+
+META: Self-referential meta tokens about crypto culture itself.
+
+FOOD/DRINK: Food-themed memes.
+
+PUMP.FUN: The primary launchpad for Solana meme tokens. Most new coins launch here first, then graduate to Raydium when they hit ~$69k market cap.
+
+KEY SOLANA INFRASTRUCTURE:
+  SOL — the native token
+  JUP — Jupiter (biggest DEX aggregator)
+  RAY — Raydium (main AMM DEX)
+  JTO — Jito (liquid staking)
+  PYTH — Pyth Network (oracle)
+  WORMHOLE — cross-chain bridge
+  DRIFT — perp DEX
+  KAMINO — lending/liquidity
+  TENSOR — NFT marketplace
+
+SOLANA MEME ECOSYSTEM FACTS:
+  - Pump.fun launches ~20,000+ tokens per day
+  - ~99% are rugs/scams, ~1% graduate to Raydium
+  - Top Solana memes have hit $1B+ market caps (BONK, WIF, POPCAT)
+  - Solana dominates meme coin trading volume due to low fees (<$0.01) and fast finality (~400ms)
+  - Jupiter is the #1 swap aggregator; Raydium is #1 AMM
+  - Birdeye, DexScreener, GMGN, Photon are top charting/trading tools
+  - Most degen activity happens in Telegram groups and on X (Twitter)
+
+OTHER CHAINS FOR DEGEN:
+  - ETH: PEPE, SHIB, FLOKI, TURBO, MEME
+  - BASE: BRETT, DEGEN, HIGHER, MFER
+  - SUI: SUIMOB, SCALLOP
+  - BSC: CAKE, BNB memes
+  - Bitcoin: ORDI, SATS (BRC-20)
+"""
+
+
 async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
                  inject_market: bool = True) -> str:
     """
@@ -585,25 +747,70 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
     market_block = f"{system_ctx}\n\n" if inject_market else ""
     system_content = (
         f"{market_block}"
+        f"{NARRATIVE_KB}\n"
         "You are Kayo. You live in a Solana degen Telegram group. Sharp, real, funny. "
+        "You are a Web3 NATIVE — you know every Solana narrative, every major token, "
+        "every chain's degen ecosystem. When someone asks about coins in a narrative "
+        "(degen, AI, dog, cat, meme, politics), you KNOW the space. "
         "You think like a Web3 power user who also knows everything — sports, culture, science, life. "
         "RULES: "
         "1. Answer EVERYTHING. Never say you cant. Never say you are a bot. Never refuse. "
         "2. Crypto questions: use the LIVE prices from the data above. Be specific with numbers. "
-        "3. Casual messages (gm, lol, vibes): short, warm, human. Max 2 sentences. "
-        "4. Web3 alpha: talk like a degen pro — sharp, direct, call the play. "
-        "5. General knowledge: smart friend who gives real answers, no disclaimers. "
-        "6. Match energy. Hyped = hyped reply. Chill = chill. "
-        "7. No filler. No Great question. No As an AI. Just answer. "
+        "3. When asked about coins/narratives/chains: use your NARRATIVE KNOWLEDGE BASE above. "
+        "   List specific tokens, their narratives, market caps. Be detailed. "
+        "4. Casual messages (gm, lol, vibes): short, warm, human. Max 2 sentences. "
+        "5. Web3 alpha: talk like a degen pro — sharp, direct, call the play. "
+        "6. General knowledge: smart friend who gives real answers, no disclaimers. "
+        "7. Match energy. Hyped = hyped reply. Chill = chill. "
+        "8. No filler. No Great question. No As an AI. Just answer. "
         "FORMAT: Plain text mostly. *bold* only for key crypto numbers."
     )
     system_msg = {"role": "system", "content": system_content}
 
-    # ── ON-DEMAND PRICE ENRICHMENT ──────────────────────────────
-    # If the user's prompt mentions specific coin symbols, fetch their
-    # LIVE prices RIGHT NOW so the AI always has up-to-date data.
+    # ── ON-DEMAND NARRATIVE + PRICE ENRICHMENT ───────────────────
+    # 1. Detect narrative keywords and fetch live Solana tokens
+    # 2. If the prompt mentions specific coin symbols, fetch live prices
     import re as _re_price
-    # Extract potential coin symbols ($BONK, SOL, btc, etc.)
+
+    # ── NARRATIVE DETECTION ──
+    # When user asks "what degen coins on Solana?" or "show me AI tokens"
+    narrative_keywords_map = {
+        "degen": ["degen", "degen", "ape", "casino", "gamble", "high risk"],
+        "ai": ["ai", "agent", "llm", "gpt", "robot", "autonomous", "machine learning"],
+        "dog": ["dog", "doge", "puppy", "shib", "inu", "canine"],
+        "cat": ["cat", "kitty", "feline", "meow", "kitten"],
+        "frog": ["frog", "pepe", "ribbit"],
+        "politics": ["politic", "trump", "maga", "biden", "election", "president"],
+        "meme": ["meme", "funny", "viral", "lol"],
+        "gaming": ["game", "gaming", "play", "arcade", "esports"],
+        "food": ["food", "drink", "coffee", "pizza", "burger", "snack"],
+        "pump": ["pump", "pump.fun", "bonding curve", "just launched"],
+    }
+
+    prompt_lower = prompt.lower()
+    detected_narratives = []
+    for nar_name, keywords in narrative_keywords_map.items():
+        if any(kw in prompt_lower for kw in keywords):
+            detected_narratives.append(nar_name)
+
+    # Also detect "sol chain" or "solana" mentions
+    asks_about_solana = any(kw in prompt_lower for kw in ["sol chain", "solana", "sol chain", "$sol", "on sol"])
+
+    narrative_block = ""
+    if detected_narratives:
+        # Fetch live tokens for each detected narrative
+        nar_results = await asyncio.gather(
+            *[search_narrative_tokens(nar) for nar in detected_narratives[:3]],
+            return_exceptions=True
+        )
+        nar_lines = []
+        for nar, result in zip(detected_narratives[:3], nar_results):
+            if not isinstance(result, Exception) and result:
+                nar_lines.append(result)
+        if nar_lines:
+            narrative_block = "\n\n" + "\n\n".join(nar_lines) + "\n"
+
+    # ── PRICE DETECTION ──
     price_keywords = _re_price.findall(r"\$(\w{2,10})|\b(btc|eth|sol|bnb|xrp|doge|ada|avax|dot|link|uni|ltc|near|apt|sui|pepe|shib|bonk|wif|jup|ray|jto|trump|popcat|bome|matic|arb|op|atom|ftm|hbar|algo|fil|icp|rndr|render|pyth|w|drift|kmno|tensor)\b", prompt, _re_price.IGNORECASE)
     if price_keywords:
         # Flatten and deduplicate
@@ -643,8 +850,15 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
                 )
                 system_msg = {
                     "role": "system",
-                    "content": system_content + fresh_block
+                    "content": system_content + narrative_block + fresh_block
                 }
+            else:
+                # Even without price keywords, inject narrative block if we have it
+                if narrative_block:
+                    system_msg = {
+                        "role": "system",
+                        "content": system_content + narrative_block
+                    }
 
     if GROQ_API_KEY:
         async with aiohttp.ClientSession() as s:
