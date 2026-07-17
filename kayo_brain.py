@@ -114,6 +114,60 @@ _ai_reply_cooldown: dict           = {}  # uid → last AI reply ts (group rate-
 # BUG FIX: Use OrderedDict as a bounded ordered set so we can evict
 # the OLDEST entries (not random ones like plain set).
 seen_alert_ids:  "OrderedDict[str, int]" = OrderedDict()  # key=id, value=timestamp
+
+# ── LIVE SCANNER FEED ─────────────────────────────────────────────
+# Rolling cache of last 30 tokens seen by the scanner
+# This is what the AI uses when asked "what should I trade?"
+_live_feed: list = []          # list of token dicts, newest first
+_LIVE_FEED_MAX = 30            # keep last 30 tokens
+
+def _feed_add(t: dict):
+    """Add a token to the live scanner feed (newest first, capped at 30)."""
+    global _live_feed
+    addr = t.get("address", t.get("addr", ""))
+    # Remove duplicates
+    _live_feed = [x for x in _live_feed if x.get("address") != addr]
+    _live_feed.insert(0, {
+        "sym": t.get("sym", "?"),
+        "name": t.get("name", t.get("sym", "?")),
+        "address": addr,
+        "mcap": float(t.get("mcap", 0) or t.get("fdv", 0) or 0),
+        "liq": float(t.get("liq", 0) or 0),
+        "ch1h": float(t.get("ch1h", 0) or 0),
+        "ch24h": float(t.get("ch24h", 0) or 0),
+        "created": t.get("created", 0),
+        "narrative": t.get("narrative", ""),
+        "is_pumpfun": t.get("is_pumpfun", False),
+        "is_graduated": t.get("is_graduated", False),
+        "chain": t.get("chain", "solana"),
+        "seen_at": time.time(),
+    })
+    _live_feed = _live_feed[:_LIVE_FEED_MAX]
+
+def _build_live_feed_context() -> str:
+    """Format the live scanner feed for AI injection."""
+    if not _live_feed:
+        return ""
+    lines = ["[LIVE SCANNER FEED — tokens Kayo is currently watching, mcap under $500K]:"]
+    for i, t in enumerate(_live_feed[:15]):
+        mcap = t["mcap"]
+        if mcap > 500_000:
+            continue  # skip big caps
+        age_s = time.time() - t.get("seen_at", time.time())
+        age_str = _age_human(t.get("created", 0)) if t.get("created") else f"{int(age_s/60)}m ago"
+        platform = "Pump" if t.get("is_pumpfun") else ("Raydium" if t.get("is_graduated") else "DEX")
+        chain = t.get("chain", "Solana").capitalize()
+        nar = t.get("narrative", "")
+        nar_tag = f" #{nar}" if nar else ""
+        ch = t.get("ch1h", 0)
+        ch_str = f" {ch:+.0f}% 1h" if ch else ""
+        lines.append(
+            f"  {t['sym']} on {chain} @ {platform} — MCap ${mcap:,.0f}{ch_str} — {age_str}{nar_tag}"
+        )
+    if len(lines) == 1:
+        return ""  # No tokens under $500K
+    lines.append("When asked what to trade, use tokens FROM THIS LIST — not generic coins like BONK/PEPE.")
+    return "\n".join(lines)
 dropped_calls:   Dict[str, dict]         = {}  # addr -> {sym,entry_price,time,alert_type,...} for follow-ups
 pattern_memory: Dict[str, dict]         = {}  # alert_type+nar -> {wins,losses,total,avg_mult} for self-learning
 watchlist_seen:  "OrderedDict[str, int]" = OrderedDict()
@@ -935,9 +989,34 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         "6. General knowledge: smart friend who gives real answers, no disclaimers. "
         "7. Match energy. Hyped = hyped reply. Chill = chill. "
         "8. No filler. No Great question. No As an AI. Just answer. "
+        "9. When asked what to trade RIGHT NOW or what's hot: ONLY use tokens from LIVE SCANNER FEED below. "
+        "   Give name, mcap, age, chain, a one-line degen take. Max $500K mcap — degen range. "
+        "   NEVER recommend BONK/PEPE/WIF by default — those are large caps. Degens want micro-caps. "
         "FORMAT: Plain text mostly. *bold* only for key crypto numbers."
     )
-    system_msg = {"role": "system", "content": system_content}
+
+    # ── LIVE FEED INJECTION ──────────────────────────────────────────
+    # When someone asks "what should I trade" or "what's hot" etc.,
+    # inject the live scanner feed so AI uses REAL tokens not generic ones
+    trading_intent_kws = [
+        "what should i trade", "what memecoin", "what coin", "what to trade",
+        "what's hot", "whats hot", "what's popping", "what coin should",
+        "trade right now", "ape into", "what do you see", "what are you watching",
+        "what's moving", "whats moving", "show me coins", "give me alpha",
+        "what's good", "whats good", "latest coins", "new coins", "hot coins",
+        "what coin to buy", "which coin", "what token", "drop a ca", "drop something",
+        "what's cooking", "whats cooking", "got anything", "show coins",
+    ]
+    prompt_low = prompt.lower()
+    inject_feed = any(kw in prompt_low for kw in trading_intent_kws)
+    live_feed_block = ""
+    if inject_feed:
+        feed_ctx = _build_live_feed_context()
+        if feed_ctx:
+            live_feed_block = f"\n\n{feed_ctx}\n"
+    # Start with base system message + live feed if trading intent detected
+    base_system = system_content + live_feed_block if inject_feed else system_content
+    system_msg = {"role": "system", "content": base_system}
 
     # ── ON-DEMAND NARRATIVE + PRICE ENRICHMENT ───────────────────
     # 1. Detect narrative keywords and fetch live Solana tokens
@@ -1000,6 +1079,12 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
 
     narrative_block = ""
     fetch_tasks = []
+    # Ensure inject_feed is defined even if prompt check above was skipped
+    if "inject_feed" not in dir():
+        inject_feed = False
+        live_feed_block = ""
+    if "base_system" not in dir():
+        base_system = system_content
 
     # ── If user asks about a specific chain, search that chain ──
     if detected_chain and (asks_about_chain or detected_narratives):
@@ -3565,6 +3650,7 @@ async def bg_main_scanner(app: Application):
                 if _seen_check(seen_alert_ids, alert_id): continue
                 _seen_add(seen_alert_ids, alert_id)
                 asyncio.create_task(_save())
+                _feed_add(tok)   # ← add to live feed so AI knows what's hot
 
                 cooldown[addr] = now
 
@@ -4101,6 +4187,7 @@ async def bg_established_scanner(app: Application):
                 alert_id_est = hashlib.md5(alert_id_est.encode()).hexdigest()[:16]
                 if _seen_check(seen_alert_ids, alert_id_est): continue
                 _seen_add(seen_alert_ids, alert_id_est)
+                _feed_add(tok)   # ← add to live feed
 
                 seen_est[addr] = now
 
