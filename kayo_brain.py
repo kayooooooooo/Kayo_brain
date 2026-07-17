@@ -922,6 +922,86 @@ async def pumpfun_trending(limit: int = 10) -> List[Dict]:
         logger.debug(f"pumpfun_trending: {e}")
     return []
 
+
+def pumpfun_to_token(coin: Dict) -> Optional[Dict]:
+    """Convert Pump.fun coin API response → our standard token dict.
+    Extracts narrative from description + name + symbol.
+    """
+    try:
+        mint = coin.get("mint", "")
+        if not mint: return None
+        sym  = coin.get("symbol", coin.get("name", "???"))
+        name = coin.get("name", sym)
+        desc = coin.get("description", "") or ""
+
+        # Market cap from pump.fun (in USD)
+        mcap = float(coin.get("usd_market_cap", 0) or coin.get("market_cap", 0) or 0)
+        # Pump.fun doesn't give us price/liquidity directly in the coin listing
+        # but we can estimate liquidity from bonding curve reserves
+        virtual_sol = float(coin.get("virtual_sol_reserves", 0) or 0) / 1e9  # lamports to SOL
+        # Estimate: liq ≈ 30% of market cap for pump.fun bonding curve tokens
+        liq = max(mcap * 0.3, virtual_sol * 150) if mcap > 0 else 0
+
+        # Narratives from pump.fun description
+        nar = ""
+        nar_text = f"{name} {sym} {desc}".lower()
+        if any(kw in nar_text for kw in ["ai","agent","llm","gpt","robot","autonomous"]):  nar = "ai"
+        elif any(kw in nar_text for kw in ["dog","doge","pup","puppy","shib","inu"]):      nar = "dog"
+        elif any(kw in nar_text for kw in ["cat","kitty","kitten","feline","meow"]):       nar = "cat"
+        elif any(kw in nar_text for kw in ["frog","pepe","ribbit"]):                        nar = "frog"
+        elif any(kw in nar_text for kw in ["trump","maga","donald","politician"]):          nar = "politics"
+        elif any(kw in nar_text for kw in ["meme","funny","lol","viral"]):                  nar = "meme"
+        elif any(kw in nar_text for kw in ["game","gaming","play","arcade"]):              nar = "gaming"
+        elif any(kw in nar_text for kw in ["degen","degen","ape","casino","gamble"]):      nar = "degen"
+        elif any(kw in nar_text for kw in ["food","drink","coffee","pizza","burger"]):     nar = "food"
+        elif any(kw in nar_text for kw in ["frog","pepe","ribbit"]):                        nar = "meme"
+        else:
+            # Use detect_narrative as fallback
+            nar = detect_narrative(f"{name} {sym}")
+
+        # Social links
+        tw_link = coin.get("twitter", "") or ""
+        tg_link = coin.get("telegram", "") or ""
+        web_link = coin.get("website", "") or ""
+
+        # Created timestamp
+        created_ts = int(coin.get("created_timestamp", 0) or 0) / 1000 if coin.get("created_timestamp") else 0
+
+        # Reply count = social engagement signal
+        reply_count = int(coin.get("reply_count", 0) or 0)
+        is_live = bool(coin.get("is_currently_live", False))
+        is_banned = bool(coin.get("is_banned", False))
+        creator = coin.get("creator", "")
+        is_graduated = bool(coin.get("raydium_pool"))
+
+        return {
+            "address": mint, "sym": sym, "name": name,
+            "price": 0,  # pump.fun doesn't give price in listing
+            "fdv": mcap, "mcap": mcap, "liq": liq,
+            "liq_ratio": 30 if mcap > 0 else 0,
+            "ch5m": 0, "ch1h": 0, "ch6h": 0, "ch24h": 0,
+            "v5m": 0, "v1h": 0, "v24h": 0,
+            "b5m": 0, "s5m": 0, "b1h": 0, "s1h": 0,
+            "b24h": 0, "s24h": 0,
+            "buy_pct": 55,  # default bullish for fresh pump.fun tokens
+            "vol_spike": 1.0,
+            "created_str": coin.get("created_timestamp", ""),
+            "pair_addr": coin.get("bonding_curve", ""),
+            "narrative": nar,
+            "description": desc,
+            "tw_link": tw_link, "tg_link": tg_link, "web_link": web_link,
+            "creator": creator,
+            "reply_count": reply_count,
+            "is_pumpfun": True,
+            "is_pumpfun_live": is_live,
+            "is_graduated": is_graduated,
+            "is_banned": is_banned,
+            "created": created_ts,
+            "_source": "pumpfun",
+        }
+    except Exception:
+        return None
+
 async def fetch_social_signals() -> Dict:
     """
     Combined social signal from multiple real-time sources.
@@ -1272,6 +1352,10 @@ def build_scan_card(t: Dict, ai: str = "") -> str:
     name = _md(t.get("name", sym))
     age  = _age(t.get("created", 0))
     nar  = f" #{t.get('narrative','').upper()}" if t.get("narrative") else ""
+    pf_desc     = t.get("pf_description", "")
+    pf_replies  = t.get("pf_reply_count", 0)
+    is_pf       = t.get("is_pumpfun", False)
+    is_grad     = t.get("is_graduated", False)
     bp   = float(t.get("buy_pct", 50))
     sp   = 100 - bp
 
@@ -1356,7 +1440,7 @@ def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
         "narrative": "📖 NARRATIVE PLAY",
         "rug":       "⚠️ RUG ALERT",
         "unusual":   "⚡ UNUSUAL ACTIVITY",
-        "migration": "🔄 MIGRATION ALERT",
+        "migration": "🔄 GRADUATION ALERT",
         "rebrand":   "🏷️ REBRAND ALERT",
         "momentum":  "📈 MOMENTUM ALERT",
     }
@@ -1385,10 +1469,13 @@ def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
     press = "🔥 BUY PRESSURE" if bp > 60 else ("❄️ SELL PRESSURE" if bp < 40 else "⚖️ BALANCED")
 
     badges = []
+    if is_pf:               badges.append("🟣 Pump.fun")
+    if is_grad:             badges.append("✅ Graduated to Raydium")
     if t.get("is_renounced"): badges.append("✅ Renounced")
     if t.get("lp_locked"):    badges.append("🔒 LP Locked")
     if t.get("boost_active", 0) > 0: badges.append("💰 Boosted")
     if t.get("is_honeypot"):  badges.append("🚨 Honeypot")
+    if pf_replies >= 10:     badges.append(f"💬 {pf_replies} replies")
     badge_str = "  ".join(badges) if badges else "⚠️ Unverified"
 
     tax_line = ""
@@ -1406,12 +1493,18 @@ def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
     ms = int(t.get("mscore", 0))
     ms_emoji = "🔥" if ms >= 70 else ("⚡" if ms >= 40 else "💤")
 
+    pf_narrative_line = ""
+    if pf_desc and len(pf_desc) > 5:
+        # Show pump.fun narrative description (truncated)
+        pf_narrative_line = f"📖 _{pf_desc[:150]}_\n"
+
     card = (
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"  {header}{nar}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🪙 *{sym}* — _{name}_\n"
         f"📋 `{t.get('address', '')}`\n"
+        f"{pf_narrative_line}"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"💰 Price: `{_price(t.get('price', 0))}`  ·  Age: {age}\n"
         f"📊 MCap: `{_usd(t.get('mcap', 0))}`  ·  FDV: `{_usd(t.get('fdv', 0))}`\n"
@@ -3551,7 +3644,8 @@ async def fetch_token_metadata(addr: str) -> Dict:
         async with aiohttp.ClientSession() as s:
             # Try Pump.fun metadata
             async with s.get(
-                f"https://frontend-api.pump.fun/coins/{addr}",
+                f"https://frontend-api-v3.pump.fun/coins/{addr}",
+                headers=_PUMPFUN_HEADERS,
                 timeout=aiohttp.ClientTimeout(total=8)
             ) as r:
                 if r.status == 200:
@@ -3645,14 +3739,18 @@ async def fetch_smart_money_tokens() -> List[Dict]:
     return results
 
 async def _fetch_pumpfun_trending() -> List[Dict]:
+    """Get trending Pump.fun coins — uses v3 API."""
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(
-                "https://frontend-api.pump.fun/coins?offset=0&limit=20&sort=market_cap&order=DESC&includeNsfw=false",
+                "https://frontend-api-v3.pump.fun/coins",
+                params={"offset": "0", "limit": "20", "sort": "market_cap", "order": "DESC"},
+                headers=_PUMPFUN_HEADERS,
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as r:
                 if r.status == 200:
-                    return await r.json()
+                    data = await r.json()
+                    return data if isinstance(data, list) else []
     except Exception:
         pass
     return []
@@ -4483,13 +4581,15 @@ async def _fetch_pump_graduated() -> List[Dict]:
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(
-                "https://frontend-api.pump.fun/coins?offset=0&limit=50&sort=market_cap&order=DESC&includeNsfw=false",
+                "https://frontend-api-v3.pump.fun/coins",
+                params={"offset": "0", "limit": "50", "sort": "market_cap", "order": "DESC"},
+                headers=_PUMPFUN_HEADERS,
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as r:
                 if r.status == 200:
                     coins = await r.json()
-                    # Graduated = has raydium_pool set
-                    return [c for c in coins if c.get("raydium_pool")]
+                    if isinstance(coins, list):
+                        return [c for c in coins if c.get("raydium_pool")]
     except Exception:
         pass
     return []
@@ -4727,18 +4827,23 @@ async def bg_main_scanner(app: Application):
             now = time.time()
 
             # Fetch all sources in parallel (module-level helpers — no closure issues)
+            # Fetch GT + DexScreener + Pump.fun all in parallel
             batches = await asyncio.gather(
                 _fetch_gt_new(1), _fetch_gt_new(2), _fetch_gt_new(3),
                 _fetch_gt_new(4), _fetch_gt_new(5), _fetch_gt_new(6),
                 _fetch_gt_trend(1), _fetch_gt_trend(2), _fetch_gt_trend(3),
                 _fetch_dex_profiles(),
                 _fetch_dex_boosts(),
+                pumpfun_latest(50),      # v40: pump.fun newest launches
+                pumpfun_trending(20),     # v40: pump.fun trending
                 return_exceptions=True,
             )
 
             all_gt_pools = []
             dex_profiles_raw = []
             dex_boosts_raw   = []
+            pumpfun_new_raw  = []
+            pumpfun_trend_raw = []
             for idx, batch in enumerate(batches):
                 if isinstance(batch, Exception):
                     logger.debug(f"Scanner source {idx} error: {batch}")
@@ -4747,8 +4852,12 @@ async def bg_main_scanner(app: Application):
                     all_gt_pools += batch
                 elif idx == 9:
                     dex_profiles_raw = batch
-                else:
+                elif idx == 10:
                     dex_boosts_raw   = batch
+                elif idx == 11:
+                    pumpfun_new_raw = batch if isinstance(batch, list) else []
+                elif idx == 12:
+                    pumpfun_trend_raw = batch if isinstance(batch, list) else []
 
             boosted_addrs  = {b.get("tokenAddress", "") for b in dex_boosts_raw}
             profiled_addrs = {p.get("tokenAddress", "") for p in dex_profiles_raw}
@@ -4762,6 +4871,29 @@ async def bg_main_scanner(app: Application):
                 addr = tok["address"]
                 if addr not in pairs_map:
                     pairs_map[addr] = tok
+
+            # Add Pump.fun coins — extract narrative from description
+            pumpfun_narratives: Dict[str, str] = {}  # addr → narrative
+            pumpfun_meta: Dict[str, Dict] = {}       # addr → {desc, twitter, telegram, creator, reply_count}
+            for coin in (pumpfun_new_raw + pumpfun_trend_raw):
+                if not isinstance(coin, dict): continue
+                if coin.get("is_banned"): continue   # skip banned tokens
+                tok = pumpfun_to_token(coin)
+                if not tok: continue
+                addr = tok["address"]
+                if addr not in pairs_map:
+                    pairs_map[addr] = tok
+                pumpfun_narratives[addr] = tok.get("narrative", "")
+                pumpfun_meta[addr] = {
+                    "description": tok.get("description", ""),
+                    "tw_link": tok.get("tw_link", ""),
+                    "tg_link": tok.get("tg_link", ""),
+                    "web_link": tok.get("web_link", ""),
+                    "creator": tok.get("creator", ""),
+                    "reply_count": tok.get("reply_count", 0),
+                    "is_pumpfun": True,
+                    "is_graduated": tok.get("is_graduated", False),
+                }
 
             # Also fetch DexScreener detail for profiled/boosted coins not in GT
             extra_addrs = list((profiled_addrs | boosted_addrs) - set(pairs_map.keys()))
@@ -4855,8 +4987,17 @@ async def bg_main_scanner(app: Application):
                 if ch1h == 0 and ch5m == 0 and b1h == 0 and b5m == 0 and vol_spike < 1.05: continue
                 if eff_cap > 50_000 and liq / max(eff_cap, 1) < 0.002: continue
 
-                # Narrative + flags
+                # Narrative + flags — enriched with pump.fun data
                 nar = detect_narrative(f"{name} {sym}")
+                # Override with pump.fun narrative if available (more accurate)
+                if addr in pumpfun_narratives and pumpfun_narratives[addr]:
+                    nar = pumpfun_narratives[addr]
+                pf_meta = pumpfun_meta.get(addr, {})
+                is_pumpfun = bool(pf_meta)
+                is_pumpfun_live = pf_meta.get("is_pumpfun", False) and pairs_map[addr].get("is_pumpfun_live", False)
+                is_graduated = pf_meta.get("is_graduated", False)
+                pf_reply_count = pf_meta.get("reply_count", 0)
+                pf_desc = pf_meta.get("description", "")
                 is_boosted  = addr in boosted_addrs
                 is_rebranded = any(kw in name.lower() for kw in ["trump","maga","ai","agent","dog","cat","frog","ape","pepe","elon"])
 
@@ -4864,8 +5005,22 @@ async def bg_main_scanner(app: Application):
                 alert_type = None
                 is_fresh = (b1h + s1h) < 5  # brand-new token with almost no h1 history
 
+                # ── PUMP.FUN NEW LAUNCH — catch first, these are the freshest ──
+                if is_pumpfun and not is_graduated:
+                    # Active pump.fun bonding curve token with some market cap
+                    if mcap >= 1000 and mcap <= 500_000 and not pairs_map[addr].get("is_banned", False):
+                        # If it has a narrative description, it's a strong signal
+                        if pf_desc or pf_reply_count >= 5:
+                            alert_type = "new"
+                        elif mcap >= 5000:  # some traction even without description
+                            alert_type = "new"
+
+                # ── PUMP.FUN GRADUATION — token just moved to Raydium ──
+                elif is_pumpfun and is_graduated and mcap <= 500_000:
+                    alert_type = "migration"
+
                 # ── NEW LAUNCH: fresh token — most important to catch first ──
-                if is_fresh and liq >= 100 and buy_pct >= 50:
+                elif is_fresh and liq >= 100 and buy_pct >= 50:
                     alert_type = "new"  # any fresh token with liquidity + buy pressure
                 elif is_fresh and is_boosted and liq >= 80:
                     alert_type = "new"
@@ -4926,12 +5081,19 @@ async def bg_main_scanner(app: Application):
                     "risk_score": 30, "red_flags": [], "green_flags": [],
                     "sell_tax": 0, "buy_tax": 0, "is_honeypot": False,
                     "lp_locked": False, "is_renounced": False,
-                    "created": 0, "narrative": nar,
-                    "tw_link": "", "tg_link": "", "web_link": "",
+                    "created": pairs_map[addr].get("created", 0) if is_pumpfun else 0,
+                    "narrative": nar,
+                    "tw_link": pf_meta.get("tw_link", "") if is_pumpfun else "",
+                    "tg_link": pf_meta.get("tg_link", "") if is_pumpfun else "",
+                    "web_link": pf_meta.get("web_link", "") if is_pumpfun else "",
                     "boost_active": 1 if is_boosted else 0,
                     "has_profile": addr in profiled_addrs, "has_ad": False,
                     "pair_addr": pair_addr,
                     "mscore": min(100, int(abs(ch1h) + buy_pct / 2 + vol_spike * 10)),
+                    "is_pumpfun": is_pumpfun,
+                    "is_graduated": is_graduated,
+                    "pf_reply_count": pf_reply_count,
+                    "pf_description": pf_desc,
                 }
                 # Cap alerts per cycle to prevent flooding
                 if alert_count >= 15:
