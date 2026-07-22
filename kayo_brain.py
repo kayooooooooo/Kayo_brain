@@ -5318,97 +5318,6 @@ async def calc_token_velocity(addr: str) -> Dict:
         pass
     return result
 
-# ── 3. QUICKCHART.IO — visual price chart ────────────────────────────
-def build_quickchart_url(sym: str, prices: List[float], labels: List[str] = None) -> str:
-    """
-    Generate a free chart URL from quickchart.io — no API key needed.
-    Returns a URL to a PNG chart image embeddable in Telegram.
-    """
-    import urllib.parse
-    if not labels:
-        labels = [str(i) for i in range(len(prices))]
-    color = "#00ff88" if prices[-1] >= prices[0] else "#ff4444"
-    chart_config = {
-        "type": "line",
-        "data": {
-            "labels": labels[-20:],
-            "datasets": [{
-                "label": f"${sym}",
-                "data": prices[-20:],
-                "borderColor": color,
-                "backgroundColor": color + "22",
-                "fill": True,
-                "tension": 0.4,
-                "pointRadius": 0,
-                "borderWidth": 2,
-            }]
-        },
-        "options": {
-            "plugins": {"legend": {"display": False}},
-            "scales": {
-                "x": {"ticks": {"color": "#aaaaaa"}, "grid": {"color": "#333333"}},
-                "y": {"ticks": {"color": "#aaaaaa"}, "grid": {"color": "#333333"}}
-            },
-            "backgroundColor": "#1a1a2e"
-        }
-    }
-    cfg_str = json.dumps(chart_config, separators=(',',':'))
-    return f"https://quickchart.io/chart?w=600&h=300&c={urllib.parse.quote(cfg_str)}"
-
-async def fetch_price_history(addr: str) -> tuple:
-    """Get price history from DexScreener candles endpoint."""
-    prices, labels = [], []
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as r:
-                if r.status == 200:
-                    d = await r.json()
-                    pairs = d.get("pairs", [])
-                    if pairs:
-                        p = pairs[0]
-                        # Build synthetic 24h price history from % changes
-                        current_price = float(p.get("priceUsd", 0) or 0)
-                        ch1h  = float((p.get("priceChange") or {}).get("h1",  0) or 0)
-                        ch6h  = float((p.get("priceChange") or {}).get("h6",  0) or 0)
-                        ch24h = float((p.get("priceChange") or {}).get("h24", 0) or 0)
-                        if current_price > 0:
-                            p24 = current_price / (1 + ch24h/100) if ch24h != -100 else current_price * 0.1
-                            p6  = current_price / (1 + ch6h/100)  if ch6h  != -100 else p24
-                            p1  = current_price / (1 + ch1h/100)  if ch1h  != -100 else p6
-                            prices = [p24, p6, p1, current_price]
-                            labels = ["-24h", "-6h", "-1h", "Now"]
-    except Exception:
-        pass
-    return prices, labels
-
-# ── 4. /vchart — visual chart command ────────────────────────────────
-async def vchart_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    """/vchart <CA> — visual price chart via quickchart.io (free, no key)."""
-    if not c.args:
-        await u.effective_message.reply_text("Usage: `/vchart <CA>`\nShows a visual 24h price chart.", parse_mode="Markdown"); return
-    addr = c.args[0].strip()
-    msg  = await u.effective_message.reply_text("📊 *Generating chart...*", parse_mode="Markdown")
-
-    prices, labels = await fetch_price_history(addr)
-    if not prices or len(prices) < 2:
-        await msg.edit_text("❌ Not enough price data to chart this token."); return
-
-    chart_url = build_quickchart_url("TOKEN", prices, labels)
-    trend = "📈" if prices[-1] >= prices[0] else "📉"
-    chg = ((prices[-1] - prices[0]) / max(prices[0], 1e-18)) * 100
-
-    await msg.edit_text(
-        f"📊 *24H PRICE CHART*\n"
-        f"📋 `{addr[:20]}...`\n"
-        f"{trend} 24h Change: `{chg:+.1f}%`\n\n"
-        f"[View Chart]({chart_url})",
-        parse_mode="Markdown",
-        disable_web_page_preview=False
-    )
-
 # ── 5. /migrate — Pump.fun → Raydium migration detector ──────────────
 async def _fetch_pump_graduated() -> List[Dict]:
     """Get tokens that recently graduated from Pump.fun to Raydium."""
@@ -6621,7 +6530,7 @@ async def bg_narrative_news_scanner(app: Application):
                 context += f"COINGECKO TRENDING: {', '.join(cg_names)}\n"
 
             if not context.strip():
-                await asyncio.sleep(300); continue
+                await asyncio.sleep(600); continue
 
             logger.info(f"[NARRATIVE] Signal context built — {len(headlines)} headlines, {len(pump_latest)} pump launches")
 
@@ -6637,14 +6546,14 @@ async def bg_narrative_news_scanner(app: Application):
                 inject_market=False
             )
             if not ai_terms_raw:
-                await asyncio.sleep(300); continue
+                await asyncio.sleep(600); continue
 
             search_terms = [t.strip().lower() for t in ai_terms_raw.strip().split("\n")
                            if t.strip() and len(t.strip()) > 1][:6]
             logger.info(f"[NARRATIVE] AI terms: {search_terms}")
 
             if GROUP_CHAT_ID == 0:
-                await asyncio.sleep(300); continue
+                await asyncio.sleep(600); continue
 
             found_count = 0
             now = time.time()
@@ -6725,7 +6634,7 @@ async def bg_narrative_news_scanner(app: Application):
         except Exception as e:
             logger.error(f"bg_narrative_news_scanner: {e}", exc_info=True)
 
-        await asyncio.sleep(300)
+        await asyncio.sleep(600)
 
 
 async def bg_trending_metas_scanner(app: Application):
@@ -6988,6 +6897,7 @@ async def post_init(app: Application):
         BotCommand("help",          "📋 Full command list"),
         BotCommand("scan",          "🔬 Full token scan + AI verdict"),
         BotCommand("c",             "💰 Quick price check"),
+        BotCommand("chart",         "📊 In-app chart (no DexScreener)"),
         BotCommand("price",         "💵 Live price: btc sol eth etc"),
         BotCommand("verify",        "🛡 Rug & honeypot check"),
         # Discover
@@ -7675,6 +7585,7 @@ def main():
         ("trackwallet", trackwallet_cmd), ("mywallet", mywallet_cmd),
         ("rank", rank_cmd), ("gp", gp_cmd), ("gsum", gsum_cmd),
         ("dubs", dubs_cmd), ("remindme", remindme_cmd),
+        ("chart", chart_cmd),
         ("price", price_cmd),
         ("autoresponder", autoresponder_cmd),
         ("smartscan", smartscan_cmd), ("status", status_cmd), ("ping", ping_cmd),
@@ -7690,7 +7601,7 @@ def main():
         ("copy", copy_cmd), ("bundle", bundle_cmd),
         ("snipe", snipe_cmd), ("escan", escan_cmd),
         # v40 — remaining elite features
-        ("vchart", vchart_cmd), ("migrate", migrate_cmd),
+        ("migrate", migrate_cmd),
         ("kol", kol_cmd),
     ]
     for name, fn in CMDS:
@@ -7722,7 +7633,7 @@ def main():
             asyncio.create_task(bg_wallet_tracker(app))  # v40: live wallet monitoring
             asyncio.create_task(bg_migrate_monitor(app)) # v40: pump→raydium migration alerts
             asyncio.create_task(bg_weekly_leaderboard(app)) # v40: sunday leaderboard post
-            logger.info("12 scanners started OK — v41")
+            logger.info("12 scanners started OK — v40 Elite")
             if GROUP_CHAT_ID:
                 logger.info("GROUP_CHAT_ID=%s — alerts ENABLED", GROUP_CHAT_ID)
             else:
