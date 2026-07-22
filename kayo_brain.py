@@ -5114,13 +5114,13 @@ async def bg_wallet_tracker(app):
     Every 3 min: polls tracked wallets for new activity using SolanaFM.
     Alerts group chat when a tracked wallet makes a move.
     """
-    await asyncio.sleep(360)
+    await asyncio.sleep(180)
     wallet_last_seen: Dict[str, str] = {}  # addr -> last txn sig
 
     while True:
         try:
             if not tracked_wallets or not GROUP_CHAT_ID:
-                await asyncio.sleep(360); continue
+                await asyncio.sleep(180); continue
 
             for addr, info in list(tracked_wallets.items()):
                 try:
@@ -5175,10 +5175,10 @@ async def bg_wallet_tracker(app):
                 except Exception:
                     continue
 
-            await asyncio.sleep(360)
+            await asyncio.sleep(180)
         except Exception as e:
             logger.error(f"[WALLET TRACKER] {e}")
-            await asyncio.sleep(360)
+            await asyncio.sleep(180)
 
 
 # ── ENHANCED /scan THAT USES ELITE DATA ───────────────────────────────
@@ -5466,13 +5466,13 @@ async def bg_migrate_monitor(app):
     Every 5 min: detect new Pump.fun → Raydium migrations.
     Alerts group when a token graduates with MCap < $500k.
     """
-    await asyncio.sleep(600)
+    await asyncio.sleep(300)
     seen_pools: Set[str] = set()
 
     while True:
         try:
             if not GROUP_CHAT_ID:
-                await asyncio.sleep(600); continue
+                await asyncio.sleep(300); continue
 
             graduated = await _fetch_pump_graduated()
             for coin in graduated:
@@ -5507,10 +5507,10 @@ async def bg_migrate_monitor(app):
                 except Exception:
                     pass
 
-            await asyncio.sleep(600)
+            await asyncio.sleep(300)
         except Exception as e:
             logger.error(f"[MIGRATE MONITOR] {e}")
-            await asyncio.sleep(600)
+            await asyncio.sleep(300)
 
 # ── 7. /kol — track known alpha callers ──────────────────────────────
 # KOL wallet registry (editable)
@@ -6121,7 +6121,7 @@ async def bg_followup_tracker(app: Application):
     • Rug — "🚨 rug alert — the one I flagged earlier just died"
     Auto-expires entries older than 7 days.
     """
-    await asyncio.sleep(240)  # wait 2min after boot
+    await asyncio.sleep(120)  # wait 2min after boot
     while True:
         try:
             now = time.time()
@@ -6247,7 +6247,7 @@ async def bg_followup_tracker(app: Application):
 
         except Exception as e:
             logger.error(f"bg_followup_tracker: {e}", exc_info=True)
-        await asyncio.sleep(600)  # check every 5 minutes
+        await asyncio.sleep(300)  # check every 5 minutes
 
 
 async def bg_new_launch_scanner(app: Application):
@@ -6433,7 +6433,7 @@ async def bg_established_scanner(app: Application):
     and migrated tokens that weren't new when they moved.
     Runs every 3 minutes.
     """
-    await asyncio.sleep(360)
+    await asyncio.sleep(180)
     seen_est: dict = {}  # addr -> last_alert_time
 
     while True:
@@ -6583,7 +6583,7 @@ async def bg_established_scanner(app: Application):
 
         except Exception as e:
             logger.error(f"bg_established_scanner: {e}", exc_info=True)
-        await asyncio.sleep(360)  # run every 3 minutes
+        await asyncio.sleep(180)  # run every 3 minutes
 
 
 
@@ -6621,7 +6621,7 @@ async def bg_narrative_news_scanner(app: Application):
                 context += f"COINGECKO TRENDING: {', '.join(cg_names)}\n"
 
             if not context.strip():
-                await asyncio.sleep(600); continue
+                await asyncio.sleep(300); continue
 
             logger.info(f"[NARRATIVE] Signal context built — {len(headlines)} headlines, {len(pump_latest)} pump launches")
 
@@ -6637,14 +6637,14 @@ async def bg_narrative_news_scanner(app: Application):
                 inject_market=False
             )
             if not ai_terms_raw:
-                await asyncio.sleep(600); continue
+                await asyncio.sleep(300); continue
 
             search_terms = [t.strip().lower() for t in ai_terms_raw.strip().split("\n")
                            if t.strip() and len(t.strip()) > 1][:6]
             logger.info(f"[NARRATIVE] AI terms: {search_terms}")
 
             if GROUP_CHAT_ID == 0:
-                await asyncio.sleep(600); continue
+                await asyncio.sleep(300); continue
 
             found_count = 0
             now = time.time()
@@ -6725,7 +6725,7 @@ async def bg_narrative_news_scanner(app: Application):
         except Exception as e:
             logger.error(f"bg_narrative_news_scanner: {e}", exc_info=True)
 
-        await asyncio.sleep(600)
+        await asyncio.sleep(300)
 
 
 async def bg_trending_metas_scanner(app: Application):
@@ -6734,7 +6734,7 @@ async def bg_trending_metas_scanner(app: Application):
     Sources GeckoTerminal trending (not keyword search) so same coin
     can't spam. Each coin only appears ONCE. Min 3 unique coins to post.
     """
-    await asyncio.sleep(600)  # wait 5min after startup
+    await asyncio.sleep(300)  # wait 5min after startup
     last_run     = 0
     posted_addrs: Dict[str, float] = {}  # addr → timestamp, 6h cooldown
 
@@ -6743,12 +6743,12 @@ async def bg_trending_metas_scanner(app: Application):
             now = time.time()
             # Only run every 2 hours
             if now - last_run < 7200:
-                await asyncio.sleep(240)
+                await asyncio.sleep(120)
                 continue
             last_run = now
 
             if GROUP_CHAT_ID == 0:
-                await asyncio.sleep(240)
+                await asyncio.sleep(120)
                 continue
 
             # ── Pull from GeckoTerminal trending (real coins, no keyword search) ──
@@ -6767,7 +6767,7 @@ async def bg_trending_metas_scanner(app: Application):
                 logger.debug(f"metas GT fetch: {e}")
 
             if not gt_trend_pools:
-                await asyncio.sleep(240)
+                await asyncio.sleep(120)
                 continue
 
             # ── Filter: sub-$500k, real buyers, positive momentum ──
@@ -6809,7 +6809,7 @@ async def bg_trending_metas_scanner(app: Application):
             # Need at least 3 DIFFERENT coins to be worth posting
             if len(candidates) < 3:
                 logger.info(f"[METAS] Only {len(candidates)} unique coins — skipping post")
-                await asyncio.sleep(240)
+                await asyncio.sleep(120)
                 continue
 
             candidates.sort(reverse=True)
@@ -6857,7 +6857,7 @@ async def bg_trending_metas_scanner(app: Application):
         except Exception as e:
             logger.error(f"bg_trending_metas: {e}", exc_info=True)
 
-        await asyncio.sleep(240)
+        await asyncio.sleep(120)
 
 
 async def bg_price_alert_checker(app: Application):
@@ -6898,7 +6898,7 @@ async def bg_price_alert_checker(app: Application):
 
 async def bg_watchlist_scanner(app: Application):
     """Every 60s: check watched Twitter accounts for CA drops."""
-    await asyncio.sleep(240)
+    await asyncio.sleep(120)
     while True:
         if TWITTER_AUTH_TOKEN and watchlist:
             for username, data in list(watchlist.items()):
@@ -7649,7 +7649,7 @@ async def _dismiss_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 async def bg_state_saver(app):
     while True:
-        await asyncio.sleep(600)
+        await asyncio.sleep(300)
         try: await _save()
         except Exception as e: logger.warning(f"Periodic save: {e}")
 
@@ -7711,23 +7711,23 @@ def main():
             await app.updater.start_polling(drop_pending_updates=True)
             asyncio.create_task(bg_state_saver(app))
             asyncio.create_task(bg_main_scanner(app))
-            # asyncio.create_task(bg_followup_tracker(app))  # disabled to save bandwidth
+            asyncio.create_task(bg_followup_tracker(app))
             asyncio.create_task(bg_established_scanner(app))
             asyncio.create_task(bg_new_launch_scanner(app))
-            # asyncio.create_task(bg_narrative_news_scanner(app))  # disabled to save bandwidth
-            # asyncio.create_task(bg_trending_metas_scanner(app))  # disabled to save bandwidth
+            asyncio.create_task(bg_narrative_news_scanner(app))
+            asyncio.create_task(bg_trending_metas_scanner(app))
             asyncio.create_task(bg_price_alert_checker(app))
             asyncio.create_task(bg_watchlist_scanner(app))
             asyncio.create_task(bg_reminder_checker(app))
             asyncio.create_task(bg_wallet_tracker(app))  # v40: live wallet monitoring
-            # asyncio.create_task(bg_migrate_monitor(app))  # disabled to save bandwidth # v40: pump→raydium migration alerts
-            # asyncio.create_task(bg_weekly_leaderboard(app))  # disabled to save bandwidth # v40: sunday leaderboard post
-            logger.info("7 scanners started — bandwidth optimized v41")
+            asyncio.create_task(bg_migrate_monitor(app)) # v40: pump→raydium migration alerts
+            asyncio.create_task(bg_weekly_leaderboard(app)) # v40: sunday leaderboard post
+            logger.info("12 scanners started OK — v41")
             if GROUP_CHAT_ID:
                 logger.info("GROUP_CHAT_ID=%s — alerts ENABLED", GROUP_CHAT_ID)
             else:
                 logger.warning("GROUP_CHAT_ID not set — scanner alerts DISABLED")
-            logger.info("🚀 Scanners started — bandwidth mode")
+            logger.info("🚀 All scanners started")
             while True:
                 await asyncio.sleep(3600)
 
