@@ -18,7 +18,7 @@ from typing import Optional, List, Dict, Set
 import aiohttp
 import redis.asyncio as aioredis
 import xml.etree.ElementTree as ET
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, BotCommand
 from telegram.ext import (
     Application, CommandHandler, ContextTypes,
     CallbackQueryHandler, MessageHandler, filters,
@@ -30,8 +30,6 @@ from flask import Flask
 # ═══════════════════════════════════════════════════════════════
 BOT_TOKEN          = os.environ.get("BOT_TOKEN", "")
 GROUP_CHAT_ID      = int(os.environ.get("GROUP_CHAT_ID", "0"))
-# v43: Birdeye API (free tier — get key at birdeye.so, optional but recommended)
-BIRDEYE_API_KEY = os.environ.get("BIRDEYE_API_KEY", "")
 GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY", "")
 GROQ_API_KEY       = os.environ.get("GROQ_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
@@ -186,7 +184,6 @@ async def _save():
             "knowledge_base": knowledge_base,
             "reminders": reminders,
             "seen_alert_ids": list(seen_alert_ids.keys())[-3000:],
-            "ath_tracker": ath_tracker,
             "dropped_calls":  dropped_calls,
             "pattern_memory": pattern_memory,
             "first_alert_seen": list(_first_alert_seen)[-1000:],
@@ -213,7 +210,7 @@ async def _save():
 async def _load():
     global watchlist, user_alerts, portfolios, active_calls, blacklist
     global xp_db, user_settings, user_wallets, tracked_wallets
-    global knowledge_base, reminders, seen_alert_ids, ath_tracker
+    global knowledge_base, reminders, seen_alert_ids
     try:
         raw = None
         if _redis:
@@ -1475,642 +1472,6 @@ async def dex_multi_search(queries: List[str]) -> Dict[str, Dict]:
                 if a: seen[a] = p
     return seen
 
-
-# ═══════════════════════════════════════════════════════════════
-# JUPITER PRICE API — free, no key, cross-DEX price source of truth
-# ═══════════════════════════════════════════════════════════════
-_JUP = "https://api.jup.ag/price/v3"
-
-async def jup_price(addr: str) -> Dict:
-    """Get Jupiter cross-DEX price for a Solana token. Free, no key."""
-    d = await _get(f"{_JUP}?ids={addr}", timeout=8)
-    if d and addr in d:
-        info = d[addr]
-        return {
-            "price": float(info.get("usdPrice", 0) or 0),
-            "change_24h": float(info.get("priceChange24h", 0) or 0),
-            "decimals": int(info.get("decimals", 0) or 0),
-            "block_id": info.get("blockId", 0),
-        }
-    return {}
-
-async def jup_batch_prices(addresses: List[str]) -> Dict[str, Dict]:
-    """Batch price lookup for up to 50 tokens. Free, no key."""
-    if not addresses: return {}
-    chunk = ",".join(addresses[:50])
-    d = await _get(f"{_JUP}?ids={chunk}", timeout=10)
-    return d if isinstance(d, dict) else {}
-
-async def jup_token_list() -> List[Dict]:
-    """Get Jupiter's verified token list — all tradeable Solana tokens."""
-    d = await _get("https://token.jup.ag/all", timeout=10)
-    return d if isinstance(d, list) else []
-
-# ═══════════════════════════════════════════════════════════════
-# BIRDEYE API — free tier (with optional BIRDEYE_API_KEY env var)
-# ═══════════════════════════════════════════════════════════════
-_BE = "https://public-api.birdeye.so/defi"
-
-def _be_headers() -> Dict:
-    """Birdeye requires an API key — free tier available at birdeye.so."""
-    key = os.environ.get("BIRDEYE_API_KEY", "")
-    return {
-        "User-Agent": "Mozilla/5.0",
-        "x-chain": "solana",
-        "X-API-KEY": key,
-    } if key else {"User-Agent": "Mozilla/5.0", "x-chain": "solana"}
-
-async def _be_get(url: str, timeout: int = 10):
-    """Birdeye GET with auth headers."""
-    async with aiohttp.ClientSession() as s:
-        try:
-            async with s.get(url, timeout=aiohttp.ClientTimeout(total=timeout),
-                             headers=_be_headers()) as r:
-                if r.status == 200:
-                    return await r.json()
-                logger.debug(f"Birdeye {url}: status {r.status}")
-        except Exception as e:
-            logger.debug(f"Birdeye GET {url}: {e}")
-    return None
-
-async def be_token_security(addr: str) -> Dict:
-    """Birdeye token security data — honeypot, tax, mint authority, etc."""
-    d = await _be_get(f"{_BE}/token_security?address={addr}")
-    return d.get("data", {}) if isinstance(d, dict) and d.get("success") else {}
-
-async def be_token_overview(addr: str) -> Dict:
-    """Birdeye token overview — holders, market cap, price, volume."""
-    d = await _be_get(f"{_BE}/token_overview?address={addr}")
-    return d.get("data", {}) if isinstance(d, dict) and d.get("success") else {}
-
-async def be_new_listings(limit: int = 20) -> List[Dict]:
-    """Birdeye newly listed Solana tokens — catches coins DexScreener misses."""
-    d = await _be_get(f"{_BE}/v2/tokens/new_listing?limit={limit}&chain=solana")
-    return d.get("data", {}).get("tokens", []) if isinstance(d, dict) else []
-
-async def be_trending(sort_by: str = "rank") -> List[Dict]:
-    """Birdeye trending tokens — different ranking than DexScreener."""
-    d = await _be_get(f"{_BE}/token_trending?sort_by={sort_by}&chain=solana")
-    return d.get("data", {}).get("tokens", []) if isinstance(d, dict) else []
-
-async def be_token_holders(addr: str, limit: int = 10) -> List[Dict]:
-    """Birdeye top holders — for concentration risk analysis."""
-    d = await _be_get(f"{_BE}/v3/token/holder?address={addr}&limit={limit}")
-    return d.get("data", {}).get("items", []) if isinstance(d, dict) else []
-
-async def be_search(query: str) -> List[Dict]:
-    """Birdeye token search — finds tokens DexScreener might miss."""
-    d = await _be_get(f"{_BE}/v3/search?keyword={query}&chain=solana")
-    return d.get("data", {}).get("tokens", []) if isinstance(d, dict) else []
-
-async def be_gainers_losers(time_frame: str = "1h") -> Dict:
-    """Birdeye gainers/losers — tokens with biggest moves."""
-    d = await _be_get(f"{_BE}/trader/gainers-losers?time_frame={time_frame}&chain=solana")
-    return d.get("data", {}) if isinstance(d, dict) else {}
-
-# ═══════════════════════════════════════════════════════════════
-# UNIFIED MULTI-SOURCE TOKEN DISCOVERY
-# Merges DexScreener + GeckoTerminal + Birdeye + Jupiter
-# ═══════════════════════════════════════════════════════════════
-
-async def unified_token_scan(address: str) -> Dict:
-    """Scan a token across ALL sources — DexScreener + Jupiter + Birdeye + GoPlus.\n    Merges data so we see the token from every angle."""
-    async def _safe(coro, default, name=""):
-        try: return await asyncio.wait_for(coro, timeout=10)
-        except: return default
-
-    # Run all sources in parallel
-    ds_pairs, jup_data, be_sec, be_overview, sec, orders = await asyncio.gather(
-        _safe(dex_pairs_by_token(address), [], "dex_pairs"),
-        _safe(jup_price(address), {}, "jup_price"),
-        _safe(be_token_security(address), {}, "be_security"),
-        _safe(be_token_overview(address), {}, "be_overview"),
-        _safe(goplus_check(address), {}, "goplus"),
-        _safe(dex_token_orders(address), [], "dex_orders"),
-    )
-
-    # If DexScreener found nothing, try search
-    if not ds_pairs:
-        ds_pairs = await dex_search_pairs(address)
-    if not ds_pairs:
-        return {"error": "Token not found on any source"}
-
-    p = ds_pairs[0]
-    base = p.get("baseToken", {})
-    sym = base.get("symbol", "???")
-    name = base.get("name", "Unknown")
-
-    # DexScreener data (primary)
-    price = float(p.get("priceUsd", 0) or 0)
-    fdv = float(p.get("fdv", 0) or 0)
-    mcap = float(p.get("marketCap", 0) or p.get("fdv", 0) or 0)
-    liq = float((p.get("liquidity") or {}).get("usd", 0) or 0)
-
-    # Jupiter cross-DEX price (more accurate if available)
-    if jup_data and jup_data.get("price", 0) > 0:
-        jup_price_val = jup_data["price"]
-        # Use Jupiter price if it differs significantly (cross-DEX validation)
-        if price > 0 and abs(jup_price_val - price) / price > 0.05:
-            # 5%+ difference — flag it but use DexScreener price
-            price_diff_pct = (jup_price_val - price) / price * 100
-            logger.info(f"[UNIFIED] {sym}: DS price {price} vs JUP {jup_price_val} ({price_diff_pct:+.1f}%)")
-        price = jup_price_val  # Jupiter is the "source of truth"
-
-    # Birdeye security data (complements GoPlus)
-    be_sec_data = be_sec or {}
-    be_ov_data = be_overview or {}
-
-    # Merge holder data from Birdeye
-    holder_count = int(be_ov_data.get("holder", 0) or 0)
-    if not holder_count:
-        holder_count = int(be_sec_data.get("holder", 0) or 0)
-
-    # Merge security flags
-    is_honeypot = bool(be_sec_data.get("is_honeypot", False) or sec.get("is_honeypot", False))
-    is_renounced = bool(be_sec_data.get("is_mint_authority_disabled", False) or sec.get("is_renounced", False))
-    buy_tax = float(be_sec_data.get("buy_tax", 0) or sec.get("buy_tax", 0) or 0)
-    sell_tax = float(be_sec_data.get("sell_tax", 0) or sec.get("sell_tax", 0) or 0)
-
-    # Price changes
-    pc = p.get("priceChange") or {}
-    ch5m = float(pc.get("m5", 0) or 0)
-    ch1h = float(pc.get("h1", 0) or 0)
-    ch6h = float(pc.get("h6", 0) or 0)
-    ch24h = float(pc.get("h24", 0) or 0)
-
-    # Use Jupiter 24h change if available
-    if jup_data and jup_data.get("change_24h", 0) != 0:
-        ch24h_jup = jup_data["change_24h"]
-        # Keep DexScreener's 24h as primary but note Jupiter's
-        if abs(ch24h_jup - ch24h) > 5:
-            logger.debug(f"[UNIFIED] {sym}: DS 24h {ch24h}% vs JUP {ch24h_jup}%")
-
-    vol = p.get("volume") or {}
-    v5m = float(vol.get("m5", 0) or 0)
-    v1h = float(vol.get("h1", 0) or 0)
-    v24h = float(vol.get("h24", 0) or 0)
-
-    # Transactions
-    txns = (p.get("txns") or {}).get("h1", {})
-    b1h = int(txns.get("buys", 0) or 0)
-    s1h = int(txns.get("sells", 0) or 0)
-    txns5 = (p.get("txns") or {}).get("m5", {})
-    b5m = int(txns5.get("buys", 0) or 0)
-    s5m = int(txns5.get("sells", 0) or 0)
-    buy_pct = b1h / max(b1h + s1h, 1) * 100
-
-    # Volume spike
-    avg_5m_vol = v1h / 12 if v1h > 0 else 1
-    vol_spike = v5m / max(avg_5m_vol, 1)
-
-    # Birdeye extra: age, market data
-    age_str = be_ov_data.get("age", "")
-    market_cap_be = float(be_ov_data.get("marketCap", 0) or 0)
-
-    # Risk score
-    risk = 30
-    if is_honeypot: risk += 40
-    if buy_tax > 10 or sell_tax > 10: risk += 20
-    if not is_renounced: risk += 10
-    if liq < 5000 and liq > 0: risk += 15
-    if liq == 0: risk += 30
-    risk = min(100, risk)
-
-    # Narrative
-    narrative = await _detect_narrative(name, sym)
-
-    # Zero liquidity detection
-    is_zero_liq = (liq == 0)
-
-    result = {
-        "sym": sym, "name": name, "address": address,
-        "price": price, "fdv": fdv, "mcap": mcap or market_cap_be,
-        "liq": liq,
-        "liq_ratio": liq / max(fdv, 1) * 100,
-        "ch5m": ch5m, "ch1h": ch1h, "ch6h": ch6h, "ch24h": ch24h,
-        "v5m": v5m, "v1h": v1h, "v24h": v24h,
-        "b5m": b5m, "s5m": s5m, "b1h": b1h, "s1h": s1h,
-        "buy_pct": buy_pct, "vol_spike": vol_spike,
-        "is_honeypot": is_honeypot,
-        "is_renounced": is_renounced,
-        "buy_tax": buy_tax, "sell_tax": sell_tax,
-        "is_lp_locked": bool(sec.get("lp_locked", False) or be_sec_data.get("is_lp_locked", False)),
-        "lp_locked": bool(sec.get("lp_locked", False) or be_sec_data.get("is_lp_locked", False)),
-        "risk_score": risk,
-        "narrative": narrative,
-        "has_profile": bool(p.get("links")),
-        "pair_addr": p.get("pairAddress", ""),
-        "dex_url": p.get("url", f"https://dexscreener.com/solana/{address}"),
-        "created": p.get("pairCreatedAt", 0),
-        "holder_count": holder_count,
-        "is_zero_liq": is_zero_liq,
-        "sources_found": sum([1 for x in [ds_pairs, jup_data, be_sec, be_overview, sec] if x]),
-        "_sources": ("DS" if ds_pairs else "") + ("+JUP" if jup_data else "") + ("+BE" if be_sec or be_overview else "") + ("+GP" if sec else ""),
-        "tw_link": (p.get("links") or {}).get("twitter", ""),
-        "tg_link": (p.get("links") or {}).get("telegram", ""),
-        "web_link": (p.get("links") or {}).get("website", ""),
-    }
-    if p.get("pairCreatedAt"):
-        result["created"] = p["pairCreatedAt"]
-    if is_zero_liq:
-        result["red_flags"] = ["Zero liquidity — cannot sell!"]
-    return result
-
-async def _detect_narrative(name: str, sym: str) -> str:
-    """Quick narrative detection from token name/symbol."""
-    text = (name + " " + sym).lower()
-    narratives = {
-        "ai": ["ai", "agent", "llm", "gpt", "neural", "machine", "cognition", "brain", "robot"],
-        "meme": ["dog", "cat", "pepe", "frog", "inu", "chan", "meme", "wojak", "chad"],
-        "degen": ["degen", "ape", "rug", "moon", "pump", "wagmi", "gm"],
-        "defi": ["defi", "swap", "lending", "yield", "staking", "vault"],
-        "gaming": ["game", "play", "metaverse", "gamer", "quest", "loot"],
-        "political": ["trump", "biden", "maga", "politi", "vote", "election"],
-        "sports": ["football", "soccer", "nba", "fifa", "world cup", "olympic"],
-    }
-    for nar, keywords in narratives.items():
-        for kw in keywords:
-            if kw in text:
-                return nar
-    return ""
-
-async def unified_scanner_discovery() -> List[Dict]:
-    """Multi-source token discovery — merges DexScreener + GeckoTerminal + Birdeye + DexScreener boosts.\n    Returns a deduplicated list of tokens from ALL sources."""
-    # Run all discovery endpoints in parallel
-    ds_cats, gt_new, gt_trending, ds_boosts, ds_profiles, be_new, be_trend = await asyncio.gather(
-        dex_multi_search(["meme", "ai", "pump", "new", "defi", "gaming"]),  # DexScreener 6 categories
-        gt_new_pools(1),           # GeckoTerminal new pools
-        gt_trending_pools(1),      # GeckoTerminal trending
-        dex_boosts_latest(),       # DexScreener boosted tokens
-        dex_token_profiles_latest(), # DexScreener verified profiles
-        be_new_listings(20),       # Birdeye new listings
-        be_trending(),             # Birdeye trending
-    )
-
-    all_tokens: Dict[str, Dict] = {}
-
-    # Parse DexScreener results (already in standard format)
-    for addr, p in ds_cats.items():
-        t = _parse_dex_pair(p)
-        if t: all_tokens[addr] = t
-
-    # Parse GeckoTerminal pools
-    for pool in gt_new + gt_trending:
-        t = gt_parse_pool(pool)
-        if t and t["address"] not in all_tokens:
-            all_tokens[t["address"]] = t
-
-    # Parse DexScreener boosted tokens (get their pair data)
-    for boost in (ds_boosts or [])[:30]:
-        addr = boost.get("tokenAddress", "")
-        if addr and addr not in all_tokens:
-            pairs = await dex_pairs_by_token(addr)
-            if pairs:
-                t = _parse_dex_pair(pairs[0])
-                if t:
-                    t["boost_active"] = boost.get("totalBoosts", 0)
-                    all_tokens[addr] = t
-
-    # Parse Birdeye new listings + trending
-    for token in (be_new or [])[:20]:
-        addr = token.get("address", "")
-        if addr and addr not in all_tokens:
-            pairs = await dex_pairs_by_token(addr)
-            if pairs:
-                t = _parse_dex_pair(pairs[0])
-                if t: all_tokens[addr] = t
-
-    for token in (be_trend or [])[:20]:
-        addr = token.get("address", "")
-        if addr and addr not in all_tokens:
-            pairs = await dex_pairs_by_token(addr)
-            if pairs:
-                t = _parse_dex_pair(pairs[0])
-                if t: all_tokens[addr] = t
-
-    return list(all_tokens.values())
-
-def _parse_dex_pair(p: Dict) -> Optional[Dict]:
-    """Parse a DexScreener pair into our standard token dict."""
-    try:
-        base = p.get("baseToken", {})
-        addr = base.get("address", "")
-        if not addr: return None
-        pc = p.get("priceChange") or {}
-        vol = p.get("volume") or {}
-        txns_h1 = (p.get("txns") or {}).get("h1", {})
-        txns_m5 = (p.get("txns") or {}).get("m5", {})
-        b1h = int(txns_h1.get("buys", 0) or 0)
-        s1h = int(txns_h1.get("sells", 0) or 0)
-        b5m = int(txns_m5.get("buys", 0) or 0)
-        s5m = int(txns_m5.get("sells", 0) or 0)
-        buy_pct = b1h / max(b1h + s1h, 1) * 100
-        v5m = float(vol.get("m5", 0) or 0)
-        v1h = float(vol.get("h1", 0) or 0)
-        avg_5m = v1h / 12 if v1h > 0 else 1
-        links = p.get("links") or {}
-        return {
-            "sym": base.get("symbol", "???"), "name": base.get("name", "???"),
-            "address": addr,
-            "price": float(p.get("priceUsd", 0) or 0),
-            "mcap": float(p.get("marketCap", 0) or p.get("fdv", 0) or 0),
-            "fdv": float(p.get("fdv", 0) or 0),
-            "liq": float((p.get("liquidity") or {}).get("usd", 0) or 0),
-            "liq_ratio": float((p.get("liquidity") or {}).get("usd", 0) or 0) / max(float(p.get("fdv", 1) or 1), 1) * 100,
-            "ch5m": float(pc.get("m5", 0) or 0), "ch1h": float(pc.get("h1", 0) or 0),
-            "ch6h": float(pc.get("h6", 0) or 0), "ch24h": float(pc.get("h24", 0) or 0),
-            "v5m": v5m, "v1h": v1h, "v24h": float(vol.get("h24", 0) or 0),
-            "b5m": b5m, "s5m": s5m, "b1h": b1h, "s1h": s1h,
-            "buy_pct": buy_pct, "vol_spike": v5m / max(avg_5m, 1),
-            "is_honeypot": p.get("isHoneypot", False),
-            "is_renounced": p.get("isRenounced", False),
-            "lp_locked": bool(p.get("lpLocked", False)),
-            "has_profile": bool(links),
-            "tw_link": links.get("twitter", ""), "tg_link": links.get("telegram", ""),
-            "web_link": links.get("website", ""),
-            "pair_addr": p.get("pairAddress", ""),
-            "created": p.get("pairCreatedAt", 0),
-            "boost_active": 0,
-            "risk_score": 30,
-            "narrative": "",
-            "_source": "dex",
-        }
-    except Exception:
-        return None
-
-# ═══════════════════════════════════════════════════════════════
-# RICK-STYLE COMMANDS (6 missing features)
-# ═══════════════════════════════════════════════════════════════
-
-async def cmd_twitter_scan(u, c):
-    """Rick's .ts — scan a Twitter/X profile and get AI report."""
-    if not c.args:
-        await u.effective_message.reply_text("Usage: `/ts <username>`", parse_mode="Markdown")
-        return
-    username = c.args[0].strip("@")
-    msg = await u.effective_message.reply_text("🔍 *Scanning Twitter profile...*", parse_mode="Markdown")
-    try:
-        # Try twscrape first
-        tweets = []
-        try:
-            from twscrape import API as TwAPI
-            tw_api = TwAPI()
-            # Get user info
-            user_info = await tw_api.user_by_login(username)
-            # Get recent tweets
-            tweets = await tw_api.user_tweets(username, limit=20)
-        except Exception:
-            pass
-
-        profile_text = ""
-        if user_info:
-            profile_text = (
-                f"Name: {user_info.name}\n"
-                f"Bio: {user_info.rawDescription or 'N/A'}\n"
-                f"Followers: {user_info.followersCount}\n"
-                f"Following: {user_info.friendsCount}\n"
-                f"Tweets: {user_info.statusesCount}\n"
-            )
-        if tweets:
-            tweet_texts = [f"- {t.rawContent[:200]}" for t in tweets[:15]]
-            profile_text += "\nRecent tweets:\n" + "\n".join(tweet_texts)
-
-        if not profile_text:
-            await msg.edit_text("❌ Could not fetch Twitter profile. twscrape may need auth tokens.")
-            return
-
-        ai_report = await asyncio.wait_for(
-            ai_ask(
-                f"Analyze this Twitter/X profile for crypto alpha value. "
-                f"Is this person a credible KOL? Do they share good calls? "
-                f"Rate their alpha quality 1-10. Flag any red flags (spam, paid shills, bot-like behavior). "
-                f"Summarize in 4-5 sentences max.\n\nProfile:\n{profile_text}",
-                fallback="Unable to analyze.",
-            ),
-            timeout=20
-        )
-
-        card = (
-            f"✨ *TWITTER SCAN: @{username}*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"{profile_text}"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🧠 *AI Analysis:\n{ai_report}"
-        )
-        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
-    except Exception as e:
-        await msg.edit_text(f"❌ Scan failed: {e}")
-
-async def cmd_hourly_burp(u, c):
-    """Rick's /burp — hourly leaderboard of new + dipped tokens."""
-    msg = await u.effective_message.reply_text("📊 *Fetching hourly movers...*", parse_mode="Markdown")
-    try:
-        # Get tokens from multiple sources
-        tokens = await unified_scanner_discovery()
-        if not tokens:
-            await msg.edit_text("❌ No tokens found right now.")
-            return
-
-        # Sort by 1h change
-        gainers = sorted([t for t in tokens if t.get("liq", 0) > 1000], key=lambda t: t.get("ch1h", 0), reverse=True)[:10]
-        dipped = sorted([t for t in tokens if t.get("liq", 0) > 1000 and t.get("ch1h", 0) < -10], key=lambda t: t.get("ch1h", 0))[:5]
-
-        card = "📊 *HOURLY BURP*\n━━━━━━━━━━━━━━━━━━━━━\n\n"
-        card += "🔥 *TOP GAINERS (1H)*\n"
-        for i, t in enumerate(gainers, 1):
-            ch = t.get("ch1h", 0)
-            card += f"{i}. ${t['sym']} `{_short_k(t.get('mcap',0))}` +{ch:.1f}% Liq `{_short_k(t.get('liq',0))}`\n"
-
-        if dipped:
-            card += f"\n💨 *DIPPED (potential bounce)*\n"
-            for i, t in enumerate(dipped, 1):
-                ch = t.get("ch1h", 0)
-                card += f"{i}. ${t['sym']} `{_short_k(t.get('mcap',0))}` {ch:.1f}% Liq `{_short_k(t.get('liq',0))}`\n"
-
-        card += f"\n━━━━━━━━━━━━━━━━━━━━━\n"
-        card += f"Sources: DS+GT+BE+JUP · {len(tokens)} tokens scanned"
-
-        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
-    except Exception as e:
-        await msg.edit_text(f"❌ Failed: {e}")
-
-async def cmd_ticker_search(u, c):
-    """Rick's ticker search — find all tokens sharing a ticker name."""
-    if not c.args:
-        await u.effective_message.reply_text("Usage: `/ticker <name>`", parse_mode="Markdown")
-        return
-    query = c.args[0].strip().lstrip("$")
-    msg = await u.effective_message.reply_text(f"🔍 *Searching ticker: ${query}...*", parse_mode="Markdown")
-    try:
-        # Search across multiple sources
-        ds_results, be_results = await asyncio.gather(
-            dex_search_pairs(query),
-            be_search(query),
-        )
-
-        # Dedup by address, sort by age (oldest first — Rick style)
-        seen = {}
-        for p in (ds_results or []):
-            base = p.get("baseToken", {})
-            if base.get("symbol", "").upper() == query.upper():
-                addr = base.get("address", "")
-                if addr:
-                    seen[addr] = {
-                        "sym": base.get("symbol", ""),
-                        "name": base.get("name", ""),
-                        "addr": addr,
-                        "mcap": float(p.get("marketCap", 0) or p.get("fdv", 0) or 0),
-                        "liq": float((p.get("liquidity") or {}).get("usd", 0) or 0),
-                        "ch24h": float((p.get("priceChange") or {}).get("h24", 0) or 0),
-                        "created": p.get("pairCreatedAt", 0),
-                        "dex_url": p.get("url", ""),
-                    }
-
-        for t in (be_results or [])[:10]:
-            addr = t.get("address", "")
-            if addr and addr not in seen:
-                seen[addr] = {
-                    "sym": t.get("symbol", ""),
-                    "name": t.get("name", ""),
-                    "addr": addr,
-                    "mcap": float(t.get("marketCap", 0) or 0),
-                    "liq": float(t.get("liquidity", 0) or 0),
-                    "ch24h": float(t.get("priceChange24h", 0) or 0),
-                    "created": 0,
-                    "dex_url": f"https://dexscreener.com/solana/{addr}",
-                }
-
-        # Sort oldest first
-        results = sorted(seen.values(), key=lambda t: t.get("created", 0) or 0)
-
-        if not results:
-            await msg.edit_text(f"❌ No tokens found with ticker ${query}")
-            return
-
-        card = f"🔍 *TICKER SEARCH: ${query}*\n━━━━━━━━━━━━━━━━━━━━━\n"
-        card += f"Found {len(results)} tokens\n\n"
-        for i, t in enumerate(results[:20], 1):
-            age = _age(t["created"]) if t["created"] else "?"
-            ch = t.get("ch24h", 0)
-            ch_str = f" {ch:+.0f}%" if ch != 0 else ""
-            card += f"{i}. ${t['sym']} — {_short_k(t['mcap'])}{ch_str} · {age}\n"
-            card += f"   `{t['addr'][:20]}...`\n"
-
-        card += f"\n━━━━━━━━━━━━━━━━━━━━━"
-        card += "\nOldest first · verify before buying"
-
-        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
-    except Exception as e:
-        await msg.edit_text(f"❌ Search failed: {e}")
-
-async def cmd_channel_summary(u, c):
-    """Rick's .dv — summarize recent messages in the chat."""
-    msg = await u.effective_message.reply_text("📝 *Summarizing chat...*", parse_mode="Markdown")
-    try:
-        # Get recent messages from the chat
-        chat = u.effective_chat
-        messages = []
-        async for m in c.bot.get_chat_history(chat.id, limit=50):
-            if m.text and not m.from_user.is_bot:
-                messages.append(f"[{m.from_user.first_name}]: {m.text[:100]}")
-
-        if not messages:
-            await msg.edit_text("❌ No recent messages to summarize.")
-            return
-
-        summary = await asyncio.wait_for(
-            ai_ask(
-                f"Summarize the recent conversation in this crypto chat. "
-                f"Key topics discussed, tokens mentioned, sentiment, and any important calls. "
-                f"Keep it to 5-6 bullet points max.\n\nMessages:\n" + "\n".join(messages[:40]),
-                fallback="Unable to summarize.",
-            ),
-            timeout=20
-        )
-
-        card = f"📝 *CHAT SUMMARY*\n━━━━━━━━━━━━━━━━━━━━━\n{summary}"
-        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
-    except Exception as e:
-        await msg.edit_text(f"❌ Summary failed: {e}")
-
-async def cmd_contract_read(u, c):
-    """Rick's .aica — AI contract code reader."""
-    if not c.args:
-        await u.effective_message.reply_text("Usage: `/contract <ca>`", parse_mode="Markdown")
-        return
-    addr = c.args[0].strip()
-    msg = await u.effective_message.reply_text("🔍 *Reading contract...*", parse_mode="Markdown")
-    try:
-        # Try to get token security data from multiple sources
-        be_sec, gp_sec, be_ov = await asyncio.gather(
-            be_token_security(addr),
-            goplus_check(addr),
-            be_token_overview(addr),
-        )
-
-        # Build contract info for AI analysis
-        contract_info = f"Token: {addr}\n"
-        if be_sec:
-            contract_info += f"Mint authority disabled: {be_sec.get('is_mint_authority_disabled', 'unknown')}\n"
-            contract_info += f"Freeze authority disabled: {be_sec.get('is_freeze_authority_disabled', 'unknown')}\n"
-            contract_info += f"Is honeypot: {be_sec.get('is_honeypot', 'unknown')}\n"
-            contract_info += f"Buy tax: {be_sec.get('buy_tax', 'unknown')}\n"
-            contract_info += f"Sell tax: {be_sec.get('sell_tax', 'unknown')}\n"
-        if gp_sec:
-            contract_info += f"LP locked: {gp_sec.get('lp_locked', 'unknown')}\n"
-            contract_info += f"Is renounced: {gp_sec.get('is_renounced', 'unknown')}\n"
-            contract_info += f"Is honeypot: {gp_sec.get('is_honeypot', 'unknown')}\n"
-            contract_info += f"Buy tax: {gp_sec.get('buy_tax', 'unknown')}\n"
-            contract_info += f"Sell tax: {gp_sec.get('sell_tax', 'unknown')}\n"
-        if be_ov:
-            contract_info += f"Holders: {be_ov.get('holder', 'unknown')}\n"
-            contract_info += f"Market cap: {be_ov.get('marketCap', 'unknown')}\n"
-
-        ai_analysis = await asyncio.wait_for(
-            ai_ask(
-                f"Analyze this Solana token contract for safety. Check for: "
-                f"mint authority (can they mint more?), freeze authority (can they freeze selling?), "
-                f"honeypot risk, tax levels, LP status, and overall safety. "
-                f"Give a risk score 1-10 and explain in 3-4 sentences.\n\n{contract_info}",
-                fallback="Unable to analyze.",
-            ),
-            timeout=20
-        )
-
-        card = (
-            f"📜 *CONTRACT ANALYSIS*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━\n"
-            f"Token: `{addr[:20]}...`\n\n"
-            f"{contract_info}"
-            f"\n━━━━━━━━━━━━━━━━━━━━━\n"
-            f"🧠 *AI Analysis:*\n{ai_analysis}"
-        )
-        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
-    except Exception as e:
-        await msg.edit_text(f"❌ Analysis failed: {e}")
-
-async def cmd_zeros(u, c):
-    """Find and flag tokens with zero liquidity — rug pull risk."""
-    msg = await u.effective_message.reply_text("🚨 *Scanning for zero-liquidity tokens...*", parse_mode="Markdown")
-    try:
-        tokens = await unified_scanner_discovery()
-        zeros = [t for t in tokens if t.get("liq", 0) == 0 or t.get("is_zero_liq", False)]
-
-        if not zeros:
-            await msg.edit_text("✅ No zero-liquidity tokens found in current scan. Market looks clean.")
-            return
-
-        card = f"🚨 *ZERO LIQUIDITY ALERT*\n━━━━━━━━━━━━━━━━━━━━━\n"
-        card += f"Found {len(zeros)} tokens with ZERO liquidity\n\n"
-        for i, t in enumerate(zeros[:15], 1):
-            card += f"{i}. ${t.get('sym','???')} — MC `{_short_k(t.get('mcap',0))}` · 🔴 RUG RISK\n"
-            card += f"   `{t.get('address','')[:20]}...`\n"
-        card += f"\n⚠️ These tokens CANNOT be sold. Avoid or wait for liquidity."
-        await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
-    except Exception as e:
-        await msg.edit_text(f"❌ Scan failed: {e}")
-
-
 # ═══════════════════════════════════════════════════════════════
 # COINGECKO (free, no key)
 # ═══════════════════════════════════════════════════════════════
@@ -2255,9 +1616,6 @@ async def fetch_crypto_news() -> List[str]:
     return unique[:30]
 
 # ─── Pump.fun v3 API (working, no key needed) ───────────────────
-_PUMPFUN_FAIL_COUNT = 0
-_PUMPFUN_DISABLED = False
-_PUMPFUN_MAX_FAILS = 3  # disable after 3 consecutive failures
 _PUMPFUN_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json",
@@ -2268,8 +1626,6 @@ _PUMPFUN_HEADERS = {
 async def pumpfun_latest(limit: int = 20) -> List[Dict]:
     """Get latest Pump.fun launches — real-time CT social signal."""
     try:
-        global _PUMPFUN_DISABLED, _PUMPFUN_FAIL_COUNT
-        if _PUMPFUN_DISABLED: return []
         async with aiohttp.ClientSession() as s:
             async with s.get(
                 "https://frontend-api-v3.pump.fun/coins",
@@ -2288,8 +1644,6 @@ async def pumpfun_latest(limit: int = 20) -> List[Dict]:
 async def pumpfun_trending(limit: int = 10) -> List[Dict]:
     """Get trending Pump.fun coins by market cap."""
     try:
-        global _PUMPFUN_DISABLED, _PUMPFUN_FAIL_COUNT
-        if _PUMPFUN_DISABLED: return []
         async with aiohttp.ClientSession() as s:
             async with s.get(
                 "https://frontend-api-v3.pump.fun/coins",
@@ -2597,17 +1951,7 @@ def narrative_from_news(headlines: List[str]) -> List[str]:
 # FULL TOKEN SCAN
 # ═══════════════════════════════════════════════════════════════
 async def full_token_scan(address: str) -> Dict:
-    """v43: Try unified multi-source scan first, fallback to DexScreener-only."""
-    try:
-        result = await asyncio.wait_for(unified_token_scan(address), timeout=20)
-        if result and not result.get("error"):
-            return result
-    except asyncio.TimeoutError:
-        logger.warning("unified_token_scan timed out — falling back to DexScreener")
-    except Exception as e:
-        logger.warning(f"unified_token_scan failed: {e} — falling back to DexScreener")
-
-    # Fallback: original DexScreener-only scan
+    # Use gather with individual timeouts so GoPlus/orders can't block the whole scan
     async def _safe(coro, default, name=""):
         try:
             return await asyncio.wait_for(coro, timeout=12)
@@ -2783,8 +2127,6 @@ def _build_rick_card(t: Dict, ai: str = "", is_first_alert: bool = False, watche
     fdv_l = f"\U0001f48e FDV: {_short_k(fm)} \u21d2 {_short_k(mcap)} (now!)" if fm>0 and fm!=mcap else f"\U0001f48e FDV: {_short_k(mcap)}"
     lm = int((liq/mcap*10)) if mcap>0 else 0
     fire = " \u00b7 \U0001f525" if lm>4 else ""
-    if liq == 0:
-        fire = " \u00b7 \U0001f534 ZERO LIQ"
     liq_l = f"\U0001f4a7 Liq: {_short_k(liq)}{(' [x'+str(lm)+']') if lm>0 else ''}{fire}"
     vol_l = f"\U0001f4ca Vol: {_short_k(vol24)} \u00b7 Age: {_age_human(t.get('created',0))}"
     ch1s = f"{ch1h:+.1f}%" if ch1h!=0 else "0.0%"
@@ -2809,303 +2151,20 @@ def _build_rick_card(t: Dict, ai: str = "", is_first_alert: bool = False, watche
     kt = t.get("known_wallet_tags",[])
     tags = ("\n" + "\u00b7".join(kt)) if kt else ""
     fa = f"\n\U0001f308 You are first @ {_short_k(mcap)} \U0001f440 {watchers}" if is_first_alert else (f"\n\U0001f440 {watchers} watching" if watchers>0 else "")
-    src = t.get("_sources", "")
-    src_l = f" \u00b7 {src}" if src else ""
     ai_l = f"\n\n\U0001f9e0 {ai}" if ai and ai.strip() else ""
     return "\n".join([hdr,f"{plat_e} {plat_t}",f"\U0001f4b0 USD: {ps}",fdv_l,liq_l,vol_l,txn_l,"",th_l,tot_l,bd_l,fr_l,ch_l,mo_l,"",f"`{addr}`",tags.strip(),fa,ai_l]).strip()
-
-
-# ── VISUAL SCAN CARD (Rick Bot style image) ──────────────────────────────
-import io as _io
-
-def _draw_sparkline(draw, data, x, y, w, h, color_up, color_down):
-    """Draw a mini sparkline chart on an ImageDraw object."""
-    if not data or len(data) < 2:
-        draw.text((x, y + h//2 - 8), "No chart data", fill="#666666")
-        return
-    mn, mx = min(data), max(data)
-    if mx == mn: mx = mn + 1
-    points = []
-    for i, v in enumerate(data):
-        px = x + int(i * w / (len(data) - 1))
-        py = y + h - int((v - mn) / (mx - mn) * h)
-        points.append((px, py))
-    # Fill area
-    fill_pts = points + [(points[-1][0], y + h), (points[0][0], y + h)]
-    color = color_up if data[-1] >= data[0] else color_down
-    draw.polygon(fill_pts, fill=color + "20")  # semi-transparent fill
-    # Line
-    draw.line(points, fill=color, width=2)
-    # Last point dot
-    draw.ellipse([points[-1][0]-3, points[-1][1]-3, points[-1][0]+3, points[-1][1]+3], fill=color)
-
-def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
-    """Generate a Rick Bot-style visual scan card as a PNG image."""
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-    except ImportError:
-        return None
-
-    # Card dimensions (600x800)
-    W, H = 600, 800
-    # Dark theme colors
-    BG = (13, 17, 23)
-    CARD_BG = (22, 27, 34)
-    BORDER = (48, 54, 61)
-    TEXT = (240, 246, 252)
-    MUTED = (139, 148, 158)
-    GREEN = (63, 185, 80)
-    RED = (248, 81, 73)
-    YELLOW = (255, 196, 0)
-    BLUE = (88, 166, 255)
-    PURPLE = (188, 140, 255)
-    ORANGE = (255, 159, 70)
-
-    img = Image.new('RGB', (W, H), BG)
-    draw = ImageDraw.Draw(img)
-
-    # Try to load fonts
-    try:
-        font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
-        font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
-        font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
-        font_xs = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
-        font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
-    except:
-        try:
-            font_lg = ImageFont.truetype("DejaVuSans-Bold.ttf", 28)
-            font_md = ImageFont.truetype("DejaVuSans.ttf", 18)
-            font_sm = ImageFont.truetype("DejaVuSans.ttf", 14)
-            font_xs = ImageFont.truetype("DejaVuSans.ttf", 11)
-            font_bold = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
-        except:
-            font_lg = font_md = font_sm = font_xs = font_bold = ImageFont.load_default()
-
-    # Extract data
-    sym = t.get("sym", "???")
-    name = t.get("name", sym)
-    addr = t.get("address", t.get("addr", ""))
-    price = float(t.get("price", 0) or 0)
-    mcap = float(t.get("mcap", 0) or t.get("fdv", 0) or 0)
-    fdv = float(t.get("fdv", 0) or mcap)
-    liq = float(t.get("liq", 0) or 0)
-    vol24 = float(t.get("v24h", 0) or 0)
-    ch5m = float(t.get("ch5m", 0) or 0)
-    ch1h = float(t.get("ch1h", 0) or 0)
-    ch24h = float(t.get("ch24h", 0) or 0)
-    b1h = int(t.get("b1h", 0) or 0)
-    s1h = int(t.get("s1h", 0) or 0)
-    holders = int(t.get("holder_count", 0) or 0)
-    risk = int(t.get("risk_score", 30) or 0)
-    nar = t.get("narrative", "")
-
-    # ── HEADER ──
-    # Background bar
-    draw.rectangle([0, 0, W, 80], fill=CARD_BG)
-    draw.line([0, 80, W, 80], fill=BORDER, width=2)
-
-    # Token symbol
-    draw.text((30, 18), f"${sym}", font=font_lg, fill=TEXT)
-    # Token name
-    draw.text((30, 50), name[:40], font=font_sm, fill=MUTED)
-
-    # Narrative tag (top right)
-    if nar:
-        tag_w = len(nar) * 8 + 20
-        draw.rounded_rectangle([W - tag_w - 30, 20, W - 30, 50], radius=8, fill=(40, 50, 70))
-        draw.text((W - tag_w - 20, 25), f"#{nar.upper()}", font=font_xs, fill=BLUE)
-
-    # ── PRICE SECTION ──
-    y = 100
-    # Price
-    if price >= 0.01: ps = f"${price:.6f}"
-    elif price >= 0.0001: ps = f"${price:.8f}"
-    else: ps = f"${price:.10f}"
-    draw.text((30, y), ps, font=font_bold, fill=TEXT)
-    # 24h change badge
-    ch_color = GREEN if ch24h >= 0 else RED
-    ch_text = f"{ch24h:+.1f}% 24h"
-    ch_w = len(ch_text) * 10 + 20
-    draw.rounded_rectangle([W - ch_w - 30, y, W - 30, y + 28], radius=6, fill=ch_color)
-    draw.text((W - ch_w - 20, y + 4), ch_text, font=font_sm, fill=(0, 0, 0))
-    y += 40
-
-    # ── SPARKLINE (simulated from price changes) ──
-    y_spark = y
-    h_spark = 120
-    draw.rounded_rectangle([20, y_spark, W - 20, y_spark + h_spark], radius=10, fill=CARD_BG)
-    # Generate fake sparkline data from changes
-    spark_data = []
-    base = 100
-    for i in range(50):
-        if i < 5 and ch5m: base *= (1 + ch5m/100/5)
-        elif i < 12 and ch1h: base *= (1 + ch1h/100/12)
-        elif i < 50 and ch24h: base *= (1 + ch24h/100/50)
-        spark_data.append(base + (i % 7) * base * 0.005)
-    _draw_sparkline(draw, spark_data, 35, y_spark + 10, W - 70, h_spark - 20, GREEN, RED)
-    y += h_spark + 20
-
-    # ── STATS GRID ──
-    y_grid = y
-    cell_h = 55
-    cell_w = (W - 60) // 2
-    stats = [
-        ("Market Cap", _short_k(mcap)),
-        ("FDV", _short_k(fdv)),
-        ("Liquidity", _short_k(liq)),
-        ("Volume 24h", _short_k(vol24)),
-        ("5m Change", f"{ch5m:+.1f}%"),
-        ("1h Change", f"{ch1h:+.1f}%"),
-    ]
-    for i, (label, value) in enumerate(stats):
-        col = i % 2
-        row = i // 2
-        cx = 20 + col * (cell_w + 20)
-        cy = y_grid + row * (cell_h + 10)
-        draw.rounded_rectangle([cx, cy, cx + cell_w, cy + cell_h], radius=8, fill=CARD_BG)
-        draw.text((cx + 12, cy + 8), label, font=font_xs, fill=MUTED)
-        val_color = GREEN if "+" in value and "Change" in label and float(value.replace("+","").replace("%","")) > 0 else RED if "Change" in label and float(value.replace("+","").replace("%","")) < 0 else TEXT
-        draw.text((cx + 12, cy + 26), value, font=font_md, fill=val_color)
-
-    y = y_grid + 2 * (cell_h + 10) + 10
-
-    # ── BUY/SELL BAR ──
-    bp = float(t.get("buy_pct", 50) or 50)
-    total_tx = b1h + s1h
-    draw.text((30, y), f"Transactions (1h): {total_tx}", font=font_md, fill=TEXT)
-    y += 25
-    bar_w = W - 60
-    bar_h = 24
-    buy_w = int(bar_w * bp / 100)
-    draw.rounded_rectangle([30, y, 30 + bar_w, y + bar_h], radius=6, fill=(30, 30, 35))
-    if buy_w > 0:
-        draw.rounded_rectangle([30, y, 30 + buy_w, y + bar_h], radius=6, fill=GREEN)
-    draw.text((40, y + 3), f"🟢 {b1h} Buys ({bp:.0f}%)", font=font_xs, fill=(0, 0, 0))
-    draw.text((30 + bar_w - 120, y + 3), f"{100-bp:.0f}% 🔴 {s1h} Sells", font=font_xs, fill=RED)
-    y += bar_h + 20
-
-    # ── HOLDER INFO ──
-    draw.line([20, y, W - 20, y], fill=BORDER, width=1)
-    y += 10
-    holder_text = f"Holders: {holders}" if holders > 0 else "Holders: —"
-    liq_ratio = (liq / mcap * 100) if mcap > 0 else 0
-    draw.text((30, y), holder_text, font=font_sm, fill=MUTED)
-    draw.text((W - 200, y), f"Liq/MCap: {liq_ratio:.1f}%", font=font_sm, fill=MUTED)
-    y += 22
-
-    # ── RISK SCORE ──
-    risk_color = GREEN if risk < 30 else YELLOW if risk < 60 else RED
-    risk_label = "LOW" if risk < 30 else "MEDIUM" if risk < 60 else "HIGH"
-    draw.text((30, y), f"Risk: ", font=font_sm, fill=MUTED)
-    draw.rounded_rectangle([75, y - 2, 75 + len(risk_label) * 10 + 20, y + 20], radius=6, fill=risk_color)
-    draw.text((85, y + 1), risk_label, font=font_xs, fill=(0, 0, 0))
-    y += 25
-
-    # ── BADGES ──
-    badges = []
-    if t.get("is_renounced"): badges.append(("✅ Renounced", GREEN))
-    if t.get("lp_locked"): badges.append(("🔒 LP Locked", GREEN))
-    if t.get("boost_active", 0) > 0: badges.append(("💰 Boosted", YELLOW))
-    if t.get("has_profile"): badges.append(("📋 Verified", BLUE))
-    if t.get("is_honeypot"): badges.append(("🚨 Honeypot", RED))
-    bx = 30
-    for badge_text, badge_color in badges[:5]:
-        bw = len(badge_text) * 7 + 16
-        draw.rounded_rectangle([bx, y, bx + bw, y + 22], radius=6, fill=badge_color + "30")
-        draw.text((bx + 8, y + 3), badge_text, font=font_xs, fill=badge_color)
-        bx += bw + 8
-        if bx > W - 100: break
-    y += 28
-
-    # ── CONTRACT ADDRESS ──
-    draw.line([20, y, W - 20, y], fill=BORDER, width=1)
-    y += 10
-    short_addr = f"{addr[:20]}...{addr[-12:]}" if len(addr) > 35 else addr
-    draw.text((30, y), f"Contract:", font=font_xs, fill=MUTED)
-    draw.text((100, y), short_addr, font=font_xs, fill=BLUE)
-    y += 20
-
-    # ── AI VERDICT ──
-    if ai and ai.strip():
-        draw.line([20, y, W - 20, y], fill=BORDER, width=1)
-        y += 10
-        draw.text((30, y), "🧠 KAYO AI VERDICT", font=font_sm, fill=PURPLE)
-        y += 22
-        # Wrap AI text
-        ai_text = ai.strip()[:200]
-        words = ai_text.split()
-        line = ""
-        for word in words:
-            test = line + " " + word if line else word
-            if draw.textlength(test, font=font_xs) > W - 60:
-                draw.text((30, y), line, font=font_xs, fill=TEXT)
-                y += 16
-                line = word
-            else:
-                line = test
-        if line:
-            draw.text((30, y), line, font=font_xs, fill=TEXT)
-            y += 16
-
-    # ── FOOTER ──
-    y_footer = H - 50
-    draw.rectangle([0, y_footer, W, H], fill=CARD_BG)
-    draw.line([0, y_footer, W, y_footer], fill=BORDER, width=1)
-    draw.text((30, y_footer + 10), "🦅 KAYO BRAIN", font=font_xs, fill=ORANGE)
-    draw.text((W - 150, y_footer + 10), "Powered by Kayo", font=font_xs, fill=MUTED)
-
-    buf = _io.BytesIO()
-    img.save(buf, format='PNG', optimize=True)
-    buf.seek(0)
-    return buf
-
-async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", reply_markup=None, alert_type: str = ""):
-    """Send a scan card as both image + text (Rick Bot style)."""
-    text_card = build_scan_card(t, ai) if not alert_type else build_alert_card(t, alert_type, ai)
-
-    # Try to generate and send image
-    img_buf = generate_scan_card_image(t, ai)
-    if img_buf:
-        try:
-            await bot.send_photo(
-                chat_id=chat_id,
-                photo=img_buf,
-                caption=text_card[:1024],  # Telegram caption limit
-                parse_mode="Markdown",
-                reply_markup=reply_markup,
-                disable_web_page_preview=True,
-            )
-            return True
-        except Exception as e:
-            logger.warning(f"Image card send failed: {e} — falling back to text")
-            img_buf.close()
-
-    # Fallback: text only
-    try:
-        await bot.send_message(
-            chat_id=chat_id,
-            text=text_card,
-            parse_mode="Markdown",
-            reply_markup=reply_markup,
-            disable_web_page_preview=True,
-        )
-        return True
-    except Exception as e:
-        logger.error(f"Text card send also failed: {e}")
-        return False
-
 
 def _rick_buttons(ca:str, sym:str="", pair_addr:str="") -> InlineKeyboardMarkup:
     dp = pair_addr or ca
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("\u274c",callback_data=f"dismiss:{ca}"),
          InlineKeyboardButton("\U0001f504",callback_data=f"refresh:{ca}"),
-         InlineKeyboardButton("\U0001f4ac\u2197",url=f"https://twitter.com/search?q=${sym}" if sym else f"https://dexscreener.com/solana/{dp}"),
-         InlineKeyboardButton("\U0001f50d\u2197",url=f"https://rugcheck.xyz/tokens/{ca}"),
-         InlineKeyboardButton("\U0001f4ca\u2197",url=f"https://dexscreener.com/solana/{dp}"),],
-        [InlineKeyboardButton("\U0001f4c8 BullX",url=f"https://neo.bullx.io/terminal?chainId=1399811149&address={ca}"),
-         InlineKeyboardButton("\U0001f438 GMGN",url=f"https://gmgn.ai/sol/token/{ca}"),
-         InlineKeyboardButton("\u26a1 Photon",url=f"https://photon-sol.tinyastro.io/en/lp/{ca}"),],
+         InlineKeyboardButton("\U0001f4ac\u2197",web_app=WebAppInfo(url=f"https://twitter.com/search?q=${sym}" if sym else f"https://dexscreener.com/solana/{dp}")),
+         InlineKeyboardButton("\U0001f50d\u2197",web_app=WebAppInfo(url=f"https://rugcheck.xyz/tokens/{ca}")),
+         InlineKeyboardButton("\U0001f4ca\u2197",web_app=WebAppInfo(url=f"https://dexscreener.com/solana/{dp}")),],
+        [InlineKeyboardButton("\U0001f4c8 BullX",web_app=WebAppInfo(url=f"https://neo.bullx.io/terminal?chainId=1399811149&address={ca}")),
+         InlineKeyboardButton("\U0001f438 GMGN",web_app=WebAppInfo(url=f"https://gmgn.ai/sol/token/{ca}")),
+         InlineKeyboardButton("\u26a1 Photon",web_app=WebAppInfo(url=f"https://photon-sol.tinyastro.io/en/lp/{ca}")),],
     ])
 
 _first_alert_seen: set = set()
@@ -3317,24 +2376,24 @@ def _old_scan_buttons_unused(addr: str, sym: str = "", pair_addr: str = "") -> I
             # DexScreener — opens chart inside Telegram WebApp browser
             InlineKeyboardButton(
                 "\U0001f4ca DexScreener",
-                url=f"https://dexscreener.com/solana/{dex_pair}"
+                web_app=WebAppInfo(url=f"https://dexscreener.com/solana/{dex_pair}")
             ),
             # GMGN — opens inside Telegram WebApp browser
             InlineKeyboardButton(
                 "\U0001f438 GMGN",
-                url=f"https://gmgn.ai/sol/token/{addr}"
+                web_app=WebAppInfo(url=f"https://gmgn.ai/sol/token/{addr}")
             ),
         ],
         [
             # BullX Neo — opens WebApp terminal inside Telegram
             InlineKeyboardButton(
                 "\U0001f319 BullX",
-                url=f"https://neo.bullx.io/terminal?chainId=1399811149&address={addr}"
+                web_app=WebAppInfo(url=f"https://neo.bullx.io/terminal?chainId=1399811149&address={addr}")
             ),
             # Photon — opens WebApp inside Telegram
             InlineKeyboardButton(
                 "\U0001f52b Photon",
-                url=f"https://photon-sol.tinyastro.io/en/lp/{addr}"
+                web_app=WebAppInfo(url=f"https://photon-sol.tinyastro.io/en/lp/{addr}")
             ),
         ],
         [
@@ -3455,14 +2514,15 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ {t['error']}"); return
     add_xp(u.effective_user.id, 5)
     _track_scan(t, u.effective_user.id)
-    # Send visual card IMMEDIATELY — no AI wait (Rick Bot style image)
+    # Send card IMMEDIATELY — no AI wait
     buttons = scan_buttons(addr, t.get("sym", ""), t.get("pair_addr", ""))
-    await msg.delete()
-    sent = await send_scan_card_with_image(
-        u.effective_message.bot, u.effective_chat.id, t, "",
-        reply_markup=buttons
+    sent = await msg.edit_text(
+        build_scan_card(t, ""),
+        parse_mode="Markdown",
+        reply_markup=buttons,
+        disable_web_page_preview=True,
     )
-    # AI verdict as background task — sends follow-up when ready
+    # AI verdict as background task — edits message when ready
     async def _scan_ai(msg_id, chat_id, token_data, btns):
         try:
             ai_v = await asyncio.wait_for(
@@ -3484,28 +2544,20 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
             )
             if ai_v and ai_v.strip():
                 try:
-                    await c.bot.send_message(
-                        chat_id=chat_id,
-                        text=f"\U0001f9e0 *AI Verdict \u2014 ${token_data['sym']}*\n\n{ai_v}",
+                    await c.bot.edit_message_text(
+                        chat_id=chat_id, message_id=msg_id,
+                        text=build_scan_card(token_data, ai_v),
                         parse_mode="Markdown",
                         reply_markup=btns,
                         disable_web_page_preview=True,
                     )
                 except Exception:
-                    try:
-                        await c.bot.send_message(
-                            chat_id=chat_id,
-                            text=f"\U0001f9e0 AI Verdict: {ai_v}",
-                            reply_markup=btns,
-                            disable_web_page_preview=True,
-                        )
-                    except Exception:
-                        pass
+                    pass
         except Exception:
             pass
 
     asyncio.create_task(_scan_ai(
-        sent.message_id if hasattr(sent, 'message_id') else 0,
+        sent.message_id if hasattr(sent, 'message_id') else msg.message_id,
         u.effective_chat.id, t, buttons
     ))
 
@@ -4078,7 +3130,7 @@ async def unwatch_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await u.effective_message.reply_text("Usage: `/unwatch @username`", parse_mode="Markdown"); return
     username = c.args[0].lstrip("@").lower()
     if username in watchlist:
-        del watchlist[username]; asyncio.create_task(_save())
+        del watchlist[username]; _save()
         await u.effective_message.reply_text(f"✅ Stopped watching @{username}")
     else:
         await u.effective_message.reply_text(f"@{username} is not in your watchlist.")
@@ -4232,7 +3284,7 @@ async def delalert_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     except: await u.effective_message.reply_text("❌ Invalid number."); return
     if idx < 0 or idx >= len(my):
         await u.effective_message.reply_text("❌ Alert not found."); return
-    user_alerts.remove(my[idx]); asyncio.create_task(_save())
+    user_alerts.remove(my[idx]); _save()
     await u.effective_message.reply_text(f"✅ Alert for *${my[idx]['sym']}* deleted.", parse_mode="Markdown")
 
 async def call_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -4359,7 +3411,7 @@ async def blacklist_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
         await u.effective_message.reply_text("Usage: `/blacklist <ca>`", parse_mode="Markdown"); return
     addr = c.args[0].strip()
-    blacklist.add(addr); asyncio.create_task(_save())
+    blacklist.add(addr); _save()
     add_xp(u.effective_user.id, 2)
     await u.effective_message.reply_text(f"🚫 `{addr[:20]}...` blacklisted — filtered from all scans.", parse_mode="Markdown")
 
@@ -4401,7 +3453,7 @@ async def mywallet_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
         await u.effective_message.reply_text("Usage: `/mywallet <solana_address>`", parse_mode="Markdown"); return
     addr = c.args[0].strip()
-    user_wallets[str(u.effective_user.id)] = addr; asyncio.create_task(_save())
+    user_wallets[str(u.effective_user.id)] = addr; _save()
     await u.effective_message.reply_text(f"✅ Wallet linked: `{addr}`", parse_mode="Markdown")
 
 async def dubs_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -4437,7 +3489,7 @@ async def remindme_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     except: await u.effective_message.reply_text("❌ Invalid time."); return
     text = " ".join(c.args[1:])
     fire = (datetime.utcnow() + timedelta(minutes=mins)).isoformat()
-    reminders.append({"chat_id": u.effective_chat.id, "text": text, "fire_at": fire}); asyncio.create_task(_save())
+    reminders.append({"chat_id": u.effective_chat.id, "text": text, "fire_at": fire}); _save()
     await u.effective_message.reply_text(f"⏰ Reminder set for *{mins} minutes*\n_{text}_", parse_mode="Markdown")
 
 async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -5146,12 +4198,15 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                 if t.get("error"):
                     await scanning_msg.edit_text(f"\u274c {t['error']}")
                     return
-                # Send visual scan card IMMEDIATELY — no AI wait (Rick Bot style image)
+                # Send scan card IMMEDIATELY — no AI wait
+                card = build_scan_card(t, "")
                 buttons = scan_buttons(ca, t.get("sym", ""), t.get("pair_addr", ""))
                 await scanning_msg.delete()
-                sent = await send_scan_card_with_image(
-                    u.effective_message.bot, u.effective_chat.id, t, "",
-                    reply_markup=buttons
+                sent = await u.effective_message.reply_text(
+                    card,
+                    parse_mode="Markdown",
+                    reply_markup=buttons,
+                    disable_web_page_preview=True,
                 )
                 add_xp(uid, 5)
                 # Fire AI verdict as NON-BLOCKING background task — edits message when ready
@@ -5174,20 +4229,22 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                             timeout=15
                         )
                         if ai_v and ai_v.strip():
-                            # v42: Send AI verdict as follow-up (photo caption can't be edited with new card)
                             try:
-                                await c.bot.send_message(
-                                    chat_id=chat_id,
-                                    text=f"\U0001f9e0 *AI Verdict \u2014 ${token_data['sym']}*\n\n{ai_v}",
+                                await c.bot.edit_message_text(
+                                    chat_id=chat_id, message_id=msg_id,
+                                    text=build_scan_card(token_data, ai_v),
                                     parse_mode="Markdown",
                                     reply_markup=btns,
                                     disable_web_page_preview=True,
                                 )
                             except Exception:
+                                # Markdown failed — try plain text
                                 try:
-                                    await c.bot.send_message(
-                                        chat_id=chat_id,
-                                        text=f"\U0001f9e0 AI Verdict \u2014 ${token_data['sym']}:\n\n{ai_v}",
+                                    plain = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '',
+                                                   build_scan_card(token_data, ai_v))
+                                    await c.bot.edit_message_text(
+                                        chat_id=chat_id, message_id=msg_id,
+                                        text=plain,
                                         reply_markup=btns,
                                         disable_web_page_preview=True,
                                     )
@@ -6561,9 +5618,8 @@ async def bg_main_scanner(app: Application):
     NO keyword filtering. 150-200+ unique coins per cycle.
     Detects: Pump | Gem | New Launch | Whale | Micro Gem | Unusual
     """
-    await asyncio.sleep(30)
+    await asyncio.sleep(15)
     cooldown: Dict[str, float] = {}
-    if len(seen_alert_ids) > 3000: seen_alert_ids = set(list(seen_alert_ids)[-2000:])
 
     while True:
         try:
@@ -6867,17 +5923,19 @@ async def bg_main_scanner(app: Application):
                 card = build_alert_card(tok_dict, alert_type, "")
                 buttons = scan_buttons(addr, sym)
 
-                # v42: Record for ATH tracking
-                await ath_record_token(tok)
                 if GROUP_CHAT_ID:
                     sent_msg = None
                     try:
-                        sent_msg = await send_scan_card_with_image(
-                            app.bot, GROUP_CHAT_ID, tok, "",
-                            reply_markup=buttons, alert_type=alert_type
+                        sent_msg = await app.bot.send_message(
+                            chat_id=GROUP_CHAT_ID,
+                            text=card,
+                            parse_mode="Markdown",
+                            reply_markup=buttons,
+                            disable_web_page_preview=True,
                         )
                     except Exception as md_err:
-                        logger.warning(f"[ALERT IMAGE FAIL] {sym}: {md_err} — fallback text")
+                        # Markdown failed — retry as plain text
+                        logger.warning(f"[ALERT MD FAIL] {sym}: {md_err} — retrying plain text")
                         try:
                             plain_card = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', card)
                             sent_msg = await app.bot.send_message(
@@ -7294,28 +6352,7 @@ async def bg_established_scanner(app: Application):
                 "solana meme", "solana ai", "solana dog", "solana cat",
                 "solana gaming", "solana pump", "solana pepe", "solana frog"
             ]
-            # v43: Unified multi-source discovery (DS + GT + Birdeye + Jupiter)
-            try:
-                unified_tokens = await asyncio.wait_for(unified_scanner_discovery(), timeout=25)
-                if unified_tokens and len(unified_tokens) > 5:
-                    pairs_map = {t["address"]: t for t in unified_tokens if t.get("address")}
-                else:
-                    pairs_map = await dex_multi_search(QUERIES)
-            except asyncio.TimeoutError:
-                pairs_map = await dex_multi_search(QUERIES)
-            # v42: Also fetch GT trending pools for broader coverage
-            try:
-                gt_pools = await asyncio.gather(
-                    _fetch_gt_trend(1), _fetch_gt_trend(2),
-                    return_exceptions=True)
-                for gp in gt_pools:
-                    if isinstance(gp, Exception): continue
-                    for pool in gp:
-                        tok = gt_parse_pool(pool)
-                        if tok and tok["address"] not in pairs_map:
-                            pairs_map[tok["address"]] = tok
-            except Exception as e:
-                logger.debug(f"established_scanner GT error: {e}")
+            pairs_map = await dex_multi_search(QUERIES)
 
             for addr, p in pairs_map.items():
                 if addr in blacklist: continue
@@ -7514,26 +6551,6 @@ async def bg_narrative_news_scanner(app: Application):
             search_terms = [t.strip().lower() for t in ai_terms_raw.strip().split("\n")
                            if t.strip() and len(t.strip()) > 1][:6]
             logger.info(f"[NARRATIVE] AI terms: {search_terms}")
-            # v42: Static keyword fallback if AI fails or returns too few terms
-            if not search_terms or len(search_terms) < 2:
-                static_keywords = []
-                for hl in headlines[:6]:
-                    hl_lower = hl.lower()
-                    for kw, terms in NARRATIVE_KEYWORDS.items():
-                        if kw in hl_lower:
-                            static_keywords.extend(terms[:2])
-                if pump_trend:
-                    for p in pump_trend[:3]:
-                        static_keywords.append(p.get("symbol", "")[:8].lower())
-                if cg_coins:
-                    for c in cg_coins[:3]:
-                        static_keywords.append(c.get("id", "")[:8].lower())
-                search_terms = list(set(static_keywords))[:6]
-                if search_terms:
-                    logger.info(f"[NARRATIVE] Static fallback terms: {search_terms}")
-
-            if not search_terms:
-                await asyncio.sleep(600); continue
 
             if GROUP_CHAT_ID == 0:
                 await asyncio.sleep(600); continue
@@ -7573,7 +6590,7 @@ async def bg_narrative_news_scanner(app: Application):
 
                         ai_why = await ai_ask(
                             f"Token ${sym} ({name}) is up +{ch1h:.0f}% on Solana. "
-                            f"The current narrative/theme is: '{term}'. "
+                            f"The current narrative/theme is: \'{term}\'. "
                             "Why might this be relevant right now? 1 sharp sentence, max 12 words.",
                             fallback="Riding current narrative — strong buy pressure.",
                             max_tokens=50, inject_market=False
@@ -7596,10 +6613,12 @@ async def bg_narrative_news_scanner(app: Application):
                             "mscore": min(100, int(abs(ch1h) + buy_pct/2 + vs*10)),
                         }
                         try:
-                            await send_scan_card_with_image(
-                                app.bot, GROUP_CHAT_ID, tok, ai_why,
+                            await app.bot.send_message(
+                                chat_id=GROUP_CHAT_ID,
+                                text=build_alert_card(tok, "narrative", ai_why),
+                                parse_mode="Markdown",
                                 reply_markup=scan_buttons(addr, sym, tok["pair_addr"]),
-                                alert_type="narrative"
+                                disable_web_page_preview=True,
                             )
                             found_count += 1
                             logger.info(f"[NARRATIVE] ${sym} via '{term}': +{ch1h:.0f}%")
@@ -7768,7 +6787,7 @@ async def bg_price_alert_checker(app: Application):
                     hit = (alert["direction"] == "above" and cur >= alert["target"]) or \
                           (alert["direction"] == "below" and cur <= alert["target"])
                     if hit:
-                        alert["triggered"] = True; asyncio.create_task(_save())
+                        alert["triggered"] = True; _save()
                         try:
                             await app.bot.send_message(
                                 chat_id=alert["uid"],
@@ -7931,23 +6950,6 @@ async def post_init(app: Application):
         BotCommand("autoresponder", "🤖 Toggle CA auto-scan"),
         BotCommand("status",        "⚙️ Bot health check"),
         BotCommand("ping",          "📶 Latency check"),
-        BotCommand("ath", "🏆 ATH leaderboard"),
-        BotCommand("burpboard", "📊 BurpBoard top calls"),
-        BotCommand("pvp", "⚔️ PVP competing tokens"),
-        BotCommand("pc", "🍝 Pasta Check (copy contract)"),
-        BotCommand("tldr", "📝 Summarize any URL"),
-        BotCommand("deep", "🧠 Deep AI analysis"),
-        BotCommand("dub", "💬 Chat vibe check"),
-        BotCommand("now", "📡 What's happening now"),
-        BotCommand("dev", "🔍 Deployer history"),
-        BotCommand("holders", "📊 Holder statistics"),
-        # v43 — Multi-source + Rick features
-        BotCommand("ts", "🐦 Twitter profile scan"),
-        BotCommand("burp", "📊 Hourly movers"),
-        BotCommand("ticker", "🔍 Ticker search"),
-        BotCommand("summary", "📝 Chat summary"),
-        BotCommand("contract", "📜 Contract analysis"),
-        BotCommand("zeros", "🚨 Zero-liquidity scan"),
     ]
 
     # ── Group chat menu — top discovery commands only (keeps it clean) ──
@@ -8060,7 +7062,7 @@ async def safe_edit(msg, text: str, parse_mode: str = "Markdown", **kwargs):
 
 # Track scanned tokens for /last, /hot, /ath, /groupburp
 _scan_history = []  # [{ca, sym, mcap, ch1h, ch24h, time, uid}]
-# (removed duplicate ath_tracker declaration — using global)
+_ath_tracker = {}   # {ca: {sym, first_mcap, ath_mcap, first_seen}}
 
 def _track_scan(t: Dict, uid: int = 0):
     """Record a token scan for leaderboards and history."""
@@ -8075,11 +7077,11 @@ def _track_scan(t: Dict, uid: int = 0):
     _scan_history.append(entry)
     if len(_scan_history) > 500: _scan_history.pop(0)
     # ATH tracking
-    if ca not in ath_tracker:
-        ath_tracker[ca] = {"sym": t.get("sym", "???"), "first_mcap": t.get("mcap", 0), "ath_mcap": t.get("mcap", 0), "first_seen": time.time()}
+    if ca not in _ath_tracker:
+        _ath_tracker[ca] = {"sym": t.get("sym", "???"), "first_mcap": t.get("mcap", 0), "ath_mcap": t.get("mcap", 0), "first_seen": time.time()}
     else:
-        if t.get("mcap", 0) > ath_tracker[ca]["ath_mcap"]:
-            ath_tracker[ca]["ath_mcap"] = t.get("mcap", 0)
+        if t.get("mcap", 0) > _ath_tracker[ca]["ath_mcap"]:
+            _ath_tracker[ca]["ath_mcap"] = t.get("mcap", 0)
 
 # ─── /dev — Deployer History ───────────────────────────────────
 async def dex_token_creator(ca: str) -> str:
@@ -8239,10 +7241,10 @@ async def soc_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 # ─── /ath — ATH Leaderboard ────────────────────────────────────
 async def ath_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Show ATH leaderboard from group scans."""
-    if not ath_tracker:
+    if not _ath_tracker:
         await u.effective_message.reply_text("📊 No tokens tracked yet. Scan some tokens first!"); return
     # Sort by ATH mcap
-    sorted_ath = sorted(ath_tracker.items(), key=lambda x: x[1]["ath_mcap"], reverse=True)[:15]
+    sorted_ath = sorted(_ath_tracker.items(), key=lambda x: x[1]["ath_mcap"], reverse=True)[:15]
     card = "━━━━━━━━━━━━━━━━━━━━━━━━━━━\n  📈 *ATH LEADERBOARD*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     for i, (ca, data) in enumerate(sorted_ath, 1):
         sym = data["sym"]
@@ -8566,599 +7568,6 @@ def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
 
-# ════════════════════════════════════════════════════════════════════════
-# RICK-INSPIRED FEATURES — v42 additions
-# ════════════════════════════════════════════════════════════════════════
-
-# ── ATH TRACKING FROM FIRST SCAN ────────────────────────────────────────
-# Rick tracks every token's ATH from the moment it was first scanned.
-# We store {address: {first_price, first_seen, ath_price, ath_time, first_mcap}} in Redis.
-
-async def ath_record_token(tok: Dict):
-    """Record a token's first scan and update ATH. Called from bg_main_scanner."""
-    addr = tok.get("address", "")
-    if not addr: return
-    price = tok.get("price", 0)
-    mcap = tok.get("mcap", 0) or tok.get("fdv", 0)
-    now = time.time()
-    
-    if addr not in ath_tracker:
-        ath_tracker[addr] = {
-            "sym": tok.get("sym", ""),
-            "first_price": price,
-            "first_seen": now,
-            "first_mcap": mcap,
-            "ath_price": price,
-            "ath_time": now,
-        }
-    else:
-        entry = ath_tracker[addr]
-        if price > entry["ath_price"]:
-            entry["ath_price"] = price
-            entry["ath_time"] = now
-    
-    # Trim to last 2000 entries
-    if len(ath_tracker) > 2000:
-        oldest = sorted(ath_tracker.items(), key=lambda x: x[1]["first_seen"])[:500]
-        for k, _ in oldest:
-            del ath_tracker[k]
-
-async def cmd_ath(update, context):
-    """Show ATH leaderboard — tokens called/scanned in group, ranked by gain from first scan."""
-    if not ath_tracker:
-        await update.message.reply_text("📊 No ATH data yet — bot needs to scan tokens first.")
-        return
-    
-    # Calculate gains
-    gains = []
-    for addr, data in ath_tracker.items():
-        first = data["first_price"]
-        ath = data["ath_price"]
-        cur = data.get("ath_price", 0)  # We'd need live price for current, use ATH for now
-        if first > 0 and ath > 0:
-            mult = ath / first
-            gains.append({
-                "sym": data["sym"],
-                "addr": addr,
-                "first_price": first,
-                "ath_price": ath,
-                "mult": mult,
-                "age_h": (time.time() - data["first_seen"]) / 3600,
-            })
-    
-    gains.sort(key=lambda x: x["mult"], reverse=True)
-    top = gains[:15]
-    
-    if not top:
-        await update.message.reply_text("📊 No ATH data yet.")
-        return
-    
-    text = "🏆 **ATH LEADERBOARD — Top Calls**\n"
-    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    for i, g in enumerate(top):
-        emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
-        mult_str = f"{g['mult']:.1f}x" if g['mult'] < 100 else f"{g['mult']:.0f}x"
-        age = f"{g['age_h']:.1f}h" if g['age_h'] < 24 else f"{g['age_h']/24:.1f}d"
-        text += f"{emoji} ${g['sym']} — {mult_str} from first scan ({age} ago)\n"
-        text += f"   First: ${g['first_price']:.8f} → ATH: ${g['ath_price']:.8f}\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-# ── PVP TOKENS — Find competing tokens in same narrative ────────────────
-# Rick's /pvp finds newer tokens in the same narrative competing for volume.
-
-async def cmd_pvp(update, context):
-    """Find PVP tokens — newer tokens in the same narrative/category."""
-    if not context.args:
-        await update.message.reply_text(
-            "⚔️ **PVP Scanner**\nUsage: `/pvp <token_address>`\n"
-            "Finds competing tokens in the same narrative.",
-            parse_mode="Markdown")
-        return
-    
-    addr = context.args[0].strip()
-    if addr.startswith("$"): addr = addr[1:]
-    
-    # Get the token's info
-    pairs = await dex_pairs_by_token(addr)
-    if not pairs:
-        await update.message.reply_text("❌ Token not found.")
-        return
-    
-    tok = pairs[0]
-    sym = tok.get("baseToken", {}).get("symbol", "?")
-    name = tok.get("baseToken", {}).get("name", "?")
-    fdv = tok.get("fdv", 0) or tok.get("marketCap", 0)
-    liq = tok.get("liquidity", {}).get("usd", 0)
-    vol24 = tok.get("volume", {}).get("h24", 0)
-    created = tok.get("pairCreatedAt", 0)
-    
-    # Extract narrative from name/symbol
-    narrative = detect_narrative(f"{sym} {name}")
-    if not narrative:
-        # Try DexScreener search with the token symbol to find similar
-        narrative = sym.lower()
-    
-    # Search for competing tokens
-    search_term = narrative if narrative else sym.lower()
-    competitors = await dex_search_pairs(search_term)
-    
-    # Filter: newer than this token, similar mcap range
-    pvp_list = []
-    for p in competitors:
-        p_sym = p.get("baseToken", {}).get("symbol", "")
-        p_addr = p.get("baseToken", {}).get("address", "")
-        if p_addr.lower() == addr.lower(): continue  # skip self
-        p_fdv = p.get("fdv", 0) or p.get("marketCap", 0)
-        p_liq = p.get("liquidity", {}).get("usd", 0)
-        p_vol = p.get("volume", {}).get("h24", 0)
-        p_created = p.get("pairCreatedAt", 0)
-        p_ch5m = p.get("priceChange", {}).get("m5", 0)
-        p_ch1h = p.get("priceChange", {}).get("h1", 0)
-        
-        # PVP criteria: same narrative, has liquidity, has volume
-        if p_liq < 1000: continue
-        if p_vol < 500: continue
-        
-        # Score by volume relative to mcap (attention efficiency)
-        attention = p_vol / max(p_fdv, 1) * 100
-        
-        pvp_list.append({
-            "sym": p_sym, "addr": p_addr, "name": p.get("baseToken", {}).get("name", ""),
-            "fdv": p_fdv, "liq": p_liq, "vol24": p_vol,
-            "ch5m": p_ch5m, "ch1h": p_ch1h,
-            "created": p_created, "attention": attention,
-        })
-    
-    pvp_list.sort(key=lambda x: x["vol24"], reverse=True)
-    pvp_list = pvp_list[:10]
-    
-    if not pvp_list:
-        await update.message.reply_text(f"⚔️ No PVP tokens found for ${sym} narrative: {narrative}")
-        return
-    
-    text = f"⚔️ **PVP — ${sym} Narrative: {narrative}**\n"
-    text += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"Base: ${sym} | FDV: {_usd(fdv)} | Liq: {_usd(liq)} | Vol: {_usd(vol24)}\n"
-    text += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    
-    for i, p in enumerate(pvp_list):
-        emoji = "🔴" if p["ch5m"] < 0 else "🟢" if p["ch5m"] > 5 else "⚪"
-        age = ""
-        if p["created"]:
-            age_h = (time.time() - p["created"]/1000) / 3600
-            age = f" | {age_h:.1f}h old" if age_h < 168 else f" | {age_h/24:.0f}d old"
-        text += f"{emoji} ${p['sym']} — Vol: {_usd(p['vol24'])} | FDV: {_usd(p['fdv'])}\n"
-        text += f"   5m: {p['ch5m']:+.1f}% | 1h: {p['ch1h']:+.1f}%{age}\n"
-        text += f"   `{p['addr'][:12]}...{p['addr'][-6:]}`\n"
-    
-    buttons = [[InlineKeyboardButton(f"🔍 DexScreener", url=f"https://dexscreener.com/search?q={search_term}")]]
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
-
-# ── CONTRACT SIMILARITY (Pasta Check) ───────────────────────────────────
-# Rick's /pc checks if a contract is a copy of another. We use GoPlus + DexScreener metadata.
-
-async def cmd_pastacheck(update, context):
-    """Check contract similarity — is this token a copy-paste of another?"""
-    if not context.args:
-        await update.message.reply_text(
-            "🍝 **Pasta Check**\nUsage: `/pc <token_address>`\n"
-            "Checks if this contract is a copy-paste of another token.",
-            parse_mode="Markdown")
-        return
-    
-    addr = context.args[0].strip()
-    if addr.startswith("$"): addr = addr[1:]
-    
-    # Get token data
-    pairs = await dex_pairs_by_token(addr)
-    if not pairs:
-        await update.message.reply_text("❌ Token not found on DEX.")
-        return
-    
-    tok = pairs[0]
-    sym = tok.get("baseToken", {}).get("symbol", "?")
-    name = tok.get("baseToken", {}).get("name", "?")
-    
-    # GoPlus security check
-    gp = await goplus_check(addr)
-    
-    # Search for tokens with the same name/symbol
-    name_results = await dex_search_all_chains(name, limit=20)
-    sym_results = await dex_search_all_chains(sym, limit=20)
-    
-    # Filter out the original
-    all_results = []
-    seen_addrs = {addr.lower()}
-    for p in name_results + sym_results:
-        p_addr = p.get("baseToken", {}).get("address", "")
-        if p_addr.lower() in seen_addrs: continue
-        seen_addrs.add(p_addr.lower())
-        all_results.append(p)
-    
-    # Count matching tokens
-    total_copies = len(all_results)
-    
-    # Build similarity score
-    uniqueness_score = 100
-    if total_copies > 0:
-        uniqueness_score = max(0, 100 - (total_copies * 5))
-    
-    # GoPlus flags
-    is_honeypot = gp.get("is_honeypot", False)
-    is_open_source = gp.get("is_open_source", False)
-    is_mintable = gp.get("is_mintable", False)
-    can_take_back = gp.get("can_take_back_ownership", False)
-    holder_rate = gp.get("holder_count", 0)
-    
-    text = f"🍝 **Pasta Check — ${sym}**\n"
-    text += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"**Uniqueness Score: {uniqueness_score}/100**\n"
-    
-    if uniqueness_score == 100:
-        text += "✅ This contract appears unique — no copies found.\n"
-    else:
-        text += f"⚠️ Found {total_copies} tokens with similar name/symbol:\n"
-        for p in all_results[:5]:
-            p_sym = p.get("baseToken", {}).get("symbol", "?")
-            p_chain = p.get("chainId", "?")
-            p_fdv = p.get("fdv", 0) or 0
-            text += f"   • ${p_sym} on {p_chain} (FDV: {_usd(p_fdv)})\n"
-        if total_copies > 5:
-            text += f"   ...and {total_copies - 5} more\n"
-    
-    text += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"**Security:**\n"
-    text += f"   Honeypot: {'🔴 YES' if is_honeypot else '🟢 NO'}\n"
-    text += f"   Open Source: {'🟢 YES' if is_open_source else '🔴 NO'}\n"
-    text += f"   Mintable: {'🔴 YES' if is_mintable else '🟢 NO'}\n"
-    text += f"   Can Reclaim: {'🔴 YES' if can_take_back else '🟢 NO'}\n"
-    
-    if is_honeypot or is_mintable or can_take_back:
-        text += f"\n🚨 **HIGH RISK — multiple red flags**\n"
-    
-    buttons = [
-        [InlineKeyboardButton("🔍 RugCheck", url=f"https://rugcheck.xyz/tokens/{addr}"),
-         InlineKeyboardButton("📊 DexScreener", url=f"https://dexscreener.com/solana/{addr}")]
-    ]
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
-
-# ── TLDR ENGINE — Summarize URLs, articles, YouTube ─────────────────────
-async def cmd_tldr(update, context):
-    """Summarize any URL — article, YouTube, Twitter thread, PDF."""
-    if not context.args:
-        await update.message.reply_text(
-            "📝 **TLDR**\nUsage: `/tldr <url>`\n"
-            "Summarizes articles, YouTube videos, Twitter threads, and PDFs.",
-            parse_mode="Markdown")
-        return
-    
-    url = context.args[0].strip()
-    if not url.startswith("http"):
-        url = "https://" + url
-    
-    # Fetch the page content
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(url, timeout=aiohttp.ClientTimeout(total=15), headers={
-                "User-Agent": "Mozilla/5.0 (compatible; KayoBrain/1.0)"
-            }) as r:
-                if r.status != 200:
-                    await update.message.reply_text(f"❌ Failed to fetch URL (HTTP {r.status})")
-                    return
-                html = await r.text()
-                
-                # Extract text content
-                # Remove script/style tags
-                text = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL)
-                text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL)
-                # Get text from remaining HTML
-                text = re.sub(r'<[^>]+>', ' ', text)
-                text = re.sub(r'\s+', ' ', text).strip()
-                
-                # Extract title
-                title_match = re.search(r'<title[^>]*>(.*?)</title>', html, re.DOTALL | re.IGNORECASE)
-                title = title_match.group(1).strip() if title_match else "Untitled"
-                
-                # Truncate to first 5000 chars for AI
-                text = text[:5000]
-                
-                if len(text) < 100:
-                    await update.message.reply_text("❌ Not enough text content found to summarize.")
-                    return
-    
-    except asyncio.TimeoutError:
-        await update.message.reply_text("⏱️ Request timed out.")
-        return
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
-        return
-    
-    # Use AI to summarize
-    msg = await update.message.reply_text("📝 Summarizing...")
-    
-    summary = await ai_ask(
-        f"Summarize this webpage concisely. Title: {title}\n\nContent:\n{text}\n\n"
-        "Give me: 1) One-line summary 2) 3 key points 3) Why it matters (if crypto-related). "
-        "Keep it sharp and professional. Max 200 words.",
-        fallback="Failed to generate summary.",
-        inject_market=False,
-        max_tokens=300
-    )
-    
-    result = f"📝 **TLDR: {title[:60]}**\n"
-    result += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{summary}"
-    
-    try:
-        await msg.edit_text(result, parse_mode="Markdown")
-    except:
-        await msg.edit_text(result)
-
-# ── DEEP AI MODE — Use Gemini for complex reasoning ─────────────────────
-async def cmd_deep(update, context):
-    """Deep AI mode — uses Gemini 2.0 Flash for complex reasoning questions."""
-    if not context.args:
-        await update.message.reply_text(
-            "🧠 **Deep Mode**\nUsage: `/deep <question>`\n"
-            "Uses Gemini 2.0 Flash for complex reasoning and analysis.",
-            parse_mode="Markdown")
-        return
-    
-    question = " ".join(context.args)
-    
-    # Skip Groq, go straight to Gemini for deep reasoning
-    system_ctx = await get_live_market_context()
-    prompt = (
-        f"{system_ctx}\n\n"
-        f"{NARRATIVE_KB}\n\n"
-        "You are Kayo in Deep Mode. You use careful reasoning and analysis. "
-        "Think step by step. Be thorough but concise. "
-        "Question: " + question
-    )
-    
-    msg = await update.message.reply_text("🧠 Thinking deeply...")
-    
-    # Try Gemini models directly
-    response = ""
-    for gem_model in ["gemini-2.5-flash", "gemini-2.0-flash"]:
-        if not GEMINI_API_KEY: break
-        try:
-            payload = {"contents": [{"parts": [{"text": prompt}]}],
-                        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 800}}
-            async with aiohttp.ClientSession() as s:
-                async with s.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{gem_model}:generateContent?key={GEMINI_API_KEY}",
-                    json=payload, timeout=aiohttp.ClientTimeout(total=30)
-                ) as r:
-                    if r.status == 200:
-                        data = await r.json()
-                        response = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                        break
-        except Exception:
-            continue
-    
-    if not response:
-        # Fallback to regular ai_ask
-        response = await ai_ask(question, fallback="All AI backends failed.", max_tokens=500)
-    
-    result = f"🧠 **Deep Analysis**\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{response}"
-    
-    try:
-        await msg.edit_text(result, parse_mode="Markdown")
-    except:
-        await msg.edit_text(result)
-
-# ── CHAT SUMMARY (Rick's /dub feature) ──────────────────────────────────
-async def cmd_dub(update, context):
-    """Generate a summary of recent chat messages."""
-    chat_id = update.effective_chat.id
-    
-    # Fetch recent messages from Telegram
-    try:
-        # Get recent updates (limited by Telegram API)
-        recent = []
-        # We'll use the bot's get_chat_administrators to verify we're in a group
-        # Then generate a summary from what we've seen
-        
-        # Build context from recent crypto mentions
-        context_summary = await ai_ask(
-            f"Summarize the current crypto market mood based on these indicators: "
-            f"BTC price, SOL price, trending narratives, recent alerts. "
-            f"Give a 3-sentence market vibe check.",
-            fallback="Market summary unavailable.",
-            inject_market=True,
-            max_tokens=200
-        )
-        
-        text = "💬 **Chat Vibe Check**\n"
-        text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        text += context_summary
-        
-        await update.message.reply_text(text, parse_mode="Markdown")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Summary failed: {str(e)[:80]}")
-
-# ── NOW — What's happening right now (Rick's /now) ───────────────────────
-async def cmd_now(update, context):
-    """What's happening right now in crypto — market snapshot."""
-    signals = await fetch_social_signals()
-    
-    headlines = signals.get("news", [])[:5]
-    pump_trend = signals.get("pump_trending", [])[:3]
-    cg_trending = signals.get("cg_trending", [])[:5]
-    
-    # Get live prices
-    btc = await fetch_live_price("bitcoin")
-    sol = await fetch_live_price("solana")
-    eth = await fetch_live_price("ethereum")
-    
-    text = "📡 **RIGHT NOW**\n"
-    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"BTC: ${btc.get('price', 0):,.0f} ({btc.get('change_24h', 0):+.1f}%)\n"
-    text += f"SOL: ${sol.get('price', 0):,.2f} ({sol.get('change_24h', 0):+.1f}%)\n"
-    text += f"ETH: ${eth.get('price', 0):,.0f} ({eth.get('change_24h', 0):+.1f}%)\n"
-    
-    if headlines:
-        text += f"\n📰 **Breaking:**\n"
-        for h in headlines[:3]:
-            text += f"• {h[:80]}\n"
-    
-    if pump_trend:
-        text += f"\n🔥 **PumpFun Trending:**\n"
-        for p in pump_trend[:3]:
-            sym = p.get("symbol", "?")
-            mc = p.get("market_cap", 0) or 0
-            text += f"• ${sym} — {_usd(mc)}\n"
-    
-    if cg_trending:
-        text += f"\n📈 **CoinGecko Trending:**\n"
-        for c in cg_trending:
-            text += f"• {c.get('name', c.get('id', '?'))}\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-# ── GLOBAL ATH LEADERBOARD (BurpBoard equivalent) ────────────────────────
-async def cmd_burpboard(update, context):
-    """Show the BurpBoard — global ATH leaderboard of tokens scanned."""
-    if not ath_tracker:
-        await update.message.reply_text("📊 No tokens tracked yet.")
-        return
-    
-    gains = []
-    for addr, data in ath_tracker.items():
-        first = data["first_price"]
-        ath = data["ath_price"]
-        if first > 0 and ath > 0:
-            mult = ath / first
-            if mult > 1.1:  # Only show 1.1x+
-                gains.append({"sym": data["sym"], "addr": addr, "mult": mult,
-                              "age_h": (time.time() - data["first_seen"]) / 3600})
-    
-    gains.sort(key=lambda x: x["mult"], reverse=True)
-    top = gains[:20]
-    
-    if not top:
-        await update.message.reply_text("📊 No significant gains tracked yet.")
-        return
-    
-    text = "📊 **BURPBOARD — Top Performers**\n"
-    text += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    for i, g in enumerate(top):
-        emoji = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"{i+1}."
-        mult_str = f"{g['mult']:.1f}x" if g['mult'] < 100 else f"{g['mult']:.0f}x"
-        age = f"{g['age_h']:.1f}h" if g['age_h'] < 24 else f"{g['age_h']/24:.1f}d"
-        text += f"{emoji} ${g['sym']} — {mult_str} ({age})\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-# ── DEV HISTORY (Rick's /dev) ───────────────────────────────────────────
-async def cmd_devhistory(update, context):
-    """Show deployer history — check if a token's deployer has launched other tokens."""
-    if not context.args:
-        await update.message.reply_text(
-            "🔍 **Deployer History**\nUsage: `/dev <token_address>`\n"
-            "Checks the deployer's previous launches.",
-            parse_mode="Markdown")
-        return
-    
-    addr = context.args[0].strip()
-    if addr.startswith("$"): addr = addr[1:]
-    
-    # Get token data to find the pair
-    pairs = await dex_pairs_by_token(addr)
-    if not pairs:
-        await update.message.reply_text("❌ Token not found.")
-        return
-    
-    tok = pairs[0]
-    sym = tok.get("baseToken", {}).get("symbol", "?")
-    
-    # GoPlus gives us deployer info
-    gp = await goplus_check(addr)
-    
-    creator = gp.get("creator_address", "Unknown")
-    creator_count = gp.get("creator_count", 0) or 0
-    holders = gp.get("holder_count", 0) or 0
-    lp_holders = gp.get("lp_holder_count", 0) or 0
-    lp_locked = gp.get("is_lp_locked", False)
-    
-    # Search DexScreener for other tokens by same creator (if available)
-    text = f"🔍 **Deployer History — ${sym}**\n"
-    text += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"Creator: `{creator[:12]}...{creator[-6:]}`\n"
-    text += f"Tokens Created: {creator_count}\n"
-    text += f"Holders: {holders}\n"
-    text += f"LP Holders: {lp_holders}\n"
-    text += f"LP Locked: {'🟢 YES' if lp_locked else '🔴 NO'}\n"
-    
-    # Additional checks
-    is_proxy = gp.get("is_proxy", False)
-    is_in_dex = gp.get("is_in_dex", True)
-    buy_tax = gp.get("buy_tax", 0) or 0
-    sell_tax = gp.get("sell_tax", 0) or 0
-    
-    text += f"\n**Token Info:**\n"
-    text += f"   Buy Tax: {buy_tax:.1f}%\n" if isinstance(buy_tax, (int, float)) else f"   Buy Tax: {buy_tax}\n"
-    text += f"   Sell Tax: {sell_tax:.1f}%\n" if isinstance(sell_tax, (int, float)) else f"   Sell Tax: {sell_tax}\n"
-    text += f"   Proxy: {'🔴 YES' if is_proxy else '🟢 NO'}\n"
-    text += f"   In DEX: {'🟢 YES' if is_in_dex else '🔴 NO'}\n"
-    
-    if creator_count and creator_count > 5:
-        text += f"\n⚠️ Deployer has created {creator_count} tokens — possible serial launcher.\n"
-    
-    buttons = [[InlineKeyboardButton("🔍 Solscan", url=f"https://solscan.io/account/{creator}")]]
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
-
-# ── HOLDER STATS (Rick's /hs) ───────────────────────────────────────────
-async def cmd_holderstats(update, context):
-    """Show holder statistics for a token."""
-    if not context.args:
-        await update.message.reply_text(
-            "📊 **Holder Stats**\nUsage: `/holders <token_address>`\n",
-            parse_mode="Markdown")
-        return
-    
-    addr = context.args[0].strip()
-    if addr.startswith("$"): addr = addr[1:]
-    
-    gp = await goplus_check(addr)
-    pairs = await dex_pairs_by_token(addr)
-    
-    if not pairs:
-        await update.message.reply_text("❌ Token not found.")
-        return
-    
-    tok = pairs[0]
-    sym = tok.get("baseToken", {}).get("symbol", "?")
-    holders = gp.get("holder_count", 0) or 0
-    lp_holders = gp.get("lp_holder_count", 0) or 0
-    lp_locked = gp.get("is_lp_locked", False)
-    total_supply = gp.get("total_supply", 0) or 0
-    
-    # Top holders from GoPlus
-    top_holders = gp.get("holders", [])[:10]
-    
-    text = f"📊 **Holder Stats — ${sym}**\n"
-    text += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    text += f"Total Holders: {holders}\n"
-    text += f"LP Holders: {lp_holders}\n"
-    text += f"LP Locked: {'🟢 YES' if lp_locked else '🔴 NO'}\n"
-    
-    if top_holders:
-        text += f"\n**Top Holders:**\n"
-        for h in top_holders[:5]:
-            addr_h = h.get("address", "?")
-            pct = h.get("percent", 0) or 0
-            text += f"   `{addr_h[:10]}...` — {pct:.2f}%\n"
-    
-    # Concentration check
-    if top_holders:
-        top_5_pct = sum(h.get("percent", 0) for h in top_holders[:5])
-        if top_5_pct > 50:
-            text += f"\n⚠️ Top 5 hold {top_5_pct:.1f}% — high concentration risk.\n"
-    
-    await update.message.reply_text(text, parse_mode="Markdown")
-
     CMDS = [
         ("start", start), ("help", help_cmd),
         ("scan", scan_cmd), ("c", c_cmd), ("verify", verify_cmd),
@@ -9194,16 +7603,6 @@ async def cmd_holderstats(update, context):
         # v40 — remaining elite features
         ("migrate", migrate_cmd),
         ("kol", kol_cmd),
-        # v42 — Rick Bot inspired features
-        ("ath", cmd_ath), ("burpboard", cmd_burpboard),
-        ("pvp", cmd_pvp), ("pc", cmd_pastacheck),
-        ("tldr", cmd_tldr), ("deep", cmd_deep),
-        ("dub", cmd_dub), ("now", cmd_now),
-        ("dev", cmd_devhistory), ("holders", cmd_holderstats),
-        # v43 — Multi-source + Rick features
-        ("ts", cmd_twitter_scan), ("burp", cmd_hourly_burp),
-        ("ticker", cmd_ticker_search), ("summary", cmd_channel_summary),
-        ("contract", cmd_contract_read), ("zeros", cmd_zeros),
     ]
     for name, fn in CMDS:
         app.add_handler(CommandHandler(name, safe_command(fn)))
