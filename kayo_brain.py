@@ -2162,6 +2162,287 @@ def _build_rick_card(t: Dict, ai: str = "", is_first_alert: bool = False, watche
     ai_l = f"\n\n\U0001f9e0 {ai}" if ai and ai.strip() else ""
     return "\n".join([hdr,f"{plat_e} {plat_t}",f"\U0001f4b0 USD: {ps}",fdv_l,liq_l,vol_l,txn_l,"",th_l,tot_l,bd_l,fr_l,ch_l,mo_l,"",f"`{addr}`",tags.strip(),fa,ai_l]).strip()
 
+
+# ── VISUAL SCAN CARD (Rick Bot style image) ──────────────────────────────
+import io as _io
+
+def _draw_sparkline(draw, data, x, y, w, h, color_up, color_down):
+    """Draw a mini sparkline chart on an ImageDraw object."""
+    if not data or len(data) < 2:
+        draw.text((x, y + h//2 - 8), "No chart data", fill="#666666")
+        return
+    mn, mx = min(data), max(data)
+    if mx == mn: mx = mn + 1
+    points = []
+    for i, v in enumerate(data):
+        px = x + int(i * w / (len(data) - 1))
+        py = y + h - int((v - mn) / (mx - mn) * h)
+        points.append((px, py))
+    # Fill area
+    fill_pts = points + [(points[-1][0], y + h), (points[0][0], y + h)]
+    color = color_up if data[-1] >= data[0] else color_down
+    draw.polygon(fill_pts, fill=color + "20")  # semi-transparent fill
+    # Line
+    draw.line(points, fill=color, width=2)
+    # Last point dot
+    draw.ellipse([points[-1][0]-3, points[-1][1]-3, points[-1][0]+3, points[-1][1]+3], fill=color)
+
+def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
+    """Generate a Rick Bot-style visual scan card as a PNG image."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+
+    # Card dimensions (600x800)
+    W, H = 600, 800
+    # Dark theme colors
+    BG = (13, 17, 23)
+    CARD_BG = (22, 27, 34)
+    BORDER = (48, 54, 61)
+    TEXT = (240, 246, 252)
+    MUTED = (139, 148, 158)
+    GREEN = (63, 185, 80)
+    RED = (248, 81, 73)
+    YELLOW = (255, 196, 0)
+    BLUE = (88, 166, 255)
+    PURPLE = (188, 140, 255)
+    ORANGE = (255, 159, 70)
+
+    img = Image.new('RGB', (W, H), BG)
+    draw = ImageDraw.Draw(img)
+
+    # Try to load fonts
+    try:
+        font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
+        font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
+        font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
+        font_xs = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
+        font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
+    except:
+        try:
+            font_lg = ImageFont.truetype("DejaVuSans-Bold.ttf", 28)
+            font_md = ImageFont.truetype("DejaVuSans.ttf", 18)
+            font_sm = ImageFont.truetype("DejaVuSans.ttf", 14)
+            font_xs = ImageFont.truetype("DejaVuSans.ttf", 11)
+            font_bold = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
+        except:
+            font_lg = font_md = font_sm = font_xs = font_bold = ImageFont.load_default()
+
+    # Extract data
+    sym = t.get("sym", "???")
+    name = t.get("name", sym)
+    addr = t.get("address", t.get("addr", ""))
+    price = float(t.get("price", 0) or 0)
+    mcap = float(t.get("mcap", 0) or t.get("fdv", 0) or 0)
+    fdv = float(t.get("fdv", 0) or mcap)
+    liq = float(t.get("liq", 0) or 0)
+    vol24 = float(t.get("v24h", 0) or 0)
+    ch5m = float(t.get("ch5m", 0) or 0)
+    ch1h = float(t.get("ch1h", 0) or 0)
+    ch24h = float(t.get("ch24h", 0) or 0)
+    b1h = int(t.get("b1h", 0) or 0)
+    s1h = int(t.get("s1h", 0) or 0)
+    holders = int(t.get("holder_count", 0) or 0)
+    risk = int(t.get("risk_score", 30) or 0)
+    nar = t.get("narrative", "")
+
+    # ── HEADER ──
+    # Background bar
+    draw.rectangle([0, 0, W, 80], fill=CARD_BG)
+    draw.line([0, 80, W, 80], fill=BORDER, width=2)
+
+    # Token symbol
+    draw.text((30, 18), f"${sym}", font=font_lg, fill=TEXT)
+    # Token name
+    draw.text((30, 50), name[:40], font=font_sm, fill=MUTED)
+
+    # Narrative tag (top right)
+    if nar:
+        tag_w = len(nar) * 8 + 20
+        draw.rounded_rectangle([W - tag_w - 30, 20, W - 30, 50], radius=8, fill=(40, 50, 70))
+        draw.text((W - tag_w - 20, 25), f"#{nar.upper()}", font=font_xs, fill=BLUE)
+
+    # ── PRICE SECTION ──
+    y = 100
+    # Price
+    if price >= 0.01: ps = f"${price:.6f}"
+    elif price >= 0.0001: ps = f"${price:.8f}"
+    else: ps = f"${price:.10f}"
+    draw.text((30, y), ps, font=font_bold, fill=TEXT)
+    # 24h change badge
+    ch_color = GREEN if ch24h >= 0 else RED
+    ch_text = f"{ch24h:+.1f}% 24h"
+    ch_w = len(ch_text) * 10 + 20
+    draw.rounded_rectangle([W - ch_w - 30, y, W - 30, y + 28], radius=6, fill=ch_color)
+    draw.text((W - ch_w - 20, y + 4), ch_text, font=font_sm, fill=(0, 0, 0))
+    y += 40
+
+    # ── SPARKLINE (simulated from price changes) ──
+    y_spark = y
+    h_spark = 120
+    draw.rounded_rectangle([20, y_spark, W - 20, y_spark + h_spark], radius=10, fill=CARD_BG)
+    # Generate fake sparkline data from changes
+    spark_data = []
+    base = 100
+    for i in range(50):
+        if i < 5 and ch5m: base *= (1 + ch5m/100/5)
+        elif i < 12 and ch1h: base *= (1 + ch1h/100/12)
+        elif i < 50 and ch24h: base *= (1 + ch24h/100/50)
+        spark_data.append(base + (i % 7) * base * 0.005)
+    _draw_sparkline(draw, spark_data, 35, y_spark + 10, W - 70, h_spark - 20, GREEN, RED)
+    y += h_spark + 20
+
+    # ── STATS GRID ──
+    y_grid = y
+    cell_h = 55
+    cell_w = (W - 60) // 2
+    stats = [
+        ("Market Cap", _short_k(mcap)),
+        ("FDV", _short_k(fdv)),
+        ("Liquidity", _short_k(liq)),
+        ("Volume 24h", _short_k(vol24)),
+        ("5m Change", f"{ch5m:+.1f}%"),
+        ("1h Change", f"{ch1h:+.1f}%"),
+    ]
+    for i, (label, value) in enumerate(stats):
+        col = i % 2
+        row = i // 2
+        cx = 20 + col * (cell_w + 20)
+        cy = y_grid + row * (cell_h + 10)
+        draw.rounded_rectangle([cx, cy, cx + cell_w, cy + cell_h], radius=8, fill=CARD_BG)
+        draw.text((cx + 12, cy + 8), label, font=font_xs, fill=MUTED)
+        val_color = GREEN if "+" in value and "Change" in label and float(value.replace("+","").replace("%","")) > 0 else RED if "Change" in label and float(value.replace("+","").replace("%","")) < 0 else TEXT
+        draw.text((cx + 12, cy + 26), value, font=font_md, fill=val_color)
+
+    y = y_grid + 2 * (cell_h + 10) + 10
+
+    # ── BUY/SELL BAR ──
+    bp = float(t.get("buy_pct", 50) or 50)
+    total_tx = b1h + s1h
+    draw.text((30, y), f"Transactions (1h): {total_tx}", font=font_md, fill=TEXT)
+    y += 25
+    bar_w = W - 60
+    bar_h = 24
+    buy_w = int(bar_w * bp / 100)
+    draw.rounded_rectangle([30, y, 30 + bar_w, y + bar_h], radius=6, fill=(30, 30, 35))
+    if buy_w > 0:
+        draw.rounded_rectangle([30, y, 30 + buy_w, y + bar_h], radius=6, fill=GREEN)
+    draw.text((40, y + 3), f"🟢 {b1h} Buys ({bp:.0f}%)", font=font_xs, fill=(0, 0, 0))
+    draw.text((30 + bar_w - 120, y + 3), f"{100-bp:.0f}% 🔴 {s1h} Sells", font=font_xs, fill=RED)
+    y += bar_h + 20
+
+    # ── HOLDER INFO ──
+    draw.line([20, y, W - 20, y], fill=BORDER, width=1)
+    y += 10
+    holder_text = f"Holders: {holders}" if holders > 0 else "Holders: —"
+    liq_ratio = (liq / mcap * 100) if mcap > 0 else 0
+    draw.text((30, y), holder_text, font=font_sm, fill=MUTED)
+    draw.text((W - 200, y), f"Liq/MCap: {liq_ratio:.1f}%", font=font_sm, fill=MUTED)
+    y += 22
+
+    # ── RISK SCORE ──
+    risk_color = GREEN if risk < 30 else YELLOW if risk < 60 else RED
+    risk_label = "LOW" if risk < 30 else "MEDIUM" if risk < 60 else "HIGH"
+    draw.text((30, y), f"Risk: ", font=font_sm, fill=MUTED)
+    draw.rounded_rectangle([75, y - 2, 75 + len(risk_label) * 10 + 20, y + 20], radius=6, fill=risk_color)
+    draw.text((85, y + 1), risk_label, font=font_xs, fill=(0, 0, 0))
+    y += 25
+
+    # ── BADGES ──
+    badges = []
+    if t.get("is_renounced"): badges.append(("✅ Renounced", GREEN))
+    if t.get("lp_locked"): badges.append(("🔒 LP Locked", GREEN))
+    if t.get("boost_active", 0) > 0: badges.append(("💰 Boosted", YELLOW))
+    if t.get("has_profile"): badges.append(("📋 Verified", BLUE))
+    if t.get("is_honeypot"): badges.append(("🚨 Honeypot", RED))
+    bx = 30
+    for badge_text, badge_color in badges[:5]:
+        bw = len(badge_text) * 7 + 16
+        draw.rounded_rectangle([bx, y, bx + bw, y + 22], radius=6, fill=badge_color + "30")
+        draw.text((bx + 8, y + 3), badge_text, font=font_xs, fill=badge_color)
+        bx += bw + 8
+        if bx > W - 100: break
+    y += 28
+
+    # ── CONTRACT ADDRESS ──
+    draw.line([20, y, W - 20, y], fill=BORDER, width=1)
+    y += 10
+    short_addr = f"{addr[:20]}...{addr[-12:]}" if len(addr) > 35 else addr
+    draw.text((30, y), f"Contract:", font=font_xs, fill=MUTED)
+    draw.text((100, y), short_addr, font=font_xs, fill=BLUE)
+    y += 20
+
+    # ── AI VERDICT ──
+    if ai and ai.strip():
+        draw.line([20, y, W - 20, y], fill=BORDER, width=1)
+        y += 10
+        draw.text((30, y), "🧠 KAYO AI VERDICT", font=font_sm, fill=PURPLE)
+        y += 22
+        # Wrap AI text
+        ai_text = ai.strip()[:200]
+        words = ai_text.split()
+        line = ""
+        for word in words:
+            test = line + " " + word if line else word
+            if draw.textlength(test, font=font_xs) > W - 60:
+                draw.text((30, y), line, font=font_xs, fill=TEXT)
+                y += 16
+                line = word
+            else:
+                line = test
+        if line:
+            draw.text((30, y), line, font=font_xs, fill=TEXT)
+            y += 16
+
+    # ── FOOTER ──
+    y_footer = H - 50
+    draw.rectangle([0, y_footer, W, H], fill=CARD_BG)
+    draw.line([0, y_footer, W, y_footer], fill=BORDER, width=1)
+    draw.text((30, y_footer + 10), "🦅 KAYO BRAIN", font=font_xs, fill=ORANGE)
+    draw.text((W - 150, y_footer + 10), "Powered by Kayo", font=font_xs, fill=MUTED)
+
+    buf = _io.BytesIO()
+    img.save(buf, format='PNG', optimize=True)
+    buf.seek(0)
+    return buf
+
+async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", reply_markup=None, alert_type: str = ""):
+    """Send a scan card as both image + text (Rick Bot style)."""
+    text_card = build_scan_card(t, ai) if not alert_type else build_alert_card(t, alert_type, ai)
+
+    # Try to generate and send image
+    img_buf = generate_scan_card_image(t, ai)
+    if img_buf:
+        try:
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=img_buf,
+                caption=text_card[:1024],  # Telegram caption limit
+                parse_mode="Markdown",
+                reply_markup=reply_markup,
+                disable_web_page_preview=True,
+            )
+            return True
+        except Exception as e:
+            logger.warning(f"Image card send failed: {e} — falling back to text")
+            img_buf.close()
+
+    # Fallback: text only
+    try:
+        await bot.send_message(
+            chat_id=chat_id,
+            text=text_card,
+            parse_mode="Markdown",
+            reply_markup=reply_markup,
+            disable_web_page_preview=True,
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Text card send also failed: {e}")
+        return False
+
+
 def _rick_buttons(ca:str, sym:str="", pair_addr:str="") -> InlineKeyboardMarkup:
     dp = pair_addr or ca
     return InlineKeyboardMarkup([
@@ -2522,15 +2803,14 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ {t['error']}"); return
     add_xp(u.effective_user.id, 5)
     _track_scan(t, u.effective_user.id)
-    # Send card IMMEDIATELY — no AI wait
+    # Send visual card IMMEDIATELY — no AI wait (Rick Bot style image)
     buttons = scan_buttons(addr, t.get("sym", ""), t.get("pair_addr", ""))
-    sent = await msg.edit_text(
-        build_scan_card(t, ""),
-        parse_mode="Markdown",
-        reply_markup=buttons,
-        disable_web_page_preview=True,
+    await msg.delete()
+    sent = await send_scan_card_with_image(
+        u.effective_message.bot, u.effective_chat.id, t, "",
+        reply_markup=buttons
     )
-    # AI verdict as background task — edits message when ready
+    # AI verdict as background task — sends follow-up when ready
     async def _scan_ai(msg_id, chat_id, token_data, btns):
         try:
             ai_v = await asyncio.wait_for(
@@ -2552,20 +2832,28 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
             )
             if ai_v and ai_v.strip():
                 try:
-                    await c.bot.edit_message_text(
-                        chat_id=chat_id, message_id=msg_id,
-                        text=build_scan_card(token_data, ai_v),
+                    await c.bot.send_message(
+                        chat_id=chat_id,
+                        text=f"\U0001f9e0 *AI Verdict \u2014 ${token_data['sym']}*\n\n{ai_v}",
                         parse_mode="Markdown",
                         reply_markup=btns,
                         disable_web_page_preview=True,
                     )
                 except Exception:
-                    pass
+                    try:
+                        await c.bot.send_message(
+                            chat_id=chat_id,
+                            text=f"\U0001f9e0 AI Verdict: {ai_v}",
+                            reply_markup=btns,
+                            disable_web_page_preview=True,
+                        )
+                    except Exception:
+                        pass
         except Exception:
             pass
 
     asyncio.create_task(_scan_ai(
-        sent.message_id if hasattr(sent, 'message_id') else msg.message_id,
+        sent.message_id if hasattr(sent, 'message_id') else 0,
         u.effective_chat.id, t, buttons
     ))
 
@@ -4206,15 +4494,12 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                 if t.get("error"):
                     await scanning_msg.edit_text(f"\u274c {t['error']}")
                     return
-                # Send scan card IMMEDIATELY — no AI wait
-                card = build_scan_card(t, "")
+                # Send visual scan card IMMEDIATELY — no AI wait (Rick Bot style image)
                 buttons = scan_buttons(ca, t.get("sym", ""), t.get("pair_addr", ""))
                 await scanning_msg.delete()
-                sent = await u.effective_message.reply_text(
-                    card,
-                    parse_mode="Markdown",
-                    reply_markup=buttons,
-                    disable_web_page_preview=True,
+                sent = await send_scan_card_with_image(
+                    u.effective_message.bot, u.effective_chat.id, t, "",
+                    reply_markup=buttons
                 )
                 add_xp(uid, 5)
                 # Fire AI verdict as NON-BLOCKING background task — edits message when ready
@@ -4237,22 +4522,20 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                             timeout=15
                         )
                         if ai_v and ai_v.strip():
+                            # v42: Send AI verdict as follow-up (photo caption can't be edited with new card)
                             try:
-                                await c.bot.edit_message_text(
-                                    chat_id=chat_id, message_id=msg_id,
-                                    text=build_scan_card(token_data, ai_v),
+                                await c.bot.send_message(
+                                    chat_id=chat_id,
+                                    text=f"\U0001f9e0 *AI Verdict \u2014 ${token_data['sym']}*\n\n{ai_v}",
                                     parse_mode="Markdown",
                                     reply_markup=btns,
                                     disable_web_page_preview=True,
                                 )
                             except Exception:
-                                # Markdown failed — try plain text
                                 try:
-                                    plain = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '',
-                                                   build_scan_card(token_data, ai_v))
-                                    await c.bot.edit_message_text(
-                                        chat_id=chat_id, message_id=msg_id,
-                                        text=plain,
+                                    await c.bot.send_message(
+                                        chat_id=chat_id,
+                                        text=f"\U0001f9e0 AI Verdict \u2014 ${token_data['sym']}:\n\n{ai_v}",
                                         reply_markup=btns,
                                         disable_web_page_preview=True,
                                     )
@@ -5937,16 +6220,12 @@ async def bg_main_scanner(app: Application):
                 if GROUP_CHAT_ID:
                     sent_msg = None
                     try:
-                        sent_msg = await app.bot.send_message(
-                            chat_id=GROUP_CHAT_ID,
-                            text=card,
-                            parse_mode="Markdown",
-                            reply_markup=buttons,
-                            disable_web_page_preview=True,
+                        sent_msg = await send_scan_card_with_image(
+                            app.bot, GROUP_CHAT_ID, tok, "",
+                            reply_markup=buttons, alert_type=alert_type
                         )
                     except Exception as md_err:
-                        # Markdown failed — retry as plain text
-                        logger.warning(f"[ALERT MD FAIL] {sym}: {md_err} — retrying plain text")
+                        logger.warning(f"[ALERT IMAGE FAIL] {sym}: {md_err} — fallback text")
                         try:
                             plain_card = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', card)
                             sent_msg = await app.bot.send_message(
@@ -6657,12 +6936,10 @@ async def bg_narrative_news_scanner(app: Application):
                             "mscore": min(100, int(abs(ch1h) + buy_pct/2 + vs*10)),
                         }
                         try:
-                            await app.bot.send_message(
-                                chat_id=GROUP_CHAT_ID,
-                                text=build_alert_card(tok, "narrative", ai_why),
-                                parse_mode="Markdown",
+                            await send_scan_card_with_image(
+                                app.bot, GROUP_CHAT_ID, tok, ai_why,
                                 reply_markup=scan_buttons(addr, sym, tok["pair_addr"]),
-                                disable_web_page_preview=True,
+                                alert_type="narrative"
                             )
                             found_count += 1
                             logger.info(f"[NARRATIVE] ${sym} via '{term}': +{ch1h:.0f}%")
