@@ -30,7 +30,7 @@ from flask import Flask
 # ═══════════════════════════════════════════════════════════════
 BOT_TOKEN          = os.environ.get("BOT_TOKEN", "")
 GROUP_CHAT_ID      = int(os.environ.get("GROUP_CHAT_ID", "0"))
-# v43: Birdeye API (free tier — get key at birdeye.so, optional but recommended)
+# v44: Birdeye API (free tier — get key at birdeye.so, optional but recommended)
 BIRDEYE_API_KEY = os.environ.get("BIRDEYE_API_KEY", "")
 GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY", "")
 GROQ_API_KEY       = os.environ.get("GROQ_API_KEY", "")
@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v43", 200
+def _root(): return "🦅 Kayo Brain v44", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -140,7 +140,7 @@ def _feed_add(t: dict):
 
 def _build_live_feed_context() -> str:
     if not _live_feed: return ""
-    out = ["[LIVE SCANNER FEED — tokens Kayo is watching, mcap under $500K]:"]
+    out = ["[LIVE SCANNER FEED — tokens Kayo is watching, mcap under $300K]:"]
     for t in _live_feed[:15]:
         mcap = t["mcap"]
         if mcap > 500_000: continue
@@ -155,6 +155,11 @@ def _build_live_feed_context() -> str:
 
 dropped_calls:   Dict[str, dict]         = {}  # addr -> {sym,entry_price,time,alert_type,...} for follow-ups
 pattern_memory: Dict[str, dict]         = {}  # alert_type+nar -> {wins,losses,total,avg_mult} for self-learning
+ath_tracker:     Dict[str, dict]         = {}  # addr -> {sym, first_mcap, ath_mcap, first_seen}
+# v44: Persistence for scanner resume + dead-token detection
+scanner_cooldowns: Dict[str, Dict[str, float]] = {}  # scanner_name -> {addr: last_alert_ts}
+volume_snapshots:  Dict[str, Dict] = {}  # addr -> {vol_1h, vol_24h, ts, mcap, sym, age_days}
+last_scan_ts:      float = 0  # last successful scan timestamp (for resume)
 watchlist_seen:  "OrderedDict[str, int]" = OrderedDict()
 seen_news_ids:   Set[str]                = set()
 _MAX_SEEN = 3000   # max entries before oldest are trimmed
@@ -191,6 +196,9 @@ async def _save():
             "pattern_memory": pattern_memory,
             "first_alert_seen": list(_first_alert_seen)[-1000:],
             "token_watchers": dict(list(_token_watchers.items())[-500:]),
+            "scanner_cooldowns": scanner_cooldowns,
+            "volume_snapshots": dict(list(volume_snapshots.items())[-2000:]),
+            "last_scan_ts": last_scan_ts,
         }
         raw = json.dumps(data)
         try:
@@ -249,9 +257,12 @@ async def _load():
         global _first_alert_seen, _token_watchers
         _first_alert_seen = set(d.get("first_alert_seen", []))
         _token_watchers = d.get("token_watchers", {})
-        global dropped_calls, pattern_memory
+        global dropped_calls, pattern_memory, scanner_cooldowns, volume_snapshots, last_scan_ts
         dropped_calls   = d.get("dropped_calls", {})
         pattern_memory  = d.get("pattern_memory", {})
+        scanner_cooldowns = d.get("scanner_cooldowns", {})
+        volume_snapshots  = d.get("volume_snapshots", {})
+        last_scan_ts      = d.get("last_scan_ts", 0)
         logger.info(f"✅ State loaded — {len(watchlist)} watched, {len(active_calls)} calls, {len(dropped_calls)} tracked drops (seen_alert_ids cleared for fresh session)")
         # Prune dropped_calls older than 7 days so it doesn't block forever
         cutoff = time.time() - 604800
@@ -726,7 +737,7 @@ async def search_narrative_tokens(narrative: str, chain: str = "solana", limit: 
             sym = (coin.get("symbol") or "").lower()
             if narrative in desc or narrative in name or narrative in sym:
                 mcap = float(coin.get("usd_market_cap", 0) or 0)
-                if mcap < 500_000 and mcap >= 1000:
+                if mcap < 300_000 and mcap >= 1000:
                     results.append({
                         "sym": coin.get("symbol", "?"),
                         "name": coin.get("name", "?"),
@@ -3576,7 +3587,7 @@ async def runners_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     runners = [
         tok for tok in all_toks.values()
         if tok["address"] not in blacklist
-        and 0 < tok["fdv"] <= 500_000
+        and 0 < tok["fdv"] <= 300_000
         and tok["liq"] >= 500
         and tok["ch1h"] > 5
         and tok["buy_pct"] >= 48
@@ -3651,7 +3662,7 @@ async def pump_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     pumping = sorted(
         [t for t in all_toks.values()
          if t["address"] not in blacklist
-         and 0 < t["fdv"] <= 500_000
+         and 0 < t["fdv"] <= 300_000
          and t["liq"] >= 500
          and t["ch5m"] >= 3
          and t["b5m"] > t["s5m"]],
@@ -3688,7 +3699,7 @@ async def gems_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     gems = []
     for tok in all_toks.values():
         if tok["address"] in blacklist: continue
-        if not (0 < tok["fdv"] <= 500_000): continue
+        if not (0 < tok["fdv"] <= 300_000): continue
         if tok["liq"] < 300: continue
         if tok["buy_pct"] < 48: continue
         # Gem scoring: prefer high buy%, low mcap, real activity
@@ -4692,7 +4703,7 @@ async def smartscan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
             fdv = tok["fdv"]
             liq = tok["liq"]
             buy_pct = tok["buy_pct"]
-            if fdv <= 0 or fdv > 500_000 or liq < 300 or buy_pct < 48: continue
+            if fdv <= 0 or fdv > 300_000 or liq < 300 or buy_pct < 48: continue
             hits.append(tok)
 
         hits.sort(key=lambda t: (t["ch1h"] + t["buy_pct"]/2), reverse=True)
@@ -5337,6 +5348,61 @@ async def _fetch_dex_boosts() -> list:
     except Exception as e:
         logger.debug(f"dex_boosts: {e}")
         return []
+
+async def _fetch_gt_mcap_pools(pg: int, sort: str = "h24_volume_usd_desc") -> list:
+    """Fetch GeckoTerminal pools sorted by volume — catches $5k-$300k tokens that aren't trending yet."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={pg}&sort={sort}",
+                timeout=aiohttp.ClientTimeout(total=12)
+            ) as r:
+                d = await r.json()
+                return d.get("data", [])
+    except Exception as e:
+        logger.debug(f"GT mcap pools pg{pg}: {e}")
+        return []
+
+async def _fetch_be_new() -> list:
+    """Fetch Birdeye new Solana listings — catches tokens DexScreener misses."""
+    try:
+        return await be_new_listings(30)
+    except Exception as e:
+        logger.debug(f"be_new: {e}")
+        return []
+
+async def _fetch_be_trend() -> list:
+    """Fetch Birdeye trending Solana tokens."""
+    try:
+        return await be_trending()
+    except Exception as e:
+        logger.debug(f"be_trend: {e}")
+        return []
+
+def _be_token_to_pair(token: Dict) -> Optional[Dict]:
+    """Convert a Birdeye token listing to our standard pair dict."""
+    try:
+        addr = token.get("address", "")
+        if not addr: return None
+        return {
+            "address": addr,
+            "sym": token.get("symbol", "???"),
+            "name": token.get("name", token.get("symbol", "???")),
+            "price": float(token.get("price", 0) or 0),
+            "fdv": float(token.get("marketCap", 0) or token.get("fdv", 0) or 0),
+            "mcap": float(token.get("marketCap", 0) or 0),
+            "liq": float(token.get("liquidity", 0) or 0),
+            "ch5m": 0.0, "ch1h": float(token.get("priceChange1h", 0) or 0),
+            "ch6h": float(token.get("priceChange6h", 0) or 0),
+            "ch24h": float(token.get("priceChange24h", 0) or 0),
+            "v5m": 0.0, "v1h": float(token.get("volume1h", 0) or 0),
+            "v24h": float(token.get("volume24h", 0) or 0),
+            "b5m": 0, "s5m": 0, "b1h": 0, "s1h": 0,
+            "buy_pct": 0, "vol_spike": 0,
+            "pair_addr": "", "created_str": "",
+        }
+    except Exception:
+        return None
 
 # ═══════════════════════════════════════════════════════════════════════
 # KAYO v40 ELITE INJECTION — ALL NEW FEATURES
@@ -6336,7 +6402,7 @@ async def bg_migrate_monitor(app):
                 sym  = coin.get("symbol", "???")
                 name = coin.get("name", "")[:20]
                 mcap = float(coin.get("usd_market_cap", 0) or 0)
-                if mcap > 500_000 or mcap < 1000: continue
+                if mcap > 300_000 or mcap < 1000: continue
 
                 alert = (
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -6556,29 +6622,42 @@ async def quick_rug_check(addr: str) -> Dict:
 
 async def bg_main_scanner(app: Application):
     """
-    PRIMARY SCANNER — every 60s
-    Pulls ALL Solana coins from GeckoTerminal (new+trending) + DexScreener (profiles+boosts).
-    NO keyword filtering. 150-200+ unique coins per cycle.
-    Detects: Pump | Gem | New Launch | Whale | Micro Gem | Unusual
+    v44 PRIMARY SCANNER — every 30s
+    Mcap-band scanning ($5k-$300k, mostly <$100k) — NO keyword categories.
+    Sources: GeckoTerminal (new+trending+mcap pools) + DexScreener (profiles+boosts)
+             + Pump.fun (latest+trending) + Birdeye (new+trending)
+    Detects: New | Graduation | Pump | Gem | Whale | Momentum | Revival
+    Uses persisted cooldowns (survives restarts) + volume snapshots.
     """
     await asyncio.sleep(30)
-    cooldown: Dict[str, float] = {}
-    if len(seen_alert_ids) > 3000: seen_alert_ids = set(list(seen_alert_ids)[-2000:])
+    global last_scan_ts
+
+    # Use persisted cooldowns — survives restarts
+    if "main" not in scanner_cooldowns:
+        scanner_cooldowns["main"] = {}
+    cd = scanner_cooldowns["main"]
+
+    if len(seen_alert_ids) > 3000: seen_alert_ids = OrderedDict(list(seen_alert_ids.items())[-2000:])
 
     while True:
         try:
             now = time.time()
 
-            # Fetch all sources in parallel (module-level helpers — no closure issues)
-            # Fetch GT + DexScreener + Pump.fun all in parallel
+            # ── FETCH ALL SOURCES IN PARALLEL ──────────────────────────
+            # v44: Birdeye + GT mcap pools added, keyword categories removed
             batches = await asyncio.gather(
+                # GeckoTerminal: new pools (6 pages) + trending (3 pages)
                 _fetch_gt_new(1), _fetch_gt_new(2), _fetch_gt_new(3),
                 _fetch_gt_new(4), _fetch_gt_new(5), _fetch_gt_new(6),
                 _fetch_gt_trend(1), _fetch_gt_trend(2), _fetch_gt_trend(3),
-                _fetch_dex_profiles(),
-                _fetch_dex_boosts(),
-                pumpfun_latest(50),      # v40: pump.fun newest launches
-                pumpfun_trending(20),     # v40: pump.fun trending
+                # GeckoTerminal: mcap-sorted pools (volume desc — catches active $5k-$300k tokens)
+                _fetch_gt_mcap_pools(1), _fetch_gt_mcap_pools(2),
+                # DexScreener: profiles + boosts
+                _fetch_dex_profiles(), _fetch_dex_boosts(),
+                # Pump.fun: latest + trending
+                pumpfun_latest(50), pumpfun_trending(20),
+                # v44: Birdeye new listings + trending
+                _fetch_be_new(), _fetch_be_trend(),
                 return_exceptions=True,
             )
 
@@ -6587,20 +6666,29 @@ async def bg_main_scanner(app: Application):
             dex_boosts_raw   = []
             pumpfun_new_raw  = []
             pumpfun_trend_raw = []
+            be_new_raw       = []
+            be_trend_raw     = []
+
             for idx, batch in enumerate(batches):
                 if isinstance(batch, Exception):
                     logger.debug(f"Scanner source {idx} error: {batch}")
                     continue
                 if idx < 9:
-                    all_gt_pools += batch
-                elif idx == 9:
-                    dex_profiles_raw = batch
-                elif idx == 10:
-                    dex_boosts_raw   = batch
+                    all_gt_pools += batch                           # GT new pools
+                elif idx < 11:
+                    all_gt_pools += batch                             # GT mcap pools
                 elif idx == 11:
-                    pumpfun_new_raw = batch if isinstance(batch, list) else []
+                    dex_profiles_raw = batch
                 elif idx == 12:
+                    dex_boosts_raw   = batch
+                elif idx == 13:
+                    pumpfun_new_raw = batch if isinstance(batch, list) else []
+                elif idx == 14:
                     pumpfun_trend_raw = batch if isinstance(batch, list) else []
+                elif idx == 15:
+                    be_new_raw = batch if isinstance(batch, list) else []
+                elif idx == 16:
+                    be_trend_raw = batch if isinstance(batch, list) else []
 
             boosted_addrs  = {b.get("tokenAddress", "") for b in dex_boosts_raw}
             profiled_addrs = {p.get("tokenAddress", "") for p in dex_profiles_raw}
@@ -6609,18 +6697,17 @@ async def bg_main_scanner(app: Application):
             pairs_map: Dict[str, Dict] = {}
             for pool in all_gt_pools:
                 tok = gt_parse_pool(pool)
-                if not tok:
-                    continue
+                if not tok: continue
                 addr = tok["address"]
                 if addr not in pairs_map:
                     pairs_map[addr] = tok
 
-            # Add Pump.fun coins — extract narrative from description
-            pumpfun_narratives: Dict[str, str] = {}  # addr → narrative
-            pumpfun_meta: Dict[str, Dict] = {}       # addr → {desc, twitter, telegram, creator, reply_count}
+            # Add Pump.fun coins
+            pumpfun_narratives: Dict[str, str] = {}
+            pumpfun_meta: Dict[str, Dict] = {}
             for coin in (pumpfun_new_raw + pumpfun_trend_raw):
                 if not isinstance(coin, dict): continue
-                if coin.get("is_banned"): continue   # skip banned tokens
+                if coin.get("is_banned"): continue
                 tok = pumpfun_to_token(coin)
                 if not tok: continue
                 addr = tok["address"]
@@ -6638,7 +6725,16 @@ async def bg_main_scanner(app: Application):
                     "is_graduated": tok.get("is_graduated", False),
                 }
 
-            # Also fetch DexScreener detail for profiled/boosted coins not in GT
+            # v44: Add Birdeye tokens (new + trending)
+            for be_tok in (be_new_raw + be_trend_raw):
+                if not isinstance(be_tok, dict): continue
+                tok = _be_token_to_pair(be_tok)
+                if not tok: continue
+                addr = tok["address"]
+                if addr not in pairs_map:
+                    pairs_map[addr] = tok
+
+            # Also fetch DexScreener detail for profiled/boosted coins not already in map
             extra_addrs = list((profiled_addrs | boosted_addrs) - set(pairs_map.keys()))
             if extra_addrs:
                 try:
@@ -6650,8 +6746,7 @@ async def bg_main_scanner(app: Application):
                         ) as r:
                             d = await r.json()
                             for p in (d.get("pairs") or []):
-                                if p.get("chainId") != "solana":
-                                    continue
+                                if p.get("chainId") != "solana": continue
                                 a = (p.get("baseToken") or {}).get("address", "")
                                 if a and a not in pairs_map:
                                     pairs_map[a] = {
@@ -6680,15 +6775,13 @@ async def bg_main_scanner(app: Application):
                 except Exception as e:
                     logger.debug(f"dex_batch_extra: {e}")
 
-            logger.info(f"[SCANNER] {len(pairs_map)} unique coins fetched. Running detection...")
+            logger.info(f"[SCANNER] {len(pairs_map)} unique coins fetched from {11+2+2+2} sources. Running detection...")
 
-            # Evaluate each coin
+            # ── EVALUATE EACH COIN ────────────────────────────────────
             alert_count = 0
             for addr, tok in pairs_map.items():
-                if addr in blacklist:
-                    continue
-                if now - cooldown.get(addr, 0) < 3600:
-                    continue
+                if addr in blacklist: continue
+                if now - cd.get(addr, 0) < 3600: continue  # persisted cooldown
 
                 sym   = tok.get("sym", "???")
                 name  = tok.get("name", sym)
@@ -6709,111 +6802,117 @@ async def bg_main_scanner(app: Application):
                 price = float(tok.get("price", 0) or 0)
                 pair_addr = tok.get("pair_addr", "")
 
-                # Quality filter — NO RUGS: min $5k cap, real liquidity, real volume
+                # v44: MCAP-BAND FILTER — $5k to $300k (Rick Bot style)
                 eff_cap = max(fdv, mcap, liq * 3)
-                if eff_cap > 500_000: continue          # above $500k cap
-                if eff_cap < 5_000: continue             # below $5k = rug/dust — SKIP
-                if liq < 2_000: continue                # need $2k+ liquidity to avoid rugs
-                if v1h < 500: continue                   # need $500+ 1h volume — no dead tokens
+                if eff_cap > 300_000: continue          # v44: tightened from $500k to $300k
+                if eff_cap < 5_000: continue             # below $5k = rug/dust
+                if liq < 2_000: continue                  # need $2k+ liquidity
+
+                # ── v44: VOLUME SNAPSHOT FOR DEAD-TOKEN DETECTION ──
+                # Update volume snapshot for every token we see
+                volume_snapshots[addr] = {
+                    "vol_1h": v1h, "vol_24h": v24h, "mcap": eff_cap,
+                    "sym": sym, "ts": now, "ch1h": ch1h,
+                }
 
                 avg_5m_vol = v1h / 12 if v1h > 0 else 1
                 vol_spike  = v5m / max(avg_5m_vol, 1)
-                # buy_pct: use 5m data for brand-new coins with no h1 txns yet
                 if b1h + s1h >= 3:
                     buy_pct = b1h / max(b1h + s1h, 1) * 100
                 elif b5m + s5m >= 1:
                     buy_pct = b5m / max(b5m + s5m, 1) * 100
                 else:
-                    buy_pct = 60.0  # brand new — assume bullish if liq exists
+                    buy_pct = 60.0
 
-                if buy_pct < 40: continue   # drop hard sell-pressure only
-                # skip dead coins only if ALL signals are flat
-                if ch1h == 0 and ch5m == 0 and b1h == 0 and b5m == 0 and vol_spike < 1.05: continue
+                if buy_pct < 40: continue
+
+                # skip truly dead tokens (no signal at all)
+                if ch1h == 0 and ch5m == 0 and b1h == 0 and b5m == 0 and vol_spike < 1.05 and v1h < 100: continue
                 if eff_cap > 50_000 and liq / max(eff_cap, 1) < 0.002: continue
 
-                # Narrative + flags — enriched with pump.fun data
                 nar = detect_narrative(f"{name} {sym}")
-                # Override with pump.fun narrative if available (more accurate)
                 if addr in pumpfun_narratives and pumpfun_narratives[addr]:
                     nar = pumpfun_narratives[addr]
                 pf_meta = pumpfun_meta.get(addr, {})
                 is_pumpfun = bool(pf_meta)
-                is_pumpfun_live = pf_meta.get("is_pumpfun", False) and pairs_map[addr].get("is_pumpfun_live", False)
                 is_graduated = pf_meta.get("is_graduated", False)
                 pf_reply_count = pf_meta.get("reply_count", 0)
                 pf_desc = pf_meta.get("description", "")
                 is_boosted  = addr in boosted_addrs
                 is_rebranded = any(kw in name.lower() for kw in ["trump","maga","ai","agent","dog","cat","frog","ape","pepe","elon"])
 
-                # Pattern detection
+                # ── PATTERN DETECTION ──────────────────────────────────
                 alert_type = None
-                is_fresh = (b1h + s1h) < 5  # brand-new token with almost no h1 history
+                is_fresh = (b1h + s1h) < 5  # brand-new token
 
-                # ── PUMP.FUN NEW LAUNCH — catch first, these are the freshest ──
-                if is_pumpfun and not is_graduated:
-                    # Active pump.fun bonding curve token — min $5k mcap to avoid rugs
-                    if mcap >= 5_000 and mcap <= 500_000 and not pairs_map[addr].get("is_banned", False):
-                        # Must have some social engagement OR decent mcap
-                        if pf_desc or pf_reply_count >= 3:
+                # ── PUMP.FUN GRADUATION — low bar: $1-2k vol, few buys ──
+                if is_pumpfun and is_graduated and eff_cap <= 300_000:
+                    # v44: Very low bar for graduates — catch seconds-old graduations
+                    if v1h >= 1000 or b1h >= 2:  # $1k+ volume OR 2+ buys
+                        alert_type = "graduation"
+
+                # ── PUMP.FUN NEW LAUNCH — also low bar ──
+                elif is_pumpfun and not is_graduated:
+                    if mcap >= 5_000 and mcap <= 300_000 and not pairs_map[addr].get("is_banned", False):
+                        if pf_desc or pf_reply_count >= 3 or mcap >= 10_000:
                             alert_type = "new"
-                        elif mcap >= 10_000:  # $10k+ = real traction
-                            alert_type = "new"
 
-                # ── PUMP.FUN GRADUATION — token just moved to Raydium ──
-                elif is_pumpfun and is_graduated and mcap <= 500_000:
-                    alert_type = "migration"
-
-                # ── NEW LAUNCH: fresh token — most important to catch first ──
+                # ── NEW LAUNCH: fresh token with any liquidity + buy pressure ──
                 elif is_fresh and liq >= 100 and buy_pct >= 50:
-                    alert_type = "new"  # any fresh token with liquidity + buy pressure
+                    alert_type = "new"
                 elif is_fresh and is_boosted and liq >= 80:
                     alert_type = "new"
 
-                # ── PUMP: fast 5m price spike ─────────────────────────────
-                elif ch5m >= 5 and buy_pct >= 50:                              alert_type = "pump"
-                elif ch5m >= 3 and b5m >= 2 and buy_pct >= 50:                alert_type = "pump"
-                elif ch5m >= 10 and buy_pct >= 40:                             alert_type = "pump"
+                # ── PUMP: fast 5m price spike ──
+                elif ch5m >= 5 and buy_pct >= 50:                               alert_type = "pump"
+                elif ch5m >= 3 and b5m >= 2 and buy_pct >= 50:                   alert_type = "pump"
+                elif ch5m >= 10 and buy_pct >= 40:                               alert_type = "pump"
 
-                # ── MOMENTUM: sustained 1h grind ─────────────────────────
-                elif ch1h >= 15 and buy_pct >= 45:                             alert_type = "momentum"
-                elif ch1h >= 8  and ch5m >= 1 and buy_pct >= 48:              alert_type = "momentum"
-                elif ch1h >= 6  and vol_spike >= 1.3 and buy_pct >= 48:       alert_type = "momentum"
+                # ── MOMENTUM: sustained 1h grind ──
+                elif ch1h >= 15 and buy_pct >= 45:                               alert_type = "momentum"
+                elif ch1h >= 8  and ch5m >= 1 and buy_pct >= 48:                 alert_type = "momentum"
+                elif ch1h >= 6  and vol_spike >= 1.3 and buy_pct >= 48:           alert_type = "momentum"
 
-                # ── GEM: micro-cap mover with real buyers ─────────────────
-                elif ch1h >= 5  and buy_pct >= 50 and liq >= 200:             alert_type = "gem"
-                elif eff_cap < 50_000 and ch1h >= 3 and buy_pct >= 52:        alert_type = "gem"
+                # ── GEM: micro-cap mover with real buyers ──
+                elif ch1h >= 5  and buy_pct >= 50 and liq >= 200:                 alert_type = "gem"
+                elif eff_cap < 50_000 and ch1h >= 3 and buy_pct >= 52:           alert_type = "gem"
 
-                # ── ESTABLISHED NEW: small cap with real h1 buys ─────────
-                elif b1h >= 3   and buy_pct >= 52 and liq >= 150 and ch1h >= 1: alert_type = "new"
-                elif is_boosted and buy_pct >= 48 and b1h >= 1:               alert_type = "new"
+                # ── ESTABLISHED NEW: small cap with real h1 buys ──
+                elif b1h >= 3   and buy_pct >= 52 and liq >= 150 and ch1h >= 1:   alert_type = "new"
+                elif is_boosted and buy_pct >= 48 and b1h >= 1:                   alert_type = "new"
 
-                # ── WHALE: heavy accumulation ─────────────────────────────
-                elif buy_pct >= 65 and b1h >= 3 and vol_spike >= 1.2:         alert_type = "whale"
+                # ── WHALE: heavy accumulation ──
+                elif buy_pct >= 65 and b1h >= 3 and vol_spike >= 1.2:             alert_type = "whale"
 
-                # ── UNUSUAL: vol spike or narrative play ──────────────────
-                elif vol_spike >= 1.4 and b1h >= 2 and buy_pct >= 48:         alert_type = "unusual"
+                # ── REVIVAL: dead token waking up (check volume snapshot) ──
+                elif addr in volume_snapshots:
+                    snap = volume_snapshots[addr]
+                    prev_vol_1h = snap.get("vol_1h", 0)
+                    prev_vol_24h = snap.get("vol_24h", 0)
+                    # If token had near-zero volume before and now has volume spike
+                    if prev_vol_1h < 200 and v1h > 2000 and buy_pct >= 50:
+                        alert_type = "revival"
+                    elif prev_vol_24h < 500 and v24h > 5000 and ch1h >= 3 and buy_pct >= 50:
+                        alert_type = "revival"
+
+                # ── UNUSUAL: vol spike or narrative play ──
+                elif vol_spike >= 1.4 and b1h >= 2 and buy_pct >= 48:             alert_type = "unusual"
                 elif is_rebranded and buy_pct >= 48 and (ch1h >= 1 or ch5m >= 1): alert_type = "rebrand"
 
                 if not alert_type: continue
-
-                # Pattern memory (kept for stats but NO gating — don't block alerts)
-                pm_key  = f"{alert_type}:{nar}"
-                pm_info = pattern_memory.get(pm_key, {})
-                # NOTE: win-rate gate removed — it was silently killing too many alerts
 
                 # Dropped calls gate
                 if addr in dropped_calls:
                     if now - dropped_calls[addr].get("time", 0) < 3600: continue
                     if abs(price - dropped_calls[addr].get("entry_price", 0)) / max(dropped_calls[addr].get("entry_price", 1e-12), 1e-12) * 100 < 10: continue
 
-                # ── RUG CHECK — skip tokens that fail security screening ──
-                if not is_pumpfun:  # pump.fun tokens are on bonding curve, can't be honeypot
+                # ── RUG CHECK ──
+                if not is_pumpfun:
                     try:
                         rug = await asyncio.wait_for(quick_rug_check(addr), timeout=12)
                         if rug.get("is_rug"):
                             logger.info(f"[RUG FILTER] ${sym} skipped — {rug.get('red_flags', [])}")
                             continue
-                        # Enrich tok_dict with security data
                         tok_dict_rug = rug
                     except Exception:
                         tok_dict_rug = None
@@ -6827,7 +6926,7 @@ async def bg_main_scanner(app: Application):
                 asyncio.create_task(_save())
                 _feed_add(tok)
 
-                cooldown[addr] = now
+                cd[addr] = now  # persisted cooldown
 
                 tok_dict = {
                     "address": addr, "sym": sym, "name": name,
@@ -6859,109 +6958,94 @@ async def bg_main_scanner(app: Application):
                     "pf_reply_count": pf_reply_count,
                     "pf_description": pf_desc,
                 }
-                # Cap alerts per cycle to prevent flooding
-                if alert_count >= 15:
-                    break
+                if alert_count >= 15: break
 
-                # Build card WITHOUT AI verdict first — send IMMEDIATELY
                 card = build_alert_card(tok_dict, alert_type, "")
                 buttons = scan_buttons(addr, sym)
 
-                # v42: Record for ATH tracking
                 await ath_record_token(tok)
-                if GROUP_CHAT_ID:
-                    sent_msg = None
-                    try:
-                        sent_msg = await send_scan_card_with_image(
-                            app.bot, GROUP_CHAT_ID, tok, "",
-                            reply_markup=buttons, alert_type=alert_type
-                        )
-                    except Exception as md_err:
-                        logger.warning(f"[ALERT IMAGE FAIL] {sym}: {md_err} — fallback text")
-                        try:
-                            plain_card = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', card)
-                            sent_msg = await app.bot.send_message(
-                                chat_id=GROUP_CHAT_ID,
-                                text=plain_card,
-                                reply_markup=buttons,
-                                disable_web_page_preview=True,
-                            )
-                        except Exception as e2:
-                            logger.error(f"[ALERT SEND ERROR] {sym}: {e2}")
-                    
-                    if sent_msg:
-                        alert_count += 1
-                        logger.info(f"[ALERT] {alert_type.upper()} ${sym} fdv={fdv:,.0f} liq={liq:,.0f} 1h={ch1h:.1f}% buy%={buy_pct:.0f}%")
-                        dropped_calls[addr] = {
-                            "sym": sym, "alert_type": alert_type, "time": now,
-                            "entry_price": price, "entry_mcap": mcap,
-                            "peak_price": price, "narrative": nar,
-                        }
-                        active_calls.append({
-                            "addr": addr, "sym": sym, "alert_type": alert_type,
-                            "entry_price": price, "entry_mcap": mcap, "time": now,
-                            "narrative": nar, "status": "open",
-                        })
-                        if len(active_calls) > 200:
-                            active_calls.pop(0)
-                        asyncio.create_task(_save())
-                        
-                        # Fire AI verdict as NON-BLOCKING task — edit message when ready
-                        async def _add_ai_verdict(msg_id: int, chat_id: int, sym_: str, at: str,
-                                                   fdv_: float, liq_: float, ch5m_: float, ch1h_: float,
-                                                   b1h_: int, s1h_: int, bp_: float, vs_: float, nar_: str):
-                            try:
-                                ai_v = await asyncio.wait_for(
-                                    ai_ask(
-                                        f"Solana token ${sym_} | Type: {at.upper()} | MCap {_usd(fdv_)} | "
-                                        f"Liq {_usd(liq_)} | 5m {_pct(ch5m_)} | 1h {_pct(ch1h_)} | "
-                                        f"Buys {b1h_} Sells {s1h_} | Buy% {bp_:.0f}% | Vol spike {vs_:.1f}x | "
-                                        f"Narrative #{nar_}. Is this worth aping? 1 sharp sentence — max 15 words.",
-                                        fallback="",
-                                        max_tokens=60,
-                                        inject_market=False
-                                    ),
-                                    timeout=12
-                                )
-                                if ai_v and ai_v.strip():
-                                    try:
-                                        await app.bot.edit_message_text(
-                                            chat_id=chat_id, message_id=msg_id,
-                                            text=card + f"\n\U0001f9e0 *Kayo:* _{ai_v}_",
-                                            parse_mode="Markdown",
-                                            reply_markup=buttons,
-                                            disable_web_page_preview=True,
-                                        )
-                                    except Exception:
-                                        # Edit failed — try plain text
-                                        try:
-                                            plain_ai = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', ai_v)
-                                            await app.bot.edit_message_text(
-                                                chat_id=chat_id, message_id=msg_id,
-                                                text=card + f"\n🧠 Kayo: {plain_ai}",
-                                                reply_markup=buttons,
-                                                disable_web_page_preview=True,
-                                            )
-                                        except Exception:
-                                            pass
-                            except Exception:
-                                pass  # AI verdict is optional — alert already sent
-                        
-                        asyncio.create_task(_add_ai_verdict(
-                            sent_msg.message_id, GROUP_CHAT_ID,
-                            sym, alert_type, fdv, liq, ch5m, ch1h,
-                            b1h, s1h, buy_pct, vol_spike, nar
-                        ))
-                        
-                        await asyncio.sleep(1)  # rate limit between alerts
+                if GROUP_CHAT_ID == 0: continue
 
-            logger.info(f"[SCANNER] Cycle done — {alert_count} alerts sent")
+                try:
+                    sent_msg = await app.bot.send_message(
+                        GROUP_CHAT_ID, card,
+                        parse_mode="Markdown",
+                        reply_markup=buttons,
+                        disable_web_page_preview=True,
+                    )
+                    alert_count += 1
+                    dropped_calls[addr] = {
+                        "sym": sym, "name": name,
+                        "entry_price": price, "mcap_entry": mcap,
+                        "time": now, "alert_type": alert_type,
+                        "status": "open",
+                    }
+                    if len(dropped_calls) > 200:
+                        # Remove oldest
+                        oldest = min(dropped_calls.items(), key=lambda x: x[1].get("time", 0))
+                        del dropped_calls[oldest[0]]
+                    asyncio.create_task(_save())
+                except Exception as e:
+                    logger.warning(f"send alert {sym}: {e}")
+
+                # Fire AI verdict as non-blocking task
+                async def _add_ai_verdict(msg_id: int, chat_id: int, sym_: str, at: str,
+                                           fdv_: float, liq_: float, ch5m_: float, ch1h_: float,
+                                           b1h_: int, s1h_: int, bp_: float, vs_: float, nar_: str):
+                    try:
+                        ai_v = await asyncio.wait_for(
+                            ai_ask(
+                                f"Solana token ${sym_} | Type: {at.upper()} | MCap {_usd(fdv_)} | "
+                                f"Liq {_usd(liq_)} | 5m {_pct(ch5m_)} | 1h {_pct(ch1h_)} | "
+                                f"Buys {b1h_} Sells {s1h_} | Buy% {bp_:.0f}% | Vol spike {vs_:.1f}x | "
+                                f"Narrative #{nar_}. Is this worth aping? 1 sharp sentence — max 15 words.",
+                                fallback="",
+                                max_tokens=60,
+                                inject_market=False
+                            ),
+                            timeout=12
+                        )
+                        if ai_v and ai_v.strip():
+                            try:
+                                await app.bot.edit_message_text(
+                                    chat_id=chat_id, message_id=msg_id,
+                                    text=card + f"\n\n\U0001f9e0 *Kayo:* _{ai_v}_",
+                                    parse_mode="Markdown",
+                                    reply_markup=buttons,
+                                    disable_web_page_preview=True,
+                                )
+                            except Exception:
+                                try:
+                                    plain_ai = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', ai_v)
+                                    await app.bot.edit_message_text(
+                                        chat_id=chat_id, message_id=msg_id,
+                                        text=card + f"\n\U0001f9e0 Kayo: {plain_ai}",
+                                        reply_markup=buttons,
+                                        disable_web_page_preview=True,
+                                    )
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+
+                asyncio.create_task(_add_ai_verdict(
+                    sent_msg.message_id, GROUP_CHAT_ID,
+                    sym, alert_type, fdv, liq, ch5m, ch1h,
+                    b1h, s1h, buy_pct, vol_spike, nar
+                ))
+
+                await asyncio.sleep(1)
+
+            # ── v44: UPDATE CHECKPOINT ──
+            last_scan_ts = now
+            asyncio.create_task(_save())
+
+            logger.info(f"[SCANNER] Cycle done — {alert_count} alerts, {len(pairs_map)} coins scanned")
 
         except Exception as e:
             logger.error(f"[bg_main_scanner] {e}", exc_info=True)
 
         await asyncio.sleep(30)
-
 
 async def bg_followup_tracker(app: Application):
     """
@@ -7155,11 +7239,12 @@ async def bg_new_launch_scanner(app: Application):
                 boost   = boost_map.get(addr, 0)
                 buy_pct = b1h / max(b1h + s1h, 1) * 100
 
+                v1h_new  = float((pd.get("volume") or {}).get("h1", 0) or 0)
                 eff_fdv = max(fdv, liq * 3)
                 if liq < 2_000: continue                          # need $2k+ liquidity — no rugs
-                if eff_fdv > 500_000: continue                    # hard $500k cap
+                if eff_fdv > 300_000: continue                    # v44: $300k cap (was $500k)
                 if eff_fdv < 5_000: continue                     # below $5k = dust/rug
-                if v1h and v1h < 500: continue                   # need some volume
+                if v1h_new and v1h_new < 500: continue             # need some volume
 
                 # Scoring
                 score = 0
@@ -7279,184 +7364,498 @@ async def bg_new_launch_scanner(app: Application):
 
 async def bg_established_scanner(app: Application):
     """
-    Scans for ESTABLISHED coins (age >2h, mcap <$500k) that are
-    suddenly pumping again — catches rebounded coins, reactivated old gems,
-    and migrated tokens that weren't new when they moved.
-    Runs every 3 minutes.
+    v44 ESTABLISHED SCANNER — every 3 min
+    Scans for OLD coins (any age — 2h to 2+ years) that are suddenly moving.
+    NO age ceiling — catches ancient tokens waking up too.
+    Uses persisted cooldowns + volume snapshots for dead-token heat detection.
+    Sources: DexScreener (boosted+trending) + GeckoTerminal (trending) + Birdeye (trending)
     """
     await asyncio.sleep(180)
-    seen_est: dict = {}  # addr -> last_alert_time
+
+    # Persisted cooldowns
+    if "est" not in scanner_cooldowns:
+        scanner_cooldowns["est"] = {}
+    cd = scanner_cooldowns["est"]
 
     while True:
         try:
             now = time.time()
-            QUERIES = [
-                "solana meme", "solana ai", "solana dog", "solana cat",
-                "solana gaming", "solana pump", "solana pepe", "solana frog"
-            ]
-            # v43: Unified multi-source discovery (DS + GT + Birdeye + Jupiter)
-            try:
-                unified_tokens = await asyncio.wait_for(unified_scanner_discovery(), timeout=25)
-                if unified_tokens and len(unified_tokens) > 5:
-                    pairs_map = {t["address"]: t for t in unified_tokens if t.get("address")}
-                else:
-                    pairs_map = await dex_multi_search(QUERIES)
-            except asyncio.TimeoutError:
-                pairs_map = await dex_multi_search(QUERIES)
-            # v42: Also fetch GT trending pools for broader coverage
-            try:
-                gt_pools = await asyncio.gather(
-                    _fetch_gt_trend(1), _fetch_gt_trend(2),
-                    return_exceptions=True)
-                for gp in gt_pools:
-                    if isinstance(gp, Exception): continue
-                    for pool in gp:
-                        tok = gt_parse_pool(pool)
-                        if tok and tok["address"] not in pairs_map:
-                            pairs_map[tok["address"]] = tok
-            except Exception as e:
-                logger.debug(f"established_scanner GT error: {e}")
 
-            for addr, p in pairs_map.items():
+            # v44: Use mcap-sorted GT pools + DexScreener boosted/trending + Birdeye trending
+            batches = await asyncio.gather(
+                _fetch_gt_trend(1), _fetch_gt_trend(2),
+                _fetch_gt_mcap_pools(1, "h24_volume_usd_desc"),
+                _fetch_gt_mcap_pools(2, "h24_volume_usd_desc"),
+                _fetch_dex_profiles(), _fetch_dex_boosts(),
+                _fetch_be_trend(),
+                return_exceptions=True,
+            )
+
+            all_pools = []
+            dex_profiles = []
+            dex_boosts = []
+            be_trend_tokens = []
+
+            for idx, batch in enumerate(batches):
+                if isinstance(batch, Exception): continue
+                if idx < 4:
+                    all_pools += batch
+                elif idx == 4:
+                    dex_profiles = batch
+                elif idx == 5:
+                    dex_boosts = batch
+                elif idx == 6:
+                    be_trend_tokens = batch if isinstance(batch, list) else []
+
+            # Build unified map
+            pairs_map: Dict[str, Dict] = {}
+            for pool in all_pools:
+                tok = gt_parse_pool(pool)
+                if tok and tok["address"] not in pairs_map:
+                    pairs_map[tok["address"]] = tok
+
+            # Add Birdeye trending tokens
+            for be_tok in be_trend_tokens:
+                if not isinstance(be_tok, dict): continue
+                tok = _be_token_to_pair(be_tok)
+                if tok and tok["address"] not in pairs_map:
+                    pairs_map[tok["address"]] = tok
+
+            # Fetch DexScreener details for boosted/profiled not already in map
+            boosted_addrs = {b.get("tokenAddress", "") for b in dex_boosts}
+            profiled_addrs = {p.get("tokenAddress", "") for p in dex_profiles}
+            extra_addrs = list((boosted_addrs | profiled_addrs) - set(pairs_map.keys()))
+            if extra_addrs:
+                try:
+                    async with aiohttp.ClientSession() as s:
+                        chunk = ",".join(extra_addrs[:30])
+                        async with s.get(
+                            f"https://api.dexscreener.com/latest/dex/tokens/{chunk}",
+                            timeout=aiohttp.ClientTimeout(total=12)
+                        ) as r:
+                            d = await r.json()
+                            for p in (d.get("pairs") or []):
+                                if p.get("chainId") != "solana": continue
+                                a = (p.get("baseToken") or {}).get("address", "")
+                                if a and a not in pairs_map:
+                                    pairs_map[a] = {
+                                        "address": a,
+                                        "sym": (p.get("baseToken") or {}).get("symbol", "?"),
+                                        "name": (p.get("baseToken") or {}).get("name", ""),
+                                        "price": float(p.get("priceUsd", 0) or 0),
+                                        "fdv": float(p.get("fdv", 0) or 0),
+                                        "mcap": float(p.get("marketCap", 0) or 0),
+                                        "liq": float((p.get("liquidity") or {}).get("usd", 0) or 0),
+                                        "ch5m": float((p.get("priceChange") or {}).get("m5", 0) or 0),
+                                        "ch1h": float((p.get("priceChange") or {}).get("h1", 0) or 0),
+                                        "ch6h": float((p.get("priceChange") or {}).get("h6", 0) or 0),
+                                        "ch24h": float((p.get("priceChange") or {}).get("h24", 0) or 0),
+                                        "v5m": float((p.get("volume") or {}).get("m5", 0) or 0),
+                                        "v1h": float((p.get("volume") or {}).get("h1", 0) or 0),
+                                        "v24h": float((p.get("volume") or {}).get("h24", 0) or 0),
+                                        "b5m": 0, "s5m": 0,
+                                        "b1h": int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0),
+                                        "s1h": int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0),
+                                        "buy_pct": 0, "vol_spike": 0,
+                                        "pair_addr": p.get("pairAddress", ""),
+                                        "created_str": "",
+                                    }
+                except Exception as e:
+                    logger.debug(f"est dex_batch_extra: {e}")
+
+            logger.info(f"[ESTABLISHED] {len(pairs_map)} coins fetched. Scanning for heat...")
+
+            for addr, tok in pairs_map.items():
                 if addr in blacklist: continue
-                if now - seen_est.get(addr, 0) < 10800: continue  # 3h per coin
+                if now - cd.get(addr, 0) < 10800: continue  # 3h per coin (persisted)
 
-                base    = p.get("baseToken", {})
-                sym     = base.get("symbol", "???")
-                name    = base.get("name", "")
-                fdv     = float(p.get("fdv", 0) or 0)
-                mcap    = float(p.get("marketCap", 0) or fdv)
-                liq     = float((p.get("liquidity") or {}).get("usd", 0) or 0)
-                ch5m    = float((p.get("priceChange") or {}).get("m5", 0) or 0)
-                ch1h    = float((p.get("priceChange") or {}).get("h1", 0) or 0)
-                ch6h    = float((p.get("priceChange") or {}).get("h6", 0) or 0)
-                ch24h   = float((p.get("priceChange") or {}).get("h24", 0) or 0)
-                v5m     = float((p.get("volume") or {}).get("m5", 0) or 0)
-                v1h     = float((p.get("volume") or {}).get("h1", 0) or 0)
-                v24h    = float((p.get("volume") or {}).get("h24", 0) or 0)
-                b1h     = int(((p.get("txns") or {}).get("h1") or {}).get("buys",  0) or 0)
-                s1h     = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
-                b5m     = int(((p.get("txns") or {}).get("m5") or {}).get("buys",  0) or 0)
-                s5m     = int(((p.get("txns") or {}).get("m5") or {}).get("sells", 0) or 0)
-                created = int(p.get("pairCreatedAt", 0) or 0)
-                age_min = (now * 1000 - created) / 60000 if created else 9999
+                sym  = tok.get("sym", "???")
+                name = tok.get("name", sym)
+                fdv  = float(tok.get("fdv", 0) or 0)
+                mcap = float(tok.get("mcap", 0) or fdv)
+                liq  = float(tok.get("liq", 0) or 0)
+                ch5m = float(tok.get("ch5m", 0) or 0)
+                ch1h = float(tok.get("ch1h", 0) or 0)
+                ch6h = float(tok.get("ch6h", 0) or 0)
+                ch24h = float(tok.get("ch24h", 0) or 0)
+                v5m  = float(tok.get("v5m", 0) or 0)
+                v1h  = float(tok.get("v1h", 0) or 0)
+                v24h = float(tok.get("v24h", 0) or 0)
+                b1h  = int(tok.get("b1h", 0) or 0)
+                s1h  = int(tok.get("s1h", 0) or 0)
+                b5m  = int(tok.get("b5m", 0) or 0)
+                s5m  = int(tok.get("s5m", 0) or 0)
 
-                # Only ESTABLISHED coins: >2 hours old, sub $500k, real liq
-                if age_min < 120:   continue  # too new — main scanner handles those
-                if fdv > 500_000:   continue  # above our cap
-                if fdv < 5_000:     continue  # ghost token
-                if liq < 2_000:     continue  # need $2k+ liquidity — no rugs
+                # v44: MCAP FILTER — $5k to $300k
+                eff_cap = max(fdv, mcap, liq * 3)
+                if eff_cap > 300_000: continue
+                if eff_cap < 5_000: continue
+                if liq < 2_000: continue
+
+                # v44: NO AGE CEILING — scan old AND new tokens
+                # Just need >2h old to avoid duplicating the main scanner
+                created = int(tok.get("created", 0) or 0)
+                age_min = (now * 1000 - created) / 60000 if created else 99999
+                if age_min < 120 and created > 0: continue  # skip <2h (main scanner handles)
 
                 avg_5m_vol = v1h / 12 if v1h > 0 else 1
                 vol_spike  = v5m / max(avg_5m_vol, 1)
                 buy_pct    = b1h / max(b1h + s1h, 1) * 100
 
-                # Must be buying, not selling
                 if buy_pct < 50: continue
 
-                # Must have a real move — not just noise
+                # ── v44: UPDATE VOLUME SNAPSHOT ──
+                was_dead = False
+                if addr in volume_snapshots:
+                    snap = volume_snapshots[addr]
+                    prev_vol_1h = snap.get("vol_1h", 0)
+                    prev_vol_24h = snap.get("vol_24h", 0)
+                    # "Dead" = had near-zero volume for 24h+
+                    if prev_vol_1h < 200 and prev_vol_24h < 500:
+                        was_dead = True
+
+                volume_snapshots[addr] = {
+                    "vol_1h": v1h, "vol_24h": v24h, "mcap": eff_cap,
+                    "sym": sym, "ts": now, "ch1h": ch1h,
+                }
+
                 qualifies = False
                 est_type  = None
 
-                # Pattern 1: Old coin suddenly pumping hard — classic "second wind"
+                # Pattern 1: Old coin suddenly pumping — "second wind"
                 if ch1h >= 8 and buy_pct >= 52 and b1h >= 5:
                     qualifies = True; est_type = "pump"
 
-                # Pattern 2: Volume explosion on quiet coin (possible manipulation or kol call)
+                # Pattern 2: Volume explosion on quiet coin
                 elif vol_spike >= 3 and abs(ch5m) < 8 and b1h > 8 and buy_pct > 55:
                     qualifies = True; est_type = "whale"
 
-                # Pattern 3: Consistent 6h grind — real accumulation in progress
+                # Pattern 3: Consistent 6h grind
                 elif ch6h >= 15 and ch1h >= 5 and buy_pct >= 55 and b1h > 8:
                     qualifies = True; est_type = "gem"
 
-                # Pattern 4: Rebound after dump — was down 24h but now recovering
+                # Pattern 4: Rebound after dump
                 elif ch24h < -30 and ch1h >= 15 and ch5m >= 5 and buy_pct >= 60:
-                    qualifies = True; est_type = "unusual"
+                    qualifies = True; est_type = "rebound"
+
+                # v44 Pattern 5: DEAD TOKEN REVIVAL — was dormant, now has heat
+                elif was_dead and v1h > 2000 and (ch1h >= 3 or b1h >= 5) and buy_pct >= 50:
+                    qualifies = True; est_type = "revival"
+
+                # v44 Pattern 6: Ancient token (2+ years) with any real activity
+                elif age_min > 1051200 and v1h > 1000 and (ch1h >= 2 or ch24h >= 5) and buy_pct >= 50:
+                    qualifies = True; est_type = "ancient"
 
                 if not qualifies: continue
 
-                # Anti-spam: never re-alert same coin from here if main scanner already got it
-                alert_id_est = re.sub(r"[^a-z0-9]","",sym.lower())[:8] + f":{est_type}:{int(now/3600)}"
-                alert_id_est = hashlib.md5(alert_id_est.encode()).hexdigest()[:16]
+                # Dedup
+                alert_id_est = hashlib.md5(f"{addr}:est:{est_type}:{int(now/3600)}".encode()).hexdigest()[:16]
                 if _seen_check(seen_alert_ids, alert_id_est): continue
                 _seen_add(seen_alert_ids, alert_id_est)
 
-                seen_est[addr] = now
+                cd[addr] = now  # persisted cooldown
+                asyncio.create_task(_save())
 
-                nar    = detect_narrative(f"{name} {sym}")
-                info   = p.get("info") or {}
-                links  = info.get("socials") or []
-                tw_lnk = next((s.get("url","") for s in links if s.get("type","") in ("twitter","x")), "")
-                tg_lnk = next((s.get("url","") for s in links if s.get("type","") == "telegram"), "")
+                nar = detect_narrative(f"{name} {sym}")
                 liq_ratio = liq / max(fdv, 1) * 100
                 mscore = min(100, int(abs(ch1h) + buy_pct/2 + vol_spike*10))
 
+                # Age label
+                if age_min > 1051200:
+                    age_label = f"{int(age_min/525600)}y+ old"
+                elif age_min > 43200:
+                    age_label = f"{int(age_min/1440)}d old"
+                else:
+                    age_label = f"{int(age_min/60)}h old"
+
                 tok_est = {
                     "address": addr, "sym": sym, "name": name,
-                    "price": float(p.get("priceUsd", 0) or 0),
+                    "price": float(tok.get("price", 0) or 0),
                     "fdv": fdv, "mcap": mcap, "liq": liq, "liq_ratio": liq_ratio,
                     "ch5m": ch5m, "ch1h": ch1h, "ch6h": ch6h, "ch24h": ch24h,
                     "v5m": v5m, "v1h": v1h, "v24h": v24h,
-                    "b5m": b5m, "s5m": s5m, "b1h": b1h, "s1h": s1h, "b24h": 0, "s24h": 0,
+                    "b5m": b5m, "s5m": s5m, "b1h": b1h, "s1h": s1h,
+                    "b24h": 0, "s24h": 0,
                     "buy_pct": buy_pct, "vol_spike": vol_spike,
-                    "risk_score": 35, "red_flags": [], "green_flags": [],
+                    "risk_score": 30, "red_flags": [], "green_flags": [],
                     "sell_tax": 0, "buy_tax": 0, "is_honeypot": False,
-                    "lp_locked": liq_ratio > 8,
-                    "is_renounced": False,
-                    "created": created, "narrative": nar,
-                    "tw_link": tw_lnk, "tg_link": tg_lnk, "web_link": "",
-                    "boost_active": 0, "has_profile": False, "has_ad": False,
-                    "pair_addr": p.get("pairAddress", ""),
+                    "lp_locked": False, "is_renounced": False,
+                    "created": created,
+                    "narrative": nar, "tw_link": "", "tg_link": "", "web_link": "",
+                    "boost_active": 1 if addr in boosted_addrs else 0,
+                    "has_profile": addr in profiled_addrs, "has_ad": False,
+                    "pair_addr": tok.get("pair_addr", ""),
                     "mscore": mscore,
+                    "is_pumpfun": False, "is_graduated": False,
+                    "pf_reply_count": 0, "pf_description": "",
                 }
 
-                ai_est = await ai_ask(
-                    f"Established Solana token ${sym} (age {int(age_min)}min, ${_usd(fdv)} mcap) "
-                    f"just lit up: 1h {_pct(ch1h)}, 5m {_pct(ch5m)}, 6h {_pct(ch6h)}, "
-                    f"24h {_pct(ch24h)}, buy% {buy_pct:.0f}%, vol spike {vol_spike:.1f}x. "
-                    f"This is an older coin picking up steam again — #{nar} narrative. "
-                    "Is this a real second wind or a dead cat bounce? "
-                    "1 sharp degen sentence — ape or skip?",
-                    fallback="",
-                    inject_market=True
-                )
-                # Prefix to show this is an ESTABLISHED coin (not new)
-                age_label = f"{int(age_min//60)}h{int(age_min%60)}m" if age_min > 60 else f"{int(age_min)}m"
-                ai_est_full = f"[Aged {age_label} — not new] {ai_est}"
+                if GROUP_CHAT_ID == 0: continue
 
-                card_est = build_alert_card(tok_est, est_type, ai_est_full)
-                if GROUP_CHAT_ID != 0:
-                    try:
-                        msg_est = await app.bot.send_message(
-                            chat_id=GROUP_CHAT_ID,
-                            text=card_est,
-                            parse_mode="Markdown",
-                            reply_markup=scan_buttons(addr, sym, tok_est.get("pair_addr","")),
-                            disable_web_page_preview=True,
-                        )
-                        dropped_calls[addr] = {
-                            "sym": sym, "name": name,
-                            "entry_price": tok_est["price"],
-                            "mcap_entry": mcap,
-                            "time": now,
-                            "alert_type": est_type,
-                            "msg_id": msg_est.message_id,
-                            "chat_id": GROUP_CHAT_ID,
-                            "alerted_10x": False,
-                            "alerted_5x":  False,
-                            "alerted_rug": False,
-                        }
-                        asyncio.create_task(_save())
-                        logger.info(f"[ESTABLISHED] {est_type} ${sym} age={age_label} {_usd(mcap)}")
-                        await asyncio.sleep(4)
-                    except Exception as e:
-                        logger.warning(f"established alert: {e}")
+                try:
+                    card = build_alert_card(tok_est, est_type, "")
+                    buttons = scan_buttons(addr, sym, tok_est["pair_addr"])
+                    sent_msg = await app.bot.send_message(
+                        GROUP_CHAT_ID, card,
+                        parse_mode="Markdown",
+                        reply_markup=buttons,
+                        disable_web_page_preview=True,
+                    )
+                    dropped_calls[addr] = {
+                        "sym": sym, "name": name,
+                        "entry_price": tok_est["price"],
+                        "mcap_entry": mcap,
+                        "time": now,
+                        "alert_type": est_type,
+                        "msg_id": sent_msg.message_id,
+                        "chat_id": GROUP_CHAT_ID,
+                        "alerted_10x": False,
+                        "alerted_5x":  False,
+                        "alerted_rug": False,
+                    }
+                    asyncio.create_task(_save())
+                    logger.info(f"[ESTABLISHED] {est_type} ${sym} {age_label} {_usd(mcap)}")
+                    await asyncio.sleep(4)
+                except Exception as e:
+                    logger.warning(f"established alert: {e}")
 
         except Exception as e:
             logger.error(f"bg_established_scanner: {e}", exc_info=True)
         await asyncio.sleep(180)  # run every 3 minutes
 
+
+async def bg_heat_scanner(app: Application):
+    """
+    v44 HEAT SCANNER — every 5 min
+    Dedicated dead-token revival detector.
+    Fetches a broad set of Solana pools, stores volume snapshots,
+    and alerts when a token that had near-zero volume suddenly gets heat.
+    Uses BOTH signals: old age + near-zero volume stretch + fresh spike.
+    """
+    await asyncio.sleep(300)  # 5 min delay after boot
+
+    # Persisted cooldowns
+    if "heat" not in scanner_cooldowns:
+        scanner_cooldowns["heat"] = {}
+    cd = scanner_cooldowns["heat"]
+
+    while True:
+        try:
+            now = time.time()
+
+            # Fetch broad set of active Solana pools from multiple sources
+            batches = await asyncio.gather(
+                _fetch_gt_mcap_pools(1, "h24_volume_usd_desc"),
+                _fetch_gt_mcap_pools(2, "h24_volume_usd_desc"),
+                _fetch_gt_mcap_pools(3, "h24_volume_usd_desc"),
+                _fetch_gt_mcap_pools(4, "h24_volume_usd_desc"),
+                _fetch_dex_boosts(),
+                _fetch_be_trend(),
+                return_exceptions=True,
+            )
+
+            all_pools = []
+            dex_boosts_raw = []
+            be_trend_tokens = []
+
+            for idx, batch in enumerate(batches):
+                if isinstance(batch, Exception): continue
+                if idx < 4:
+                    all_pools += batch
+                elif idx == 4:
+                    dex_boosts_raw = batch
+                elif idx == 5:
+                    be_trend_tokens = batch if isinstance(batch, list) else []
+
+            # Build token map
+            pairs_map: Dict[str, Dict] = {}
+            for pool in all_pools:
+                tok = gt_parse_pool(pool)
+                if tok and tok["address"] not in pairs_map:
+                    pairs_map[tok["address"]] = tok
+
+            # Add Birdeye trending
+            for be_tok in be_trend_tokens:
+                if not isinstance(be_tok, dict): continue
+                tok = _be_token_to_pair(be_tok)
+                if tok and tok["address"] not in pairs_map:
+                    pairs_map[tok["address"]] = tok
+
+            # Add boosted tokens (fetch their pair data)
+            for boost in (dex_boosts_raw or [])[:20]:
+                addr = boost.get("tokenAddress", "")
+                if addr and addr not in pairs_map and addr not in blacklist:
+                    try:
+                        pairs = await dex_pairs_by_token(addr)
+                        if pairs:
+                            tok = {
+                                "address": addr,
+                                "sym": (pairs[0].get("baseToken") or {}).get("symbol", "?"),
+                                "name": (pairs[0].get("baseToken") or {}).get("name", ""),
+                                "price": float(pairs[0].get("priceUsd", 0) or 0),
+                                "fdv": float(pairs[0].get("fdv", 0) or 0),
+                                "mcap": float(pairs[0].get("marketCap", 0) or 0),
+                                "liq": float((pairs[0].get("liquidity") or {}).get("usd", 0) or 0),
+                                "ch5m": float((pairs[0].get("priceChange") or {}).get("m5", 0) or 0),
+                                "ch1h": float((pairs[0].get("priceChange") or {}).get("h1", 0) or 0),
+                                "ch6h": float((pairs[0].get("priceChange") or {}).get("h6", 0) or 0),
+                                "ch24h": float((pairs[0].get("priceChange") or {}).get("h24", 0) or 0),
+                                "v5m": float((pairs[0].get("volume") or {}).get("m5", 0) or 0),
+                                "v1h": float((pairs[0].get("volume") or {}).get("h1", 0) or 0),
+                                "v24h": float((pairs[0].get("volume") or {}).get("h24", 0) or 0),
+                                "b1h": int(((pairs[0].get("txns") or {}).get("h1") or {}).get("buys", 0) or 0),
+                                "s1h": int(((pairs[0].get("txns") or {}).get("h1") or {}).get("sells", 0) or 0),
+                                "pair_addr": pairs[0].get("pairAddress", ""),
+                            }
+                            pairs_map[addr] = tok
+                    except Exception:
+                        pass
+
+            alert_count = 0
+
+            for addr, tok in pairs_map.items():
+                if addr in blacklist: continue
+                if now - cd.get(addr, 0) < 7200: continue  # 2h per coin (persisted)
+
+                sym  = tok.get("sym", "???")
+                name = tok.get("name", sym)
+                fdv  = float(tok.get("fdv", 0) or 0)
+                mcap = float(tok.get("mcap", 0) or fdv)
+                liq  = float(tok.get("liq", 0) or 0)
+                ch1h = float(tok.get("ch1h", 0) or 0)
+                ch24h = float(tok.get("ch24h", 0) or 0)
+                v1h  = float(tok.get("v1h", 0) or 0)
+                v24h = float(tok.get("v24h", 0) or 0)
+                b1h  = int(tok.get("b1h", 0) or 0)
+                s1h  = int(tok.get("s1h", 0) or 0)
+                created = int(tok.get("created", 0) or 0)
+                age_min = (now * 1000 - created) / 60000 if created else 99999
+
+                # v44: MCAP FILTER
+                eff_cap = max(fdv, mcap, liq * 3)
+                if eff_cap > 300_000: continue
+                if eff_cap < 5_000: continue
+                if liq < 2_000: continue
+
+                buy_pct = b1h / max(b1h + s1h, 1) * 100
+
+                # ── v44: CHECK VOLUME SNAPSHOT FOR DEAD-TOKEN REVIVAL ──
+                was_dead = False
+                dead_age_days = 0
+                if addr in volume_snapshots:
+                    snap = volume_snapshots[addr]
+                    prev_vol_1h = snap.get("vol_1h", 0)
+                    prev_vol_24h = snap.get("vol_24h", 0)
+                    prev_ts = snap.get("ts", 0)
+                    snap_age = (now - prev_ts) / 3600  # hours since last snapshot
+
+                    # "Dead" = had near-zero volume (both 1h and 24h below thresholds)
+                    if prev_vol_1h < 200 and prev_vol_24h < 500:
+                        was_dead = True
+                        dead_age_days = snap_age / 24
+
+                # ── v44: REVIVAL DETECTION — both signals combined ──
+                # Signal 1: Was dead (near-zero volume for 24h+)
+                # Signal 2: Old token (age > 24h)
+                # Signal 3: Fresh spike (volume + price + buy pressure)
+                if not was_dead: continue
+                if age_min < 1440 and created > 0: continue  # must be > 1 day old
+
+                # Fresh spike: volume jumped from near-zero to $2k+
+                if v1h < 2000: continue
+                if buy_pct < 50: continue
+                if ch1h < 2 and b1h < 3: continue  # need some actual price action or buys
+
+                # ── ALERT: DEAD TOKEN REVIVING ──
+                alert_id = hashlib.md5(f"{addr}:heat:{int(now/7200)}".encode()).hexdigest()[:16]
+                if _seen_check(seen_alert_ids, alert_id): continue
+                _seen_add(seen_alert_ids, alert_id)
+
+                cd[addr] = now
+                asyncio.create_task(_save())
+
+                # Update snapshot
+                volume_snapshots[addr] = {
+                    "vol_1h": v1h, "vol_24h": v24h, "mcap": eff_cap,
+                    "sym": sym, "ts": now, "ch1h": ch1h,
+                }
+
+                nar = detect_narrative(f"{name} {sym}")
+                price = float(tok.get("price", 0) or 0)
+                v5m = float(tok.get("v5m", 0) or 0)
+                ch5m = float(tok.get("ch5m", 0) or 0)
+                ch6h = float(tok.get("ch6h", 0) or 0)
+
+                if age_min > 1051200:
+                    age_label = f"{int(age_min/525600)}y+ old"
+                elif age_min > 43200:
+                    age_label = f"{int(age_min/1440)}d old"
+                else:
+                    age_label = f"{int(age_min/60)}h old"
+
+                tok_heat = {
+                    "address": addr, "sym": sym, "name": name,
+                    "price": price, "fdv": fdv, "mcap": mcap, "liq": liq,
+                    "liq_ratio": liq / max(fdv, 1) * 100,
+                    "ch5m": ch5m, "ch1h": ch1h, "ch6h": ch6h, "ch24h": ch24h,
+                    "v5m": v5m, "v1h": v1h, "v24h": v24h,
+                    "b5m": 0, "s5m": 0, "b1h": b1h, "s1h": s1h,
+                    "b24h": 0, "s24h": 0,
+                    "buy_pct": buy_pct, "vol_spike": v5m / max(v1h/12, 1),
+                    "risk_score": 35, "red_flags": [], "green_flags": [],
+                    "sell_tax": 0, "buy_tax": 0, "is_honeypot": False,
+                    "lp_locked": False, "is_renounced": False,
+                    "created": created,
+                    "narrative": nar, "tw_link": "", "tg_link": "", "web_link": "",
+                    "boost_active": 0, "has_profile": False, "has_ad": False,
+                    "pair_addr": tok.get("pair_addr", ""),
+                    "mscore": min(100, int(abs(ch1h) + buy_pct/2 + 10)),
+                    "is_pumpfun": False, "is_graduated": False,
+                    "pf_reply_count": 0, "pf_description": "",
+                }
+
+                if GROUP_CHAT_ID == 0: continue
+
+                try:
+                    card = build_alert_card(tok_heat, "revival", "")
+                    buttons = scan_buttons(addr, sym, tok_heat["pair_addr"])
+                    sent_msg = await app.bot.send_message(
+                        GROUP_CHAT_ID, card,
+                        parse_mode="Markdown",
+                        reply_markup=buttons,
+                        disable_web_page_preview=True,
+                    )
+                    dropped_calls[addr] = {
+                        "sym": sym, "name": name,
+                        "entry_price": price,
+                        "mcap_entry": mcap,
+                        "time": now,
+                        "alert_type": "revival",
+                        "msg_id": sent_msg.message_id,
+                        "chat_id": GROUP_CHAT_ID,
+                        "alerted_10x": False, "alerted_5x": False, "alerted_rug": False,
+                    }
+                    asyncio.create_task(_save())
+                    logger.info(f"[HEAT] REVIVAL ${sym} {age_label} was dead {dead_age_days:.1f}d — vol {v1h:.0f} ch1h {ch1h:.1f}%")
+                    alert_count += 1
+                    await asyncio.sleep(5)
+                except Exception as e:
+                    logger.warning(f"heat alert: {e}")
+
+            # Prune volume snapshots older than 7 days
+            cutoff = now - 604800
+            to_del = [a for a, s in volume_snapshots.items() if s.get("ts", 0) < cutoff]
+            for a in to_del:
+                del volume_snapshots[a]
+            if to_del:
+                asyncio.create_task(_save())
+
+            logger.info(f"[HEAT] Cycle done — {alert_count} revivals, {len(pairs_map)} coins, {len(volume_snapshots)} snapshots")
+
+        except Exception as e:
+            logger.error(f"bg_heat_scanner: {e}", exc_info=True)
+
+        await asyncio.sleep(300)  # every 5 min
 
 
 async def bg_narrative_news_scanner(app: Application):
@@ -7549,7 +7948,7 @@ async def bg_narrative_news_scanner(app: Application):
                         if not addr or addr in blacklist: continue
                         fdv  = float(p.get("fdv", 0) or 0)
                         liq  = float((p.get("liquidity") or {}).get("usd", 0) or 0)
-                        if not (5_000 <= fdv <= 500_000) or liq < 2_000: continue
+                        if not (5_000 <= fdv <= 300_000) or liq < 2_000: continue
                         ch1h = float((p.get("priceChange") or {}).get("h1", 0) or 0)
                         if ch1h < 5: continue
                         b1h  = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
@@ -7688,7 +8087,7 @@ async def bg_trending_metas_scanner(app: Application):
                 sym     = tok.get("sym", "?")
                 nar     = detect_narrative(f"{tok.get('name','')} {sym}")
 
-                if not (5_000 < fdv <= 500_000):  continue
+                if not (5_000 < fdv <= 300_000):  continue
                 if liq < 2_000:                     continue
                 if buy_pct < 52:                   continue
                 if ch1h < 3:                       continue
@@ -8620,6 +9019,7 @@ def main():
             asyncio.create_task(bg_main_scanner(app))
             asyncio.create_task(bg_followup_tracker(app))
             asyncio.create_task(bg_established_scanner(app))
+            asyncio.create_task(bg_heat_scanner(app))
             asyncio.create_task(bg_new_launch_scanner(app))
             asyncio.create_task(bg_narrative_news_scanner(app))
             asyncio.create_task(bg_trending_metas_scanner(app))
@@ -8629,7 +9029,7 @@ def main():
             asyncio.create_task(bg_wallet_tracker(app))
             asyncio.create_task(bg_migrate_monitor(app))
             asyncio.create_task(bg_weekly_leaderboard(app))
-            logger.info("12 scanners started OK — v43")
+            logger.info("13 scanners started OK — v44")
             if GROUP_CHAT_ID:
                 logger.info("GROUP_CHAT_ID=%s — alerts ENABLED", GROUP_CHAT_ID)
             else:
