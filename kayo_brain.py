@@ -8565,6 +8565,82 @@ async def bg_state_saver(app):
 def main():
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
+    CMDS = [
+        ("start", start), ("help", help_cmd),
+        ("scan", scan_cmd), ("c", c_cmd), ("verify", verify_cmd),
+        ("runners", runners_cmd), ("new", new_cmd), ("pump", pump_cmd),
+        ("gems", gems_cmd), ("trending", trending_cmd), ("narrative", narrative_cmd),
+        ("explain", explain_cmd), ("boosted", boosted_cmd), ("takeover", takeover_cmd),
+        ("ask", ask_cmd), ("news", news_cmd), ("sentiment", sentiment_cmd),
+        ("macro", macro_cmd), ("markets", markets_cmd), ("index", index_cmd), ("a", a_cmd),
+        ("tt", tt_cmd), ("moni", moni_cmd),
+        ("watch", watch_cmd), ("unwatch", unwatch_cmd), ("watchlist", watchlist_cmd),
+        ("alert", alert_cmd), ("myalerts", myalerts_cmd), ("delalert", delalert_cmd),
+        ("addport", addport_cmd), ("portfolio", portfolio_cmd), ("blacklist", blacklist_cmd),
+        ("call", call_cmd), ("mycalls", mycalls_cmd), ("stop", stop_cmd),
+        ("leaderboard", leaderboard_cmd),
+        ("trackwallet", trackwallet_cmd), ("mywallet", mywallet_cmd),
+        ("rank", rank_cmd), ("gp", gp_cmd), ("gsum", gsum_cmd),
+        ("dubs", dubs_cmd), ("remindme", remindme_cmd),
+        ("chart", chart_cmd), ("price", price_cmd),
+        ("autoresponder", autoresponder_cmd),
+        ("smartscan", smartscan_cmd), ("status", status_cmd), ("ping", ping_cmd),
+        ("dev", dev_cmd), ("top", top_cmd), ("soc", soc_cmd),
+        ("ath", ath_cmd), ("last", last_cmd), ("hot", hot_cmd),
+        ("best", best_cmd), ("worst", worst_cmd),
+        ("dub", dub_cmd), ("tldr", tldr_cmd),
+        ("metas", metas_cmd), ("pvp", pvp_cmd),
+        ("groupburp", groupburp_cmd), ("s", stock_cmd),
+        # v40 Elite Features
+        ("wallet", wallet_cmd), ("holders", holders_cmd),
+        ("pnl", pnl_cmd), ("smart", smart_cmd),
+        ("copy", copy_cmd), ("bundle", bundle_cmd),
+        ("snipe", snipe_cmd), ("escan", escan_cmd),
+        ("migrate", migrate_cmd), ("kol", kol_cmd),
+        # v43 — Multi-source + Rick features
+        ("ts", cmd_twitter_scan), ("burp", cmd_hourly_burp),
+        ("ticker", cmd_ticker_search), ("summary", cmd_channel_summary),
+        ("contract", cmd_contract_read), ("zeros", cmd_zeros),
+    ]
+    for name, fn in CMDS:
+        app.add_handler(CommandHandler(name, safe_command(fn)))
+    app.add_handler(CallbackQueryHandler(handle_refresh_callback, pattern=r"^refresh:"))
+    app.add_handler(CallbackQueryHandler(_dismiss_callback, pattern=r"^dismiss:"))
+    app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
+    app.add_handler(CallbackQueryHandler(handle_help_callback, pattern=r"^help:"))
+    app.add_handler(CallbackQueryHandler(handle_chart_callback, pattern=r"^chart:"))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_error_handler(global_error_handler)
+
+    async def run():
+        async with app:
+            await app.start()
+            await app.updater.start_polling(drop_pending_updates=True)
+            asyncio.create_task(bg_state_saver(app))
+            asyncio.create_task(bg_main_scanner(app))
+            asyncio.create_task(bg_followup_tracker(app))
+            asyncio.create_task(bg_established_scanner(app))
+            asyncio.create_task(bg_new_launch_scanner(app))
+            asyncio.create_task(bg_narrative_news_scanner(app))
+            asyncio.create_task(bg_trending_metas_scanner(app))
+            asyncio.create_task(bg_price_alert_checker(app))
+            asyncio.create_task(bg_watchlist_scanner(app))
+            asyncio.create_task(bg_reminder_checker(app))
+            asyncio.create_task(bg_wallet_tracker(app))
+            asyncio.create_task(bg_migrate_monitor(app))
+            asyncio.create_task(bg_weekly_leaderboard(app))
+            logger.info("12 scanners started OK — v43")
+            if GROUP_CHAT_ID:
+                logger.info("GROUP_CHAT_ID=%s — alerts ENABLED", GROUP_CHAT_ID)
+            else:
+                logger.warning("GROUP_CHAT_ID not set — scanner alerts DISABLED")
+            logger.info("All scanners started")
+            while True:
+                await asyncio.sleep(3600)
+
+    asyncio.run(run())
+
+
 
 # ════════════════════════════════════════════════════════════════════════
 # RICK-INSPIRED FEATURES — v42 additions
@@ -9158,92 +9234,6 @@ async def cmd_holderstats(update, context):
             text += f"\n⚠️ Top 5 hold {top_5_pct:.1f}% — high concentration risk.\n"
     
     await update.message.reply_text(text, parse_mode="Markdown")
-
-    CMDS = [
-        ("start", start), ("help", help_cmd),
-        ("scan", scan_cmd), ("c", c_cmd), ("verify", verify_cmd),
-        ("runners", runners_cmd), ("new", new_cmd), ("pump", pump_cmd),
-        ("gems", gems_cmd), ("trending", trending_cmd), ("narrative", narrative_cmd),
-        ("explain", explain_cmd), ("boosted", boosted_cmd), ("takeover", takeover_cmd),
-        ("ask", ask_cmd), ("news", news_cmd), ("sentiment", sentiment_cmd),
-        ("macro", macro_cmd), ("markets", markets_cmd), ("index", index_cmd), ("a", a_cmd),
-        ("tt", tt_cmd), ("moni", moni_cmd),
-        ("watch", watch_cmd), ("unwatch", unwatch_cmd), ("watchlist", watchlist_cmd),
-        ("alert", alert_cmd), ("myalerts", myalerts_cmd), ("delalert", delalert_cmd),
-        ("addport", addport_cmd), ("portfolio", portfolio_cmd), ("blacklist", blacklist_cmd),
-        ("call", call_cmd), ("mycalls", mycalls_cmd), ("stop", stop_cmd),
-        ("leaderboard", leaderboard_cmd),
-        ("trackwallet", trackwallet_cmd), ("mywallet", mywallet_cmd),
-        ("rank", rank_cmd), ("gp", gp_cmd), ("gsum", gsum_cmd),
-        ("dubs", dubs_cmd), ("remindme", remindme_cmd),
-        ("chart", chart_cmd),
-        ("price", price_cmd),
-        ("autoresponder", autoresponder_cmd),
-        ("smartscan", smartscan_cmd), ("status", status_cmd), ("ping", ping_cmd),
-        ("dev", dev_cmd), ("top", top_cmd), ("soc", soc_cmd),
-        ("ath", ath_cmd), ("last", last_cmd), ("hot", hot_cmd),
-        ("best", best_cmd), ("worst", worst_cmd),
-        ("dub", dub_cmd), ("tldr", tldr_cmd),
-        ("metas", metas_cmd), ("pvp", pvp_cmd),
-        ("groupburp", groupburp_cmd), ("s", stock_cmd),
-        # v40 Elite Features
-        ("wallet", wallet_cmd), ("holders", holders_cmd),
-        ("pnl", pnl_cmd), ("smart", smart_cmd),
-        ("copy", copy_cmd), ("bundle", bundle_cmd),
-        ("snipe", snipe_cmd), ("escan", escan_cmd),
-        # v40 — remaining elite features
-        ("migrate", migrate_cmd),
-        ("kol", kol_cmd),
-        # v42 — Rick Bot inspired features
-        ("ath", cmd_ath), ("burpboard", cmd_burpboard),
-        ("pvp", cmd_pvp), ("pc", cmd_pastacheck),
-        ("tldr", cmd_tldr), ("deep", cmd_deep),
-        ("dub", cmd_dub), ("now", cmd_now),
-        ("dev", cmd_devhistory), ("holders", cmd_holderstats),
-        # v43 — Multi-source + Rick features
-        ("ts", cmd_twitter_scan), ("burp", cmd_hourly_burp),
-        ("ticker", cmd_ticker_search), ("summary", cmd_channel_summary),
-        ("contract", cmd_contract_read), ("zeros", cmd_zeros),
-    ]
-    for name, fn in CMDS:
-        app.add_handler(CommandHandler(name, safe_command(fn)))
-    # CallbackQuery handler for inline chart button
-    # CallbackQuery handlers
-    app.add_handler(CallbackQueryHandler(handle_refresh_callback, pattern=r"^refresh:"))
-    app.add_handler(CallbackQueryHandler(_dismiss_callback, pattern=r"^dismiss:"))
-    app.add_handler(CallbackQueryHandler(handle_menu_callback, pattern=r"^menu:"))
-    app.add_handler(CallbackQueryHandler(handle_help_callback, pattern=r"^help:"))
-    app.add_handler(CallbackQueryHandler(handle_chart_callback, pattern=r"^chart:"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    app.add_error_handler(global_error_handler)
-
-    async def run():
-        async with app:
-            await app.start()
-            await app.updater.start_polling(drop_pending_updates=True)
-            asyncio.create_task(bg_state_saver(app))
-            asyncio.create_task(bg_main_scanner(app))
-            asyncio.create_task(bg_followup_tracker(app))
-            asyncio.create_task(bg_established_scanner(app))
-            asyncio.create_task(bg_new_launch_scanner(app))
-            asyncio.create_task(bg_narrative_news_scanner(app))
-            asyncio.create_task(bg_trending_metas_scanner(app))
-            asyncio.create_task(bg_price_alert_checker(app))
-            asyncio.create_task(bg_watchlist_scanner(app))
-            asyncio.create_task(bg_reminder_checker(app))
-            asyncio.create_task(bg_wallet_tracker(app))  # v40: live wallet monitoring
-            asyncio.create_task(bg_migrate_monitor(app)) # v40: pump→raydium migration alerts
-            asyncio.create_task(bg_weekly_leaderboard(app)) # v40: sunday leaderboard post
-            logger.info("12 scanners started OK — v40 Elite")
-            if GROUP_CHAT_ID:
-                logger.info("GROUP_CHAT_ID=%s — alerts ENABLED", GROUP_CHAT_ID)
-            else:
-                logger.warning("GROUP_CHAT_ID not set — scanner alerts DISABLED")
-            logger.info("🚀 All scanners started")
-            while True:
-                await asyncio.sleep(3600)
-
-    asyncio.run(run())
 
 
 if __name__ == "__main__":
