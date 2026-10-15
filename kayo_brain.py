@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v47 — PRO REBUILD                     ║
+║                    KAYO BRAIN v48 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v47", 200
+def _root(): return "🦅 Kayo Brain v48", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -2305,46 +2305,74 @@ _PUMPFUN_HEADERS = {
     "Origin": "https://pump.fun",
 }
 
-async def pumpfun_latest(limit: int = 20) -> List[Dict]:
-    """Get latest Pump.fun launches — real-time CT social signal."""
+async def _gt_pump_pools(endpoint: str, limit: int = 20) -> List[Dict]:
+    """
+    v48: Pump.fun frontend API (frontend-api-v3.pump.fun) is DEAD (404 on all
+    endpoints). GeckoTerminal indexes pump.fun bonding-curve pools (dex id
+    'pump-fun') and graduated pumpswap pools in near-real time, so we source
+    pump.fun launches from GT. Returns coin-shaped dicts compatible with
+    pumpfun_to_token().
+    """
+    out = []
     try:
-        global _PUMPFUN_DISABLED, _PUMPFUN_FAIL_COUNT
-        if _PUMPFUN_DISABLED: return []
         async with aiohttp.ClientSession() as s:
             async with s.get(
-                "https://frontend-api-v3.pump.fun/coins",
-                params={"offset": "0", "limit": str(limit), "sort": "created_timestamp", "order": "DESC"},
-                headers=_PUMPFUN_HEADERS,
+                endpoint, headers={"Accept": "application/json"},
                 timeout=aiohttp.ClientTimeout(total=10)
             ) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    if isinstance(data, list):
-                        return data
+                if r.status != 200: return []
+                d = await r.json()
+        for pool in (d.get("data") or [])[:limit]:
+            try:
+                a = pool.get("attributes", {})
+                rel = pool.get("relationships", {})
+                dex = ((rel.get("dex", {}).get("data", {}) or {}).get("id", ""))
+                if dex not in ("pump-fun", "pumpswap"): continue
+                mint = ((rel.get("base_token", {}).get("data", {}) or {}).get("id", "") or "").replace("solana_", "")
+                if not mint: continue
+                pool_addr = (a.get("address") or pool.get("id", "")).replace("solana_", "")
+                graduated = dex == "pumpswap"
+                sym = (a.get("name") or "").split("/")[0].strip() or "???"
+                created_iso = a.get("pool_created_at") or ""
+                try:
+                    import datetime as _dt
+                    created_ms = int(_dt.datetime.fromisoformat(created_iso.replace("Z", "+00:00")).timestamp() * 1000) if created_iso else 0
+                except Exception:
+                    created_ms = 0
+                out.append({
+                    "mint": mint, "symbol": sym, "name": sym,
+                    "usd_market_cap": float(a.get("fdv_usd") or 0),
+                    "market_cap": float(a.get("fdv_usd") or 0),
+                    "created_timestamp": created_ms,
+                    "raydium_pool": pool_addr if graduated else "",
+                    "complete": graduated,
+                    "description": "", "twitter_handle": "", "telegram_handle": "",
+                    "www": "", "reply_count": 0, "is_banned": False,
+                    "virtual_sol_reserves": 0,
+                })
+            except Exception:
+                continue
     except Exception as e:
-        logger.debug(f"pumpfun_latest: {e}")
-    return []
+        logger.debug(f"_gt_pump_pools: {e}")
+    return out
+
+
+async def pumpfun_latest(limit: int = 20) -> List[Dict]:
+    """v48: GT new pools filtered to pump.fun (bonding curve + pumpswap)."""
+    pools = await _gt_pump_pools(
+        "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1", limit
+    )
+    if len(pools) < limit:
+        pools += await _gt_pump_pools(
+            "https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=2", limit
+        )
+    return pools[:limit]
 
 async def pumpfun_trending(limit: int = 10) -> List[Dict]:
-    """Get trending Pump.fun coins by market cap."""
-    try:
-        global _PUMPFUN_DISABLED, _PUMPFUN_FAIL_COUNT
-        if _PUMPFUN_DISABLED: return []
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                "https://frontend-api-v3.pump.fun/coins",
-                params={"offset": "0", "limit": str(limit), "sort": "market_cap", "order": "DESC"},
-                headers=_PUMPFUN_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    if isinstance(data, list):
-                        return data
-    except Exception as e:
-        logger.debug(f"pumpfun_trending: {e}")
-    return []
-
+    """v48: GT trending pools filtered to pump.fun dexes."""
+    return await _gt_pump_pools(
+        "https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?duration=24h&page=1", limit
+    )
 
 def pumpfun_to_token(coin: Dict) -> Optional[Dict]:
     """Convert Pump.fun coin API response → our standard token dict.
@@ -2641,12 +2669,113 @@ def narrative_from_news(headlines: List[str]) -> List[str]:
 # ═══════════════════════════════════════════════════════════════
 # FULL TOKEN SCAN
 # ═══════════════════════════════════════════════════════════════
+
+async def _enrich_with_rugcheck(result: Dict) -> Dict:
+    """v48: Fill holder/dev/rug data into a scan result from RugCheck. Fail-safe."""
+    if not result or not isinstance(result, dict):
+        return result
+    addr = result.get("address", "")
+    if not addr:
+        return result
+    try:
+        rc = await asyncio.wait_for(rugcheck_report(addr), timeout=12)
+        if rc:
+            pcts = _rugcheck_top10(rc, result.get("pair_addr", ""))
+            if pcts:
+                result["top_holders"] = pcts
+            if rc.get("totalHolders"):
+                result["holder_count"] = int(rc.get("totalHolders") or 0)
+            cb = float(rc.get("creatorBalance") or 0)
+            if 0 < cb < 100:
+                result["dev_pct"] = cb
+            score = rc.get("score_normalised") or rc.get("score") or 0
+            if score:
+                result["rugcheck_score"] = score
+            if (rc.get("launchpad") or {}).get("platform") == "pump_fun":
+                result["is_pumpfun"] = True
+            if rc.get("rugged"):
+                result["red_flags"] = (result.get("red_flags") or []) + ["RUGCHECK: RUGGED"]
+    except Exception as e:
+        logger.debug(f"rugcheck enrich: {e}")
+    return result
+
+async def _gt_token_scan(addr: str) -> Optional[Dict]:
+    """v48: Build a full token dict from GeckoTerminal token + pools endpoints.
+    Works for tokens DexScreener hasn't indexed yet (fresh pump.fun launches)."""
+    pools = []
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.geckoterminal.com/api/v2/networks/solana/tokens/{addr}",
+                headers={"Accept": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=8)
+            ) as r:
+                if r.status != 200: return None
+                td = await r.json()
+        ta = (td.get("data") or {}).get("attributes") or {}
+        ld = ta.get("launchpad_details") or {}
+        sym = ta.get("symbol") or "???"
+        name = ta.get("name") or sym
+        price = float(ta.get("price_usd") or 0)
+        fdv = float(ta.get("fdv_usd") or 0)
+        liq = float(ta.get("total_reserve_in_usd") or 0)
+        v24 = float(((ta.get("volume_usd") or {}).get("h24")) or 0)
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    f"https://api.geckoterminal.com/api/v2/networks/solana/tokens/{addr}/pools",
+                    headers={"Accept": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=8)
+                ) as r:
+                    if r.status == 200:
+                        pd_ = await r.json()
+                        pools = pd_.get("data") or []
+        except Exception:
+            pass
+        p = (pools[0].get("attributes") or {}) if pools else {}
+        ch = p.get("price_change_percentage") or {}
+        tx = (p.get("transactions") or {}).get("h1") or {}
+        vol = p.get("volume_usd") or {}
+        pool_addr = (p.get("address") or "").replace("solana_", "")
+        dex_id = ""
+        if pools:
+            dd = ((pools[0].get("relationships", {}) or {}).get("dex", {}) or {}).get("data", {}) or {}
+            dex_id = dd.get("id", "") if isinstance(dd, dict) else ""
+        created_iso = p.get("pool_created_at") or ""
+        created = 0
+        if created_iso:
+            try:
+                import datetime as _dt
+                created = int(_dt.datetime.fromisoformat(created_iso.replace("Z", "+00:00")).timestamp())
+            except Exception:
+                created = 0
+        is_pump = dex_id in ("pump-fun", "pumpswap") or ld.get("platform") == "pump_fun"
+        return {
+            "address": addr, "sym": sym, "name": name,
+            "price": price, "mcap": fdv, "fdv": fdv, "liq": liq,
+            "v24h": v24, "v1h": float(vol.get("h1") or 0),
+            "ch1h": float(ch.get("h1") or 0), "ch24h": float(ch.get("h24") or 0),
+            "ch6h": float(ch.get("h6") or 0), "ch5m": float(ch.get("m5") or 0),
+            "b1h": int(tx.get("buys") or 0), "s1h": int(tx.get("sells") or 0),
+            "b24h": 0, "s24h": 0,
+            "created": created, "pair_addr": pool_addr,
+            "is_pumpfun": is_pump,
+            "is_graduated": bool(ld.get("completed")) or dex_id == "pumpswap",
+            "image_uri": ta.get("image_url") or "",
+            "holder_count": 0, "top_holders": [],
+            "risk_score": 0, "red_flags": [], "green_flags": [],
+            "_sources": "GT",
+        }
+    except Exception as e:
+        logger.debug(f"_gt_token_scan: {e}")
+        return None
+
 async def full_token_scan(address: str) -> Dict:
     """v43: Try unified multi-source scan first, fallback to DexScreener-only."""
     try:
         result = await asyncio.wait_for(unified_token_scan(address), timeout=20)
         if result and not result.get("error"):
-            return result
+            return await _enrich_with_rugcheck(result)
     except asyncio.TimeoutError:
         logger.warning("unified_token_scan timed out — falling back to DexScreener")
     except Exception as e:
@@ -2672,25 +2801,18 @@ async def full_token_scan(address: str) -> Dict:
         result = await dex_search_pairs(address)
         pairs = result
     if not pairs:
-        # ── v47: PUMP.FUN DIRECT FALLBACK ──────────────────
-        # Brand-new bonding-curve launches often aren't indexed on
-        # DexScreener yet. Pump.fun's own API is authoritative.
+        # ── v48: GECKOTERMINAL FALLBACK (pump.fun API is dead) ──────
+        # Brand-new bonding-curve launches often aren't on DexScreener yet,
+        # but GT indexes pump-fun/pumpswap pools in near-real time.
+        gt_tok = None
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.get(
-                    f"https://frontend-api-v3.pump.fun/coins/{address}",
-                    headers=_PUMPFUN_HEADERS,
-                    timeout=aiohttp.ClientTimeout(total=8)
-                ) as r:
-                    if r.status == 200:
-                        coin = await r.json()
-                        if isinstance(coin, dict):
-                            tok = pumpfun_to_token(coin)
-                            if tok:
-                                logger.info(f"[CA SCAN] ${tok.get('sym','?')} found via pump.fun direct fallback")
-                                return tok
+            gt_tok = await asyncio.wait_for(_gt_token_scan(address), timeout=15)
         except Exception as e:
-            logger.debug(f"pumpfun fallback: {e}")
+            logger.debug(f"GT fallback: {e}")
+        if gt_tok:
+            logger.info(f"[CA SCAN] ${gt_tok.get('sym','?')} found via GeckoTerminal")
+            gt_tok = await _enrich_with_rugcheck(gt_tok)
+            return gt_tok
         return {"error": "Token not found — may be brand new (retry in a minute) or not a Solana token"}
 
     p      = pairs[0]
@@ -2773,7 +2895,7 @@ async def full_token_scan(address: str) -> Dict:
     # so 24h high ≈ max(price_now, price_24h_ago)
     # We label it "24h High" honestly rather than "ATH" to avoid misleading
 
-    return {
+    result = {
         "address": address, "sym": sym, "name": name, "price": price,
         "fdv": fdv, "mcap": mcap, "liq": liq, "liq_ratio": liq_ratio,
         "ch5m": ch5m, "ch1h": ch1h, "ch6h": ch6h, "ch24h": ch24h,
@@ -2791,6 +2913,8 @@ async def full_token_scan(address: str) -> Dict:
         "ath_24h": ath_24h,  # 24h high proxy
         "price_24h_ago": price_24h_ago,
     }
+
+    return await _enrich_with_rugcheck(result)
 
 # ═══════════════════════════════════════════════════════════════
 # MESSAGE CARDS
@@ -3159,6 +3283,54 @@ async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", re
         return False
 
 
+# Known protocol/AMM accounts to exclude from holder concentration
+_KNOWN_POOL_ACCOUNTS = {
+    "5Q544fKrFk6MuHhZBPkvucsjVMDQN7DDUv8xCYVAcsEw",  # Raydium AMM authority
+    "GpMZbSM2kVh4cKB7sMrQFQ8UwdveX3V7wvFcmiM8NyaY",  # Raydium vault authority
+    "39azUYFFP3YiaLiyGmiVbBBzXuNaaqJNSKgrQqrf3yoY",  # Pump.fun global authority
+    "FEEVDmskhrna3WUDtwfyaDCHhBEpGN2faveYunEsmWZZ",  # Pump.fun fee account
+    "5tzFkiKscXHK5ZXCGbXAGWDdkNPehFhgPzUnksaoNVPy",  # Pump.fun AMM authority
+    "DSo7v6EjHTG7XkDCMytxcFBXvPfQowWvrPP1YBds5zhH",  # Meteora authority
+}
+
+
+def _rugcheck_top10(report: Dict, pool_addr: str = "") -> List[float]:
+    """Top-holder pcts from a RugCheck report, excluding AMM/pool/protocol accounts."""
+    known = _KNOWN_POOL_ACCOUNTS.copy()
+    ka = report.get("knownAccounts") or {}
+    if isinstance(ka, dict):
+        for acct, info in ka.items():
+            if isinstance(info, dict) and info.get("type") in ("AMM", "POOL", "PROGRAM", "MULTISIG"):
+                known.add(acct)
+    if pool_addr:
+        known.add(pool_addr)
+    pcts = []
+    for h in (report.get("topHolders") or []):
+        owner = (h.get("owner") or h.get("address") or "").strip()
+        if owner in known:
+            continue
+        pct = float(h.get("pct", 0) or 0)
+        if pct > 0:
+            pcts.append(pct)
+        if len(pcts) >= 10:
+            break
+    return pcts
+
+
+async def rugcheck_report(addr: str) -> Dict:
+    """v48: RugCheck report - real holder data (works where Solscan fails). Free, 12s timeout."""
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.rugcheck.xyz/v1/tokens/{addr}/report",
+                timeout=aiohttp.ClientTimeout(total=12)
+            ) as r:
+                if r.status == 200:
+                    return await r.json()
+    except Exception as e:
+        logger.debug(f"rugcheck_report: {e}")
+    return {}
+
 def _rick_buttons(ca:str, sym:str="", pair_addr:str="") -> InlineKeyboardMarkup:
     dp = pair_addr or ca
     return InlineKeyboardMarkup([
@@ -3240,7 +3412,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f985 *KAYO BRAIN v47*\n"
+        f"\U0001f985 *KAYO BRAIN v48*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -3277,7 +3449,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f985 *KAYO BRAIN v47 — COMMANDS*\n"
+        "\U0001f985 *KAYO BRAIN v48 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -4284,7 +4456,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v47 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v48 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -4585,7 +4757,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *KAYO BRAIN v47 STATUS*\n"
+        f"\u2699\ufe0f *KAYO BRAIN v48 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -5316,7 +5488,7 @@ async def fetch_token_metadata(addr: str) -> Dict:
         async with aiohttp.ClientSession() as s:
             # Try Pump.fun metadata
             async with s.get(
-                f"https://frontend-api-v3.pump.fun/coins/{addr}",
+                f"https://api.geckoterminal.com/api/v2/networks/solana/tokens/{addr}",
                 headers=_PUMPFUN_HEADERS,
                 timeout=aiohttp.ClientTimeout(total=8)
             ) as r:
@@ -6450,7 +6622,7 @@ async def quick_rug_check(addr: str) -> Dict:
     return result
 
 
-async def hard_quality_gate(addr: str, sym: str, is_pumpfun: Optional[bool] = None) -> bool:
+async def hard_quality_gate(addr: str, sym: str, is_pumpfun: Optional[bool] = None, pool_addr: str = "") -> bool:
     """
     v45 HARD QUALITY GATE — every discovery alert must pass:
       1. LP LOCKED. Non-pump.fun tokens: GoPlus must CONFIRM the LP is locked.
@@ -6473,14 +6645,21 @@ async def hard_quality_gate(addr: str, sym: str, is_pumpfun: Optional[bool] = No
         except Exception:
             logger.info(f"[GATE] ${sym} skipped — LP lock unverifiable")
             return False
+    # ── TOP-10 HOLDER GATE (≤ 30%) — RugCheck primary, Solscan backup ──
+    top10 = 0.0
     try:
-        holders = await asyncio.wait_for(fetch_token_holders(addr), timeout=10)
-        top10 = float(holders.get("top10_pct", 0) or 0)
-        if top10 > 30:
-            logger.info(f"[GATE] ${sym} skipped — top10 hold {top10:.0f}%")
-            return False
+        rc = await asyncio.wait_for(rugcheck_report(addr), timeout=12)
+        if rc:
+            pcts = _rugcheck_top10(rc, pool_addr)
+            top10 = sum(pcts[:10])
+        else:
+            holders = await asyncio.wait_for(fetch_token_holders(addr), timeout=10)
+            top10 = float(holders.get("top10_pct", 0) or 0)
     except Exception:
-        pass  # holders API flaky — fail open
+        pass  # holders unverifiable → fail open
+    if top10 > 30:
+        logger.info(f"[GATE] ${sym} skipped — top10 hold {top10:.0f}%")
+        return False
     return True
 
 async def bg_main_scanner(app: Application):
@@ -7932,7 +8111,7 @@ async def bg_narrative_news_scanner(app: Application):
                             "mscore": min(100, int(abs(ch1h) + buy_pct/2 + vs*10)),
                         }
                         # ── v45: QUALITY GATE — LP locked + top10 ≤ 30% ──
-                        if not await hard_quality_gate(addr, sym):
+                        if not await hard_quality_gate(addr, sym, pool_addr=p.get("pairAddress", "")):
                             continue
 
                         try:
@@ -8329,7 +8508,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v47 ready — "
+        f"🦅 Kayo Brain v48 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
