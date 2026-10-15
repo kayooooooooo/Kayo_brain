@@ -46,6 +46,7 @@ if not BOT_TOKEN:
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
 # ═══════════════════════════════════════════════════════════════
 # HEALTH SERVER
 # ═══════════════════════════════════════════════════════════════
@@ -334,7 +335,7 @@ async def fetch_live_price(query: str) -> Dict:
         "jto": "jito-governance-token",
         "trump": "trump-official", "official-trump": "trump-official",
         "popcat": "popcat", "bome": "book-of-meme",
-        "matic": "matic-network", "pol": "matic-network",
+        "matic": "matic-network",
         "arb": "arbitrum", "op": "optimism",
         "atom": "cosmos", "ftm": "fantom",
         "hbar": "hedera-hashgraph", "alg": "algorand", "algo": "algorand",
@@ -777,6 +778,34 @@ async def search_narrative_tokens(narrative: str, chain: str = "solana", limit: 
 
 
 # ── NARRATIVE KNOWLEDGE BASE ─────────────────────────────────────────
+
+# v42: Static narrative keywords — fallback search terms when AI is down.
+# keyword found in headline -> DexScreener search terms for that narrative
+NARRATIVE_KEYWORDS: Dict[str, List[str]] = {
+    "ai":       ["ai", "agent", "gpt", "bot"],
+    "dog":      ["dog", "doge", "puppy", "shib"],
+    "cat":      ["cat", "kitty", "meow", "popcat"],
+    "frog":     ["frog", "pepe"],
+    "elon":     ["elon", "musk", "tesla"],
+    "trump":    ["trump", "president", "maga"],
+    "politics": ["politician", "election", "vote"],
+    "meme":     ["meme", "funny", "lol"],
+    "game":     ["game", "gaming", "gamer"],
+    "rwa":      ["rwa", "real estate", "treasury"],
+    "defi":     ["defi", "dex", "swap", "perp"],
+    "nft":     ["nft", "pfp", "art"],
+    "bitcoin":  ["btc", "bitcoin"],
+    "ethereum": ["eth", "ethereum", "vitalik"],
+    "solana":   ["sol", "solana", "anatoly"],
+    "pump":     ["pump", "moon", "rocket"],
+    "chinese":  ["chinese", "china", "yuan"],
+    "robinhood":["robinhood", "hood"],
+    "coinbase": ["coinbase", "cb"],
+    "hack":     ["hack", "exploit", "drain"],
+    "fed":      ["fed", "powell", "rate cut", "interest rate"],
+    "etf":      ["etf", "fund", "institutional"],
+}
+
 NARRATIVE_KB = """
 [WEB3 NARRATIVE KNOWLEDGE BASE — your complete expertise]
 
@@ -3127,81 +3156,6 @@ def build_scan_card(t: Dict, ai: str = "") -> str:
     """Rick Bot format card."""
     return _build_rick_card(t, ai, is_first_alert=False, watchers=0)
 
-def _old_build_scan_card_unused(t: Dict, ai: str = "") -> str:
-    """UNUSED — kept for reference."""
-    sym  = _md(t.get("sym", "???"))
-    name = _md(t.get("name", sym))
-    age  = _age(t.get("created", 0))
-    nar  = f" #{t.get('narrative','').upper()}" if t.get("narrative") else ""
-    pf_desc     = t.get("pf_description", "")
-    pf_replies  = t.get("pf_reply_count", 0)
-    is_pf       = t.get("is_pumpfun", False)
-    is_grad     = t.get("is_graduated", False)
-    bp   = float(t.get("buy_pct", 50))
-    sp   = 100 - bp
-
-
-    fill = int(bp / 10)
-    bar  = "🟩" * fill + "🟥" * (10 - fill)
-    press = "🔥 BUY PRESSURE" if bp > 60 else ("❄️ SELL PRESSURE" if bp < 40 else "⚖️ BALANCED")
-
-    badges = []
-    if t.get("is_renounced"):     badges.append("✅ Renounced")
-    if t.get("lp_locked"):        badges.append("🔒 LP Locked")
-    if t.get("boost_active",0)>0: badges.append("💰 Boosted")
-    if t.get("has_profile"):      badges.append("📋 Verified")
-    if t.get("is_honeypot"):      badges.append("🚨 Honeypot")
-    badge_str = "  ".join(badges) if badges else "⚠️ Unverified"
-
-    slinks = []
-    if t.get("tw_link"):  slinks.append(f"[🐦 Twitter]({t['tw_link']})")
-    if t.get("tg_link"):  slinks.append(f"[💬 TG]({t['tg_link']})")
-    if t.get("web_link"): slinks.append(f"[🌐 Web]({t['web_link']})")
-    social_str = "  ".join(slinks) if slinks else "_(no socials)_"
-
-    ms = int(t.get("mscore", 0))
-    ms_emoji = "🔥" if ms >= 70 else ("⚡" if ms >= 40 else "💤")
-    liq_ratio = t.get("liq_ratio", 0)
-
-    card = (
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"  🦅 *KAYO DEEP SCAN*{nar}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🪙 *{sym}* — _{name}_\n"
-        f"📋 `{t.get('address', '')}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Price: `{_price(t.get('price', 0))}`  ·  Age: {age}\n"
-        f"📊 MCap: `{_usd(t.get('mcap', 0))}`  ·  FDV: `{_usd(t.get('fdv', 0))}`\n"
-        f"🌊 Liquidity: `{_usd(t.get('liq', 0))}` ({liq_ratio:.1f}% of MCap)\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📈 *Price Change*\n"
-        f"  5m: {_chg(t.get('ch5m',0))}  ·  1h: {_chg(t.get('ch1h',0))}\n"
-        f"  6h: {_chg(t.get('ch6h',0))}  ·  24h: {_chg(t.get('ch24h',0))}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 *Volume*\n"
-        f"  5m: `{_usd(t.get('v5m',0))}`  1h: `{_usd(t.get('v1h',0))}`  24h: `{_usd(t.get('v24h',0))}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔄 *Transactions (1h)*\n"
-        f"  🟢 Buys: {t.get('b1h',0)}  ·  🔴 Sells: {t.get('s1h',0)}\n"
-        f"  {bar}\n"
-        f"  {bp:.0f}% Buy / {sp:.0f}% Sell — {press}\n"
-        f"  Vol Spike: {t.get('vol_spike', 0):.1f}x\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ Momentum: {ms_emoji} {ms}/100  ·  {_risk(t.get('risk_score', 30))}\n"
-        f"🛡️ {badge_str}\n"
-    )
-    bt, st = float(t.get("buy_tax", 0)), float(t.get("sell_tax", 0))
-    if bt > 0 or st > 0:
-        card += f"🧾 Tax: Buy {bt:.1f}% / Sell {st:.1f}%\n"
-    if t.get("red_flags"):
-        card += "\n🚩 *Risk Flags:*\n" + "\n".join(f"  • {_md(f)}" for f in t["red_flags"][:3]) + "\n"
-    if t.get("green_flags"):
-        card += "\n✅ *Green Flags:*\n" + "\n".join(f"  • {_md(f)}" for f in t["green_flags"][:2]) + "\n"
-    card += f"\n🌐 Socials: {social_str}\n"
-    card += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    if ai:
-        card += f"\n\n🧠 *Kayo AI Verdict:*\n_{ai}_"
-    return card
 def _md(s: str) -> str:
     """Escape Markdown special chars in dynamic text for Telegram V1."""
     if not s: return ""
@@ -3217,158 +3171,9 @@ def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
     prefix = icons.get(alert_type, "⚡")
     return f"{prefix} " + _build_rick_card(t, ai, is_first_alert=is_first, watchers=watchers)
 
-def _old_build_alert_card_unused(t: Dict, alert_type: str, ai: str = "") -> str:
-    """UNUSED — kept for reference."""
-    headers = {
-        "pump":      "🚀 PUMP ALERT",
-        "dump":      "💀 DUMP ALERT",
-        "whale":     "🐋 WHALE ACCUMULATION",
-        "gem":       "💎 HIDDEN GEM",
-        "new":       "🆕 NEW LAUNCH",
-        "narrative": "📖 NARRATIVE PLAY",
-        "rug":       "⚠️ RUG ALERT",
-        "unusual":   "⚡ UNUSUAL ACTIVITY",
-        "migration": "🔄 GRADUATION ALERT",
-        "rebrand":   "🏷️ REBRAND ALERT",
-        "momentum":  "📈 MOMENTUM ALERT",
-    }
-    header = headers.get(alert_type, "⚡ KAYO ALERT")
-
-    sym  = _md(t.get("sym", "???"))
-    name = _md(t.get("name", sym))
-    nar  = f" #{t.get('narrative','').upper()}" if t.get("narrative") else ""
-    age  = _age(t.get("created", 0))
-
-    def _chg(v):
-        v = float(v or 0)
-        if v > 0:  return f"🟢 +{v:.1f}%"
-        if v < 0:  return f"🔴 {v:.1f}%"
-        return f"⚪ {v:.1f}%"
-
-    ch5m  = _chg(t.get("ch5m", 0))
-    ch1h  = _chg(t.get("ch1h", 0))
-    ch6h  = _chg(t.get("ch6h", 0))
-    ch24h = _chg(t.get("ch24h", 0))
-
-    bp   = float(t.get("buy_pct", 50))
-    sp   = 100 - bp
-    fill = int(bp / 10)
-    bar  = "🟩" * fill + "🟥" * (10 - fill)
-    press = "🔥 BUY PRESSURE" if bp > 60 else ("❄️ SELL PRESSURE" if bp < 40 else "⚖️ BALANCED")
-
-    badges = []
-    if is_pf:               badges.append("🟣 Pump.fun")
-    if is_grad:             badges.append("✅ Graduated to Raydium")
-    if t.get("is_renounced"): badges.append("✅ Renounced")
-    if t.get("lp_locked"):    badges.append("🔒 LP Locked")
-    if t.get("boost_active", 0) > 0: badges.append("💰 Boosted")
-    if t.get("is_honeypot"):  badges.append("🚨 Honeypot")
-    if pf_replies >= 10:     badges.append(f"💬 {pf_replies} replies")
-    badge_str = "  ".join(badges) if badges else "⚠️ Unverified"
-
-    tax_line = ""
-    bt = float(t.get("buy_tax", 0))
-    st = float(t.get("sell_tax", 0))
-    if bt > 0 or st > 0:
-        tax_line = f"\n🧾 Tax: Buy {bt:.1f}% / Sell {st:.1f}%"
-
-    socials = []
-    if t.get("tw_link"):  socials.append(f"[🐦]({t['tw_link']})")
-    if t.get("tg_link"):  socials.append(f"[💬]({t['tg_link']})")
-    if t.get("web_link"): socials.append(f"[🌐]({t['web_link']})")
-    social_str = "  ".join(socials)
-
-    ms = int(t.get("mscore", 0))
-    ms_emoji = "🔥" if ms >= 70 else ("⚡" if ms >= 40 else "💤")
-
-    pf_narrative_line = ""
-    if pf_desc and len(pf_desc) > 5:
-        # Show pump.fun narrative description (truncated)
-        pf_narrative_line = f"📖 _{pf_desc[:150]}_\n"
-
-    card = (
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"  {header}{nar}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🪙 *{sym}* — _{name}_\n"
-        f"📋 `{t.get('address', '')}`\n"
-        f"{pf_narrative_line}"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"💰 Price: `{_price(t.get('price', 0))}`  ·  Age: {age}\n"
-        f"📊 MCap: `{_usd(t.get('mcap', 0))}`  ·  FDV: `{_usd(t.get('fdv', 0))}`\n"
-        f"🌊 Liquidity: `{_usd(t.get('liq', 0))}`\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📈 *Price Change*\n"
-        f"  5m: {ch5m}  ·  1h: {ch1h}\n"
-        f"  6h: {ch6h}  ·  24h: {ch24h}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔄 *Transactions (1h)*\n"
-        f"  🟢 Buys: {t.get('b1h', 0)}  ·  🔴 Sells: {t.get('s1h', 0)}\n"
-        f"  {bar}\n"
-        f"  {bp:.0f}% Buy / {sp:.0f}% Sell — {press}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ Momentum: {ms_emoji} {ms}/100  ·  {_risk(t.get('risk_score', 30))}\n"
-        f"🛡️ {badge_str}{tax_line}\n"
-    )
-    if social_str:
-        card += f"🔗 Socials: {social_str}\n"
-    card += f"━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    if ai:
-        card += f"\n\n🧠 *Kayo AI:*\n_{ai}_"
-    return card
 def scan_buttons(addr: str, sym: str = "", pair_addr: str = "") -> InlineKeyboardMarkup:
     """Rick Bot buttons — all WebApp."""
     return _rick_buttons(addr, sym, pair_addr)
-
-def _old_scan_buttons_unused(addr: str, sym: str = "", pair_addr: str = "") -> InlineKeyboardMarkup:
-    """UNUSED — kept for reference."""
-    dex_pair = pair_addr or addr
-    return InlineKeyboardMarkup([
-        [
-            # DexScreener — opens chart inside Telegram WebApp browser
-            InlineKeyboardButton(
-                "\U0001f4ca DexScreener",
-                url=f"https://dexscreener.com/solana/{dex_pair}"
-            ),
-            # GMGN — opens inside Telegram WebApp browser
-            InlineKeyboardButton(
-                "\U0001f438 GMGN",
-                url=f"https://gmgn.ai/sol/token/{addr}"
-            ),
-        ],
-        [
-            # BullX Neo — opens WebApp terminal inside Telegram
-            InlineKeyboardButton(
-                "\U0001f319 BullX",
-                url=f"https://neo.bullx.io/terminal?chainId=1399811149&address={addr}"
-            ),
-            # Photon — opens WebApp inside Telegram
-            InlineKeyboardButton(
-                "\U0001f52b Photon",
-                url=f"https://photon-sol.tinyastro.io/en/lp/{addr}"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "\U0001f34c Banana",
-                url=f"https://t.me/BananaGunSolana_bot?start=snipe_{addr}"
-            ),
-            InlineKeyboardButton(
-                "\U0001f5e1 Trojan",
-                url=f"https://t.me/hector_trojanbot?start=snipe-SOL-{addr}"
-            ),
-        ],
-        [
-            InlineKeyboardButton(
-                "\U0001f504 Refresh",
-                callback_data=f"refresh:{addr}"
-            ),
-        ],
-    ])
-
-# ═══════════════════════════════════════════════════════════════
-# COMMANDS
-# ═══════════════════════════════════════════════════════════════
 
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     add_xp(u.effective_user.id, 10)
@@ -8984,18 +8789,20 @@ def main():
         ("chart", chart_cmd), ("price", price_cmd),
         ("autoresponder", autoresponder_cmd),
         ("smartscan", smartscan_cmd), ("status", status_cmd), ("ping", ping_cmd),
-        ("dev", dev_cmd), ("top", top_cmd), ("soc", soc_cmd),
-        ("ath", ath_cmd), ("last", last_cmd), ("hot", hot_cmd),
+        ("dev", cmd_devhistory), ("top", top_cmd), ("soc", soc_cmd),
+        ("ath", cmd_ath), ("last", last_cmd), ("hot", hot_cmd),
         ("best", best_cmd), ("worst", worst_cmd),
-        ("dub", dub_cmd), ("tldr", tldr_cmd),
-        ("metas", metas_cmd), ("pvp", pvp_cmd),
+        ("dub", cmd_dub), ("tldr", cmd_tldr),
+        ("metas", metas_cmd), ("pvp", cmd_pvp),
         ("groupburp", groupburp_cmd), ("s", stock_cmd),
         # v40 Elite Features
-        ("wallet", wallet_cmd), ("holders", holders_cmd),
+        ("wallet", wallet_cmd), ("holders", cmd_holderstats),
         ("pnl", pnl_cmd), ("smart", smart_cmd),
         ("copy", copy_cmd), ("bundle", bundle_cmd),
         ("snipe", snipe_cmd), ("escan", escan_cmd),
-        ("migrate", migrate_cmd), ("kol", kol_cmd),
+        ("migrate", migrate_cmd),
+        ("pc", cmd_pastacheck), ("deep", cmd_deep),
+        ("now", cmd_now), ("burpboard", cmd_burpboard), ("kol", kol_cmd),
         # v43 — Multi-source + Rick features
         ("ts", cmd_twitter_scan), ("burp", cmd_hourly_burp),
         ("ticker", cmd_ticker_search), ("summary", cmd_channel_summary),
