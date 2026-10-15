@@ -2397,9 +2397,14 @@ def pumpfun_to_token(coin: Dict) -> Optional[Dict]:
         creator = coin.get("creator", "")
         is_graduated = bool(coin.get("raydium_pool"))
 
+        # v47: compute price from mcap / total supply (works for bonding curve)
+        total_supply = float(coin.get("total_supply", 0) or 0)
+        est_price = (mcap / total_supply) if (mcap > 0 and total_supply > 0) else 0
+
         return {
             "address": mint, "sym": sym, "name": name,
-            "price": 0,  # pump.fun doesn't give price in listing
+            "price": est_price,
+            "created": int(created_ts) if created_ts else 0,
             "fdv": mcap, "mcap": mcap, "liq": liq,
             "liq_ratio": 30 if mcap > 0 else 0,
             "ch5m": 0, "ch1h": 0, "ch6h": 0, "ch24h": 0,
@@ -2667,7 +2672,26 @@ async def full_token_scan(address: str) -> Dict:
         result = await dex_search_pairs(address)
         pairs = result
     if not pairs:
-        return {"error": "Token not found on DexScreener"}
+        # ── v47: PUMP.FUN DIRECT FALLBACK ──────────────────
+        # Brand-new bonding-curve launches often aren't indexed on
+        # DexScreener yet. Pump.fun's own API is authoritative.
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(
+                    f"https://frontend-api-v3.pump.fun/coins/{address}",
+                    headers=_PUMPFUN_HEADERS,
+                    timeout=aiohttp.ClientTimeout(total=8)
+                ) as r:
+                    if r.status == 200:
+                        coin = await r.json()
+                        if isinstance(coin, dict):
+                            tok = pumpfun_to_token(coin)
+                            if tok:
+                                logger.info(f"[CA SCAN] ${tok.get('sym','?')} found via pump.fun direct fallback")
+                                return tok
+        except Exception as e:
+            logger.debug(f"pumpfun fallback: {e}")
+        return {"error": "Token not found — may be brand new (retry in a minute) or not a Solana token"}
 
     p      = pairs[0]
     base   = p.get("baseToken", {})
