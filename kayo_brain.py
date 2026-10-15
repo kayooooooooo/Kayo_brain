@@ -177,6 +177,57 @@ def _seen_add(od: "OrderedDict[str, int]", key: str):
 def _seen_check(od: "OrderedDict[str, int]", key: str) -> bool:
     return key in od
 
+# ── v50: GLOBAL RE-ALERT GATE — kills repeat alerts ──────────────────
+# Dedup buckets were hourly (main) / 2h (heat, narrative) AND wiped on every
+# restart. Now: one gate for ALL scanners — a token can only re-alert after
+# a 6h cooldown AND a ±20% move since its last alert. Persisted in state.
+_realert_ts: Dict[str, float] = {}
+_realert_px: Dict[str, float] = {}
+REALERT_COOLDOWN_S = 6 * 3600
+REALERT_MOVE_PCT   = 0.20
+
+def _pair_price(p) -> float:
+    """Tolerant price extraction from a DexScreener/GT pair object."""
+    if not isinstance(p, dict):
+        return 0.0
+    v = p.get("priceUsd", p.get("price_usd"))
+    if isinstance(v, dict):
+        v = v.get("price")
+    try:
+        return float(v or 0)
+    except Exception:
+        return 0.0
+
+def _realert_prune(now: float):
+    if len(_realert_ts) > 4000:
+        cutoff = now - 7 * 86400
+        for k in [k for k, v in _realert_ts.items() if v < cutoff]:
+            _realert_ts.pop(k, None)
+            _realert_px.pop(k, None)
+
+def _realert_ok(addr: str, price: float = 0.0) -> bool:
+    """True if this token may be alerted now (new or 6h+20% re-alert)."""
+    now = time.time()
+    ts = _realert_ts.get(addr, 0)
+    if not ts:
+        _realert_ts[addr] = now
+        if price:
+            _realert_px[addr] = price
+        _realert_prune(now)
+        return True
+    if now - ts < REALERT_COOLDOWN_S:
+        return False
+    px = _realert_px.get(addr, 0)
+    if price and px and abs(price - px) / max(px, 1e-12) < REALERT_MOVE_PCT:
+        _realert_ts[addr] = now   # still flat — refresh clock, no re-alert
+        return False
+    _realert_ts[addr] = now
+    if price:
+        _realert_px[addr] = price
+    _realert_prune(now)
+    return True
+
+
 _save_lock = asyncio.Lock()
 
 async def _save():
@@ -195,6 +246,8 @@ async def _save():
             "knowledge_base": knowledge_base,
             "reminders": reminders,
             "seen_alert_ids": list(seen_alert_ids.keys())[-3000:],
+            "realert_ts": _realert_ts,
+            "realert_px": _realert_px,
             "ath_tracker": ath_tracker,
             "dropped_calls":  dropped_calls,
             "pattern_memory": pattern_memory,
@@ -258,6 +311,12 @@ async def _load():
         _saved_seen = d.get("seen_alert_ids", [])
         seen_alert_ids = OrderedDict()
         for sid in _saved_seen[-3000:]: seen_alert_ids[sid] = 1
+        global _realert_ts, _realert_px
+        _rt = d.get("realert_ts", {}) or {}
+        _rp = d.get("realert_px", {}) or {}
+        _cut = time.time() - 604800
+        _realert_ts = {k: float(v) for k, v in _rt.items() if isinstance(v, (int, float)) and v > _cut}
+        _realert_px = {k: float(v) for k, v in _rp.items() if k in _realert_ts}
         global _first_alert_seen, _token_watchers
         _first_alert_seen = set(d.get("first_alert_seen", []))
         _token_watchers = d.get("token_watchers", {})
@@ -267,7 +326,7 @@ async def _load():
         scanner_cooldowns = d.get("scanner_cooldowns", {})
         volume_snapshots  = d.get("volume_snapshots", {})
         last_scan_ts      = d.get("last_scan_ts", 0)
-        logger.info(f"✅ State loaded — {len(watchlist)} watched, {len(active_calls)} calls, {len(dropped_calls)} tracked drops (seen_alert_ids cleared for fresh session)")
+        logger.info(f"✅ State loaded — {len(watchlist)} watched, {len(active_calls)} calls, {len(dropped_calls)} tracked drops (re-alert gate armed: {len(_realert_ts)} tokens in cooldown)")
         # Prune dropped_calls older than 7 days so it doesn't block forever
         cutoff = time.time() - 604800
         dropped_calls = {k: v for k, v in dropped_calls.items() if v.get("time", 0) > cutoff}
@@ -1354,6 +1413,7 @@ _get_log: Dict[str, "defaultdict"] = defaultdict(lambda: __import__("collections
 _RATE_BUDGET = {
     "api.dexscreener.com": 50,   # documented ~60/min token endpoints
     "api.coingecko.com":   5,    # free no-key tier is ~5-15/min
+    "api.geckoterminal.com": 30, # free tier ~30/min — protect it like DS
 }
 
 def _get_host(url: str) -> str:
@@ -7151,6 +7211,8 @@ async def bg_main_scanner(app: Application):
                     pass  # holders API flaky — fail open
 
                 # Dedup
+                if not _realert_ok(addr, _pair_price(tok)): continue  # v50 re-alert gate
+
                 alert_id = hashlib.md5(f"{addr}:{alert_type}:{int(now/3600)}".encode()).hexdigest()[:16]
                 if _seen_check(seen_alert_ids, alert_id): continue
                 _seen_add(seen_alert_ids, alert_id)
@@ -7498,6 +7560,9 @@ async def bg_new_launch_scanner(app: Application):
                 addr  = (pd.get("baseToken") or {}).get("address", "")
                 if not addr or addr in blacklist: continue
 
+                if not _realert_ok(addr, _pair_price(pd)): continue  # v50 re-alert gate
+
+
                 alert_id = hashlib.md5(f"{addr}:newlaunch:{int(time.time()//86400)}".encode()).hexdigest()[:16]
                 if _seen_check(seen_alert_ids, alert_id): continue
 
@@ -7830,6 +7895,8 @@ async def bg_established_scanner(app: Application):
                 if not qualifies: continue
 
                 # Dedup
+                if not _realert_ok(addr): continue  # v50 re-alert gate
+
                 alert_id_est = hashlib.md5(f"{addr}:est:{est_type}:{int(now/3600)}".encode()).hexdigest()[:16]
                 if _seen_check(seen_alert_ids, alert_id_est): continue
                 _seen_add(seen_alert_ids, alert_id_est)
@@ -8052,6 +8119,8 @@ async def bg_heat_scanner(app: Application):
                 if ch1h < 2 and b1h < 3: continue  # need some actual price action or buys
 
                 # ── ALERT: DEAD TOKEN REVIVING ──
+                if not _realert_ok(addr): continue  # v50 re-alert gate
+
                 alert_id = hashlib.md5(f"{addr}:heat:{int(now/7200)}".encode()).hexdigest()[:16]
                 if _seen_check(seen_alert_ids, alert_id): continue
                 _seen_add(seen_alert_ids, alert_id)
@@ -8246,6 +8315,9 @@ async def bg_narrative_news_scanner(app: Application):
                         s1h  = int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0)
                         buy_pct = b1h / max(b1h+s1h, 1) * 100
                         if buy_pct < 52: continue
+
+                        if not _realert_ok(addr, _pair_price(p)): continue  # v50 re-alert gate
+
 
                         alert_id = hashlib.md5(f"{addr}:nar:{int(now//7200)}".encode()).hexdigest()[:16]
                         if _seen_check(seen_alert_ids, alert_id): continue
