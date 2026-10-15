@@ -2685,9 +2685,22 @@ async def _enrich_with_rugcheck(result: Dict) -> Dict:
                 result["top_holders"] = pcts
             if rc.get("totalHolders"):
                 result["holder_count"] = int(rc.get("totalHolders") or 0)
+            # v48b: REAL dev% = creatorBalance / total supply (both raw units)
             cb = float(rc.get("creatorBalance") or 0)
-            if 0 < cb < 100:
-                result["dev_pct"] = cb
+            supply = float((rc.get("token") or {}).get("supply") or 0)
+            if cb > 0 and supply > 0:
+                result["dev_pct"] = min(100.0, cb / supply * 100)
+            # v48b: insider clusters (replaces dead fresh-wallet metric source)
+            nets = rc.get("insiderNetworks") or []
+            if nets:
+                result["insider_clusters"] = len(nets)
+                result["insider_accounts"] = sum(int(n.get("activeAccounts") or 0) for n in nets)
+                ins_hold = sum(float(n.get("currentHolding") or 0) for n in nets)
+                result["insider_pct"] = min(100.0, (ins_hold / supply * 100) if supply > 0 else 0)
+            else:
+                result["insider_clusters"] = 0
+                result["insider_accounts"] = 0
+                result["insider_pct"] = 0
             score = rc.get("score_normalised") or rc.get("score") or 0
             if score:
                 result["rugcheck_score"] = score
@@ -2986,7 +2999,13 @@ def _build_rick_card(t: Dict, ai: str = "", is_first_alert: bool = False, watche
     aw = t.get("avg_wallet_age_weeks",0)
     tot_l = f"\U0001f91d Total: {hc}" + (f" \u00b7 avg {int(aw)}w old" if aw else "")
     bd_l = f"\u21b3 \U0001f4e6 {float(t.get('bundle_pct',0) or 0):.0f}% \U0001f3af {float(t.get('sniper_pct',0) or 0):.0f}% \U0001f464 {float(t.get('dev_pct',0) or 0):.1f}%"
-    fr_l = f"\U0001f33f Fresh 1D: {float(t.get('fresh_1d_pct',0) or 0):.0f}% \u00b7 7D: {float(t.get('fresh_7d_pct',0) or 0):.0f}%"
+    if t.get("insider_accounts") is not None and t.get("insider_accounts", 0) > 0:
+        fr_l = (f"\U0001f575\ufe0f Insiders: {t.get('insider_clusters',0)} clusters \u00b7 "
+                f"{t.get('insider_accounts',0)} accts \u00b7 {float(t.get('insider_pct',0) or 0):.1f}% supply")
+    elif t.get("insider_accounts") == 0:
+        fr_l = "\U0001f575\ufe0f Insiders: none detected"
+    else:
+        fr_l = f"\U0001f33f Fresh 1D: {float(t.get('fresh_1d_pct',0) or 0):.0f}% \u00b7 7D: {float(t.get('fresh_7d_pct',0) or 0):.0f}%"
     dp = t.get("pair_addr",addr)
     du = f"https://dexscreener.com/solana/{dp}"
     dfu = f"https://defined.fi/solana/{addr}"
