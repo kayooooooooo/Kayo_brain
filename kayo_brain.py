@@ -4742,6 +4742,101 @@ async def smartscan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await msg.edit_text(f"❌ Scan error: {e}")
 
+async def diag_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """Diagnose every data source from INSIDE the bot's server."""
+    msg = await u.effective_message.reply_text("🩺 Testing data sources... (15s)")
+    import time as _t
+
+    async def _probe(label: str, coro_fn, timeout: int = 12):
+        t0 = _t.time()
+        try:
+            r = await asyncio.wait_for(coro_fn(), timeout=timeout)
+            ms = int((_t.time() - t0) * 1000)
+            if r is True:
+                return f"✅ {label} — {ms}ms"
+            return f"🟡 {label} — {ms}ms (bad data: {str(r)[:40]})"
+        except asyncio.TimeoutError:
+            return f"⏱ {label} — TIMEOUT ({timeout}s)"
+        except Exception as e:
+            return f"❌ {label} — {type(e).__name__}: {str(e)[:60]}"
+
+    async def _ds():
+        async with aiohttp.ClientSession() as s:
+            async with s.get("https://api.dexscreener.com/latest/dex/search?q=SOL",
+                             timeout=aiohttp.ClientTimeout(total=10)) as r:
+                return r.status == 200
+
+    async def _gt():
+        async with aiohttp.ClientSession() as s:
+            async with s.get("https://api.geckoterminal.com/api/v2/networks?page=1",
+                             headers={"Accept": "application/json"},
+                             timeout=aiohttp.ClientTimeout(total=10)) as r:
+                return r.status == 200
+
+    async def _rc():
+        CA = "EnAtbbo1AZWmuXA5PH1Gn4UgGpiTzzmaGbJpLWgjpump"
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"https://api.rugcheck.xyz/v1/tokens/{CA}/report",
+                             timeout=aiohttp.ClientTimeout(total=10)) as r:
+                return r.status == 200
+
+    async def _gp():
+        CA = "EnAtbbo1AZWmuXA5PH1Gn4UgGpiTzzmaGbJpLWgjpump"
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                f"https://api.gopluslabs.io/api/v1/token_security/solana?contract_addresses={CA}",
+                timeout=aiohttp.ClientTimeout(total=10)) as r:
+                return r.status == 200
+
+    async def _cg():
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
+                timeout=aiohttp.ClientTimeout(total=10)) as r:
+                d = await r.json()
+                return bool(d.get("solana"))
+
+    async def _yh():
+        async with aiohttp.ClientSession() as s:
+            async with s.get(
+                "https://query1.finance.yahoo.com/v8/finance/chart/SOL-USD",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=aiohttp.ClientTimeout(total=10)) as r:
+                return r.status == 200
+
+    async def _tel():
+        me = await c.bot.get_me()
+        return bool(me)
+
+    results = await asyncio.gather(
+        _probe("Telegram API", _tel, 10),
+        _probe("DexScreener", _ds),
+        _probe("GeckoTerminal", _gt),
+        _probe("RugCheck", _rc),
+        _probe("GoPlus", _gp),
+        _probe("CoinGecko", _cg),
+        _probe("Yahoo Finance", _yh),
+        return_exceptions=True,
+    )
+    # AI tiers
+    ai_lines = []
+    try:
+        v = await asyncio.wait_for(ai_ask("Reply with the single word: ok", max_tokens=5), timeout=20)
+        ai_lines.append(f"✅ AI failover — replied ({len(v)} ch)")
+    except Exception as e:
+        ai_lines.append(f"❌ AI failover — {type(e).__name__}: {str(e)[:60]}")
+
+    out = ["🩺 *KAYO DIAGNOSTICS* — run from this server",
+           "━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
+    out += [str(r) for r in results] + ai_lines
+    n_ok = sum(1 for r in out if r.startswith("✅"))
+    n_bad = sum(1 for r in out if r.startswith("❌") or r.startswith("⏱"))
+    out.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    out.append(f"📊 {n_ok} OK · {n_bad} failing")
+    if n_bad:
+        out.append("Send this screenshot to your admin — shows what's blocked server-side.")
+    await msg.edit_text("\n".join(out), parse_mode="Markdown")
+
 async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     # Test AI live
     ai_live = "\u274c Not tested"
@@ -8469,6 +8564,7 @@ async def post_init(app: Application):
         # System
         BotCommand("autoresponder", "🤖 Toggle CA auto-scan"),
         BotCommand("status",        "⚙️ Bot health check"),
+        BotCommand("diag", "🩺 Data source diagnostics"),
         BotCommand("ping",          "📶 Latency check"),
         BotCommand("ath", "🏆 ATH leaderboard"),
         BotCommand("burpboard", "📊 BurpBoard top calls"),
@@ -9080,7 +9176,7 @@ def main():
         ("dubs", dubs_cmd), ("remindme", remindme_cmd),
         ("chart", chart_cmd), ("price", price_cmd),
         ("autoresponder", autoresponder_cmd),
-        ("smartscan", smartscan_cmd), ("status", status_cmd), ("ping", ping_cmd),
+        ("smartscan", smartscan_cmd), ("status", status_cmd), ("diag", diag_cmd), ("ping", ping_cmd),
         ("dev", cmd_devhistory), ("top", top_cmd), ("soc", soc_cmd),
         ("ath", cmd_ath), ("last", last_cmd), ("hot", hot_cmd),
         ("best", best_cmd), ("worst", worst_cmd),
