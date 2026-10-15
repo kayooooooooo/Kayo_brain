@@ -6904,8 +6904,10 @@ async def bg_followup_tracker(app: Application):
     """
     Tracks tokens Kayo dropped — fires celebratory or warning follow-ups.
     Checks every 5 minutes. Fires:
+    • 2x — "call confirmed, 2x from entry"
     • 5x — "heads up, this is 5x from my call"
     • 10x — "yo remember this? 10x already 🚀"
+    • 25x/50x/100x — "GOD TIER" mega milestones
     • Rug — "🚨 rug alert — the one I flagged earlier just died"
     Auto-expires entries older than 7 days.
     """
@@ -6940,6 +6942,30 @@ async def bg_followup_tracker(app: Application):
                 name = info.get("name", "")
                 chat = info.get("chat_id", GROUP_CHAT_ID)
                 age_since = _age(int(info.get("time", now) * 1000))
+
+                # ── v46: MEGA milestones — 25x / 50x / 100x ─────────────
+                _mega = 0
+                for _lvl in (100, 50, 25):
+                    if mult >= _lvl and not info.get(f"alerted_{_lvl}x"):
+                        _mega = _lvl
+                        break
+                if _mega:
+                    _mega_msg = (
+                        f"\U0001f31f *GOD TIER — ${sym} {_mega}x* \U0001f31f\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Kayo called it {age_since} ago at `{_price(entry)}` — now *{mult:.1f}x* \U0001f4b0\n"
+                        f"Entry: `{_price(entry)}` \u2192 Now: `{_price(cur_price)}`\n"
+                        f"MCap then: `{_usd(info.get('mcap_entry',0))}` \u2192 Now: `{_usd(cur_mcap)}`\n"
+                        f"`{addr}`"
+                    )
+                    try:
+                        await app.bot.send_message(chat, _mega_msg, parse_mode="Markdown",
+                                                   reply_markup=scan_buttons(addr, sym),
+                                                   disable_web_page_preview=True)
+                        dropped_calls[addr][f"alerted_{_mega}x"] = True
+                        asyncio.create_task(_save())
+                    except Exception as e:
+                        logger.debug(f"followup {_mega}x: {e}")
 
                 # ── 10x milestone ────────────────────────────────────────
                 if mult >= 10 and not info.get("alerted_10x"):
@@ -6993,6 +7019,25 @@ async def bg_followup_tracker(app: Application):
                         asyncio.create_task(_save())
                     except Exception as e:
                         logger.debug(f"followup 5x: {e}")
+
+                # ── v46: 2x milestone (early validation) ──────────────────
+                elif mult >= 2 and not info.get("alerted_2x") and not info.get("alerted_5x") and not info.get("alerted_10x"):
+                    msg_2x = (
+                        f"\u2705 *CALL CONFIRMED — ${sym} 2x*\n"
+                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"Called {age_since} ago at `{_price(entry)}` — now *{mult:.1f}x*\n"
+                        f"Current: `{_price(cur_price)}`  MCap: `{_usd(cur_mcap)}`\n"
+                        f"24h: {_pct(ch24h_now)}\n"
+                        f"`{addr}`"
+                    )
+                    try:
+                        await app.bot.send_message(chat, msg_2x, parse_mode="Markdown",
+                                                  reply_markup=scan_buttons(addr, sym),
+                                                  disable_web_page_preview=True)
+                        dropped_calls[addr]["alerted_2x"] = True
+                        asyncio.create_task(_save())
+                    except Exception as e:
+                        logger.debug(f"followup 2x: {e}")
 
                 # ── Rug / dump alert ─────────────────────────────────────
                 elif (mult < 0.15 or liq_now < 500 or ch24h_now < -80) and not info.get("alerted_rug"):
@@ -8775,49 +8820,6 @@ async def stock_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 
 
-
-
-async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
-    """Auto-scan when CA dropped. AI reply for other messages."""
-    if not u.effective_message or not u.effective_message.text: return
-    text = u.effective_message.text
-    chat_type = u.effective_chat.type
-    user_id = u.effective_user.id if u.effective_user else 0
-    cas = extract_cas(text)
-    if cas and chat_type in ("group","supergroup"):
-        settings = user_settings.get(user_id, {})
-        if settings.get("autoresponder_disabled", False): return
-        for ca in cas[:2]:
-            ca_key = f"autoscan:{ca}"
-            if _seen_check(seen_alert_ids, ca_key): continue
-            _seen_add(seen_alert_ids, ca_key)
-            try:
-                msg = await u.effective_message.reply_text(f"\U0001f50d Scanning `{ca[:8]}...`", parse_mode="Markdown")
-                t = await asyncio.wait_for(full_enhanced_scan(ca), timeout=25)
-                if t.get("error"):
-                    await msg.edit_text(f"\u274c {t['error']}"); continue
-                _track_scan(t, user_id)
-                btns = scan_buttons(ca, t.get("sym",""), t.get("pair_addr",""))
-                sent = await msg.edit_text(build_scan_card(t,""), parse_mode="Markdown", reply_markup=btns, disable_web_page_preview=True)
-                async def _ai(t=t,sent=sent,btns=btns):
-                    try:
-                        v = await asyncio.wait_for(ai_ask(f"Quick take on ${t.get('sym','?')}: MCap {_usd(t.get('mcap',0))}, 1h {_pct(t.get('ch1h',0))}. Worth aping? 1-2 sentences.", fallback="", max_tokens=150, inject_market=True), timeout=12)
-                        if v: await sent.edit_text(build_scan_card(t,v), parse_mode="Markdown", reply_markup=btns, disable_web_page_preview=True)
-                    except Exception: pass
-                asyncio.create_task(_ai())
-            except asyncio.TimeoutError: pass
-            except Exception as e: logger.debug(f"auto-scan: {e}")
-        return
-    now = time.time()
-    if now - _ai_reply_cooldown.get(user_id, 0) < 10: return
-    if len(text.strip()) < 3: return
-    _ai_reply_cooldown[user_id] = now
-    if chat_type in ("group","supergroup"):
-        if not user_settings.get(user_id,{}).get("smart_reply",True): return
-    try:
-        v = await asyncio.wait_for(ai_ask(text, fallback="", max_tokens=300, inject_market=True), timeout=15)
-        if v: await u.effective_message.reply_text(v)
-    except Exception: pass
 
 
 async def _dismiss_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
