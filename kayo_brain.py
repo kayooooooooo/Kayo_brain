@@ -6435,7 +6435,7 @@ async def bg_main_scanner(app: Application):
     Uses persisted cooldowns (survives restarts) + volume snapshots.
     """
     await asyncio.sleep(30)
-    global last_scan_ts
+    global last_scan_ts, seen_alert_ids
 
     # Use persisted cooldowns — survives restarts
     if "main" not in scanner_cooldowns:
