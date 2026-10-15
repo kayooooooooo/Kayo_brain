@@ -141,10 +141,10 @@ def _feed_add(t: dict):
 
 def _build_live_feed_context() -> str:
     if not _live_feed: return ""
-    out = ["[LIVE SCANNER FEED — tokens Kayo is watching, mcap under $300K]:"]
+    out = ["[LIVE SCANNER FEED — tokens Kayo is watching, mcap under $2M]:"]
     for t in _live_feed[:15]:
         mcap = t["mcap"]
-        if mcap > 500_000: continue
+        if mcap > 2_000_000: continue   # v45: $2M cap
         plat = "Pump" if t.get("is_pumpfun") else ("Raydium" if t.get("is_graduated") else "DEX")
         nar = f" #{t['narrative']}" if t.get("narrative") else ""
         ch = t.get("ch1h",0); ch_s = f" {ch:+.0f}% 1h" if ch else ""
@@ -1013,7 +1013,7 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         "6. General knowledge: smart friend who gives real answers, no disclaimers. "
         "7. Match energy. Hyped = hyped reply. Chill = chill. "
         "8. No filler. No Great question. No As an AI. Just answer. "
-        "9. When asked what to trade/whats hot: ONLY use tokens from LIVE SCANNER FEED injected below. Max $500K mcap. Never default to BONK/PEPE/WIF. "
+        "9. When asked what to trade/whats hot: ONLY use tokens from LIVE SCANNER FEED injected below. Max $2M mcap. Never default to BONK/PEPE/WIF. "
         "FORMAT: Plain text mostly. *bold* only for key crypto numbers."
     )
     system_msg = {"role": "system", "content": system_content}
@@ -3579,7 +3579,7 @@ async def narrative_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         p for p in pairs
         if p.get("chainId") == "solana"
         and float((p.get("liquidity") or {}).get("usd", 0) or 0) > 2000
-        and float(p.get("fdv", 0) or 0) <= 500_000   # hard $500k cap
+        and float(p.get("fdv", 0) or 0) <= 2_000_000   # v45: $2M cap
         and float(p.get("fdv", 0) or 0) >= 3_000
     ]
     pairs.sort(key=lambda p: float((p.get("volume") or {}).get("h24", 0) or 0), reverse=True)
@@ -4508,7 +4508,7 @@ async def smartscan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
             fdv = tok["fdv"]
             liq = tok["liq"]
             buy_pct = tok["buy_pct"]
-            if fdv <= 0 or fdv > 300_000 or liq < 300 or buy_pct < 48: continue
+            if fdv <= 0 or fdv > 2_000_000 or liq < 300 or buy_pct < 48: continue
             hits.append(tok)
 
         hits.sort(key=lambda t: (t["ch1h"] + t["buy_pct"]/2), reverse=True)
@@ -6187,7 +6187,7 @@ async def migrate_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 async def bg_migrate_monitor(app):
     """
     Every 5 min: detect new Pump.fun → Raydium migrations.
-    Alerts group when a token graduates with MCap < $500k.
+    Alerts group when a token graduates with MCap < $2M.
     """
     await asyncio.sleep(300)
     seen_pools: Set[str] = set()
@@ -6207,7 +6207,7 @@ async def bg_migrate_monitor(app):
                 sym  = coin.get("symbol", "???")
                 name = coin.get("name", "")[:20]
                 mcap = float(coin.get("usd_market_cap", 0) or 0)
-                if mcap > 300_000 or mcap < 1000: continue
+                if mcap > 2_000_000 or mcap < 1000: continue   # v45: $2M cap
 
                 alert = (
                     f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -6425,10 +6425,44 @@ async def quick_rug_check(addr: str) -> Dict:
         pass
     return result
 
+
+async def hard_quality_gate(addr: str, sym: str, is_pumpfun: Optional[bool] = None) -> bool:
+    """
+    v45 HARD QUALITY GATE — every discovery alert must pass:
+      1. LP LOCKED. Non-pump.fun tokens: GoPlus must CONFIRM the LP is locked.
+         No data = unverifiable = NO CALL. Pump.fun tokens (mint ends 'pump')
+         are exempt — bonding-curve liquidity is protocol-held and graduation
+         LP is burned automatically.
+      2. TOP-10 HOLDERS ≤ 30%. Via Solscan (fail-open if the API is down).
+    """
+    if is_pumpfun is None:
+        is_pumpfun = addr.endswith("pump")
+    if not is_pumpfun:
+        try:
+            rug = await asyncio.wait_for(quick_rug_check(addr), timeout=12)
+            if rug.get("is_rug"):
+                logger.info(f"[GATE] ${sym} skipped — rug: {rug.get('red_flags', [])}")
+                return False
+            if not rug.get("lp_locked"):
+                logger.info(f"[GATE] ${sym} skipped — LP not locked")
+                return False
+        except Exception:
+            logger.info(f"[GATE] ${sym} skipped — LP lock unverifiable")
+            return False
+    try:
+        holders = await asyncio.wait_for(fetch_token_holders(addr), timeout=10)
+        top10 = float(holders.get("top10_pct", 0) or 0)
+        if top10 > 30:
+            logger.info(f"[GATE] ${sym} skipped — top10 hold {top10:.0f}%")
+            return False
+    except Exception:
+        pass  # holders API flaky — fail open
+    return True
+
 async def bg_main_scanner(app: Application):
     """
     v44 PRIMARY SCANNER — every 30s
-    Mcap-band scanning ($5k-$300k, mostly <$100k) — NO keyword categories.
+    Mcap-band scanning ($5k-$2M) — NO keyword categories.
     Sources: GeckoTerminal (new+trending+mcap pools) + DexScreener (profiles+boosts)
              + Pump.fun (latest+trending) + Birdeye (new+trending)
     Detects: New | Graduation | Pump | Gem | Whale | Momentum | Revival
@@ -6607,11 +6641,12 @@ async def bg_main_scanner(app: Application):
                 price = float(tok.get("price", 0) or 0)
                 pair_addr = tok.get("pair_addr", "")
 
-                # v44: MCAP-BAND FILTER — $5k to $300k (Rick Bot style)
+                # v45: MCAP-BAND FILTER — $5k to $2M
                 eff_cap = max(fdv, mcap, liq * 3)
-                if eff_cap > 300_000: continue          # v44: tightened from $500k to $300k
+                if eff_cap > 2_000_000: continue         # v45: $2M cap (was $300k)
                 if eff_cap < 5_000: continue             # below $5k = rug/dust
                 if liq < 2_000: continue                  # need $2k+ liquidity
+                if v1h < 5_000: continue                  # v45: need $5k+ 1h volume
 
                 # ── v44: VOLUME SNAPSHOT FOR DEAD-TOKEN DETECTION ──
                 # Update volume snapshot for every token we see
@@ -6651,14 +6686,14 @@ async def bg_main_scanner(app: Application):
                 is_fresh = (b1h + s1h) < 5  # brand-new token
 
                 # ── PUMP.FUN GRADUATION — low bar: $1-2k vol, few buys ──
-                if is_pumpfun and is_graduated and eff_cap <= 300_000:
+                if is_pumpfun and is_graduated and eff_cap <= 2_000_000:
                     # v44: Very low bar for graduates — catch seconds-old graduations
                     if v1h >= 1000 or b1h >= 2:  # $1k+ volume OR 2+ buys
                         alert_type = "graduation"
 
                 # ── PUMP.FUN NEW LAUNCH — also low bar ──
                 elif is_pumpfun and not is_graduated:
-                    if mcap >= 5_000 and mcap <= 300_000 and not pairs_map[addr].get("is_banned", False):
+                    if mcap >= 5_000 and mcap <= 2_000_000 and not pairs_map[addr].get("is_banned", False):
                         if pf_desc or pf_reply_count >= 3 or mcap >= 10_000:
                             alert_type = "new"
 
@@ -6718,11 +6753,24 @@ async def bg_main_scanner(app: Application):
                         if rug.get("is_rug"):
                             logger.info(f"[RUG FILTER] ${sym} skipped — {rug.get('red_flags', [])}")
                             continue
+                        if not rug.get("lp_locked"):
+                            logger.info(f"[LP GATE] ${sym} skipped — LP not locked")
+                            continue
                         tok_dict_rug = rug
                     except Exception:
                         tok_dict_rug = None
                 else:
                     tok_dict_rug = None
+
+                # ── v45: TOP-10 HOLDER GATE — must be ≤ 30% ──
+                try:
+                    holders = await asyncio.wait_for(fetch_token_holders(addr), timeout=10)
+                    _top10 = float(holders.get("top10_pct", 0) or 0)
+                    if _top10 > 30:
+                        logger.info(f"[HOLDER GATE] ${sym} skipped — top10 hold {_top10:.0f}%")
+                        continue
+                except Exception:
+                    pass  # holders API flaky — fail open
 
                 # Dedup
                 alert_id = hashlib.md5(f"{addr}:{alert_type}:{int(now/3600)}".encode()).hexdigest()[:16]
@@ -7047,9 +7095,9 @@ async def bg_new_launch_scanner(app: Application):
                 v1h_new  = float((pd.get("volume") or {}).get("h1", 0) or 0)
                 eff_fdv = max(fdv, liq * 3)
                 if liq < 2_000: continue                          # need $2k+ liquidity — no rugs
-                if eff_fdv > 300_000: continue                    # v44: $300k cap (was $500k)
+                if eff_fdv > 2_000_000: continue                 # v45: $2M cap
                 if eff_fdv < 5_000: continue                     # below $5k = dust/rug
-                if v1h_new and v1h_new < 500: continue             # need some volume
+                if v1h_new < 5_000: continue                      # v45: need $5k+ 1h volume
 
                 # Scoring
                 score = 0
@@ -7081,6 +7129,10 @@ async def bg_new_launch_scanner(app: Application):
 
                 _seen_add(seen_alert_ids, alert_id)
                 asyncio.create_task(_save())
+
+                # ── v45: QUALITY GATE — LP locked + top10 ≤ 30% ──
+                if not await hard_quality_gate(addr, sym):
+                    continue
 
                 tw_link = next((lk.get("url", "") for lk in links if lk.get("type") == "twitter"), "")
                 tg_link = next((lk.get("url", "") for lk in links if lk.get("type") == "telegram"), "")
@@ -7291,11 +7343,12 @@ async def bg_established_scanner(app: Application):
                 b5m  = int(tok.get("b5m", 0) or 0)
                 s5m  = int(tok.get("s5m", 0) or 0)
 
-                # v44: MCAP FILTER — $5k to $300k
+                # v45: MCAP FILTER — $5k to $2M
                 eff_cap = max(fdv, mcap, liq * 3)
-                if eff_cap > 300_000: continue
+                if eff_cap > 2_000_000: continue
                 if eff_cap < 5_000: continue
                 if liq < 2_000: continue
+                if v1h < 5_000: continue          # v45: need $5k+ 1h volume
 
                 # v44: NO AGE CEILING — scan old AND new tokens
                 # Just need >2h old to avoid duplicating the main scanner
@@ -7360,6 +7413,10 @@ async def bg_established_scanner(app: Application):
 
                 cd[addr] = now  # persisted cooldown
                 asyncio.create_task(_save())
+
+                # ── v45: QUALITY GATE — LP locked + top10 ≤ 30% ──
+                if not await hard_quality_gate(addr, sym):
+                    continue
 
                 nar = detect_narrative(f"{name} {sym}")
                 liq_ratio = liq / max(fdv, 1) * 100
@@ -7536,9 +7593,9 @@ async def bg_heat_scanner(app: Application):
                 created = int(tok.get("created", 0) or 0)
                 age_min = (now * 1000 - created) / 60000 if created else 99999
 
-                # v44: MCAP FILTER
+                # v45: MCAP FILTER — $5k to $2M
                 eff_cap = max(fdv, mcap, liq * 3)
-                if eff_cap > 300_000: continue
+                if eff_cap > 2_000_000: continue
                 if eff_cap < 5_000: continue
                 if liq < 2_000: continue
 
@@ -7567,7 +7624,7 @@ async def bg_heat_scanner(app: Application):
                 if age_min < 1440 and created > 0: continue  # must be > 1 day old
 
                 # Fresh spike: volume jumped from near-zero to $2k+
-                if v1h < 2000: continue
+                if v1h < 5_000: continue           # v45: $5k+ 1h volume
                 if buy_pct < 50: continue
                 if ch1h < 2 and b1h < 3: continue  # need some actual price action or buys
 
@@ -7584,6 +7641,10 @@ async def bg_heat_scanner(app: Application):
                     "vol_1h": v1h, "vol_24h": v24h, "mcap": eff_cap,
                     "sym": sym, "ts": now, "ch1h": ch1h,
                 }
+
+                # ── v45: QUALITY GATE — LP locked + top10 ≤ 30% ──
+                if not await hard_quality_gate(addr, sym):
+                    continue
 
                 nar = detect_narrative(f"{name} {sym}")
                 price = float(tok.get("price", 0) or 0)
@@ -7753,7 +7814,9 @@ async def bg_narrative_news_scanner(app: Application):
                         if not addr or addr in blacklist: continue
                         fdv  = float(p.get("fdv", 0) or 0)
                         liq  = float((p.get("liquidity") or {}).get("usd", 0) or 0)
-                        if not (5_000 <= fdv <= 300_000) or liq < 2_000: continue
+                        if not (5_000 <= fdv <= 2_000_000) or liq < 2_000: continue   # v45: $2M cap
+                        _v1h = float((p.get("volume") or {}).get("h1", 0) or 0)
+                        if _v1h < 5_000: continue   # v45: $5k+ 1h volume
                         ch1h = float((p.get("priceChange") or {}).get("h1", 0) or 0)
                         if ch1h < 5: continue
                         b1h  = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
@@ -7799,6 +7862,10 @@ async def bg_narrative_news_scanner(app: Application):
                             "pair_addr": p.get("pairAddress", ""),
                             "mscore": min(100, int(abs(ch1h) + buy_pct/2 + vs*10)),
                         }
+                        # ── v45: QUALITY GATE — LP locked + top10 ≤ 30% ──
+                        if not await hard_quality_gate(addr, sym):
+                            continue
+
                         try:
                             await send_scan_card_with_image(
                                 app.bot, GROUP_CHAT_ID, tok, ai_why,
@@ -7864,7 +7931,7 @@ async def bg_trending_metas_scanner(app: Application):
                 await asyncio.sleep(120)
                 continue
 
-            # ── Filter: sub-$500k, real buyers, positive momentum ──
+            # ── Filter: sub-$2M, real buyers, positive momentum ──
             candidates = []
             seen_in_this_run: set = set()
 
@@ -7892,7 +7959,8 @@ async def bg_trending_metas_scanner(app: Application):
                 sym     = tok.get("sym", "?")
                 nar     = detect_narrative(f"{tok.get('name','')} {sym}")
 
-                if not (5_000 < fdv <= 300_000):  continue
+                if not (5_000 < fdv <= 2_000_000):  continue   # v45: $2M cap
+                if float(tok.get("v1h", 0) or 0) < 5_000: continue   # v45: $5k+ 1h volume
                 if liq < 2_000:                     continue
                 if buy_pct < 52:                   continue
                 if ch1h < 3:                       continue
@@ -7923,7 +7991,7 @@ async def bg_trending_metas_scanner(app: Application):
 
             # ── Build and send the card ──
             lines_out = [
-                "\U0001f525 *TRENDING META — DEGEN PLAYS* _(sub-$500k only)_",
+                "\U0001f525 *TRENDING META — DEGEN PLAYS* _(sub-$2M only)_",
                 "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             ]
             for ch, addr, sym, fdv, liq, bp, nar in top:
