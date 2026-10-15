@@ -12,6 +12,7 @@
 
 import asyncio, logging, re, time, json, os, threading, hashlib
 from collections import defaultdict, OrderedDict
+import random
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Set
 
@@ -35,6 +36,8 @@ BIRDEYE_API_KEY = os.environ.get("BIRDEYE_API_KEY", "")
 GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY", "")
 GROQ_API_KEY       = os.environ.get("GROQ_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+# v49: free CoinGecko demo key (coingecko.com/en/developers) — beats the shared-IP limit
+CG_DEMO_API_KEY   = os.environ.get("CG_DEMO_API_KEY", "")
 REDIS_URL          = os.environ.get("REDIS_URL", "")
 TWITTER_AUTH_TOKEN = os.environ.get("TWITTER_AUTH_TOKEN", "")
 STATE_FILE         = "kayo_state.json"
@@ -1342,15 +1345,73 @@ def _safe_md(text: str) -> str:
 # ═══════════════════════════════════════════════════════════════
 _DSX = "https://api.dexscreener.com"
 
-async def _get(url: str, timeout: int = 10):
-    async with aiohttp.ClientSession() as s:
+# ── v49: rate-aware fetch — the Render IP was getting rate-limited ──
+# Per-host rolling 60s budgets. 429s back off and retry once.
+# 60s response cache kills the biggest waste: scanners refetching the
+# same endpoints every cycle.
+_get_cache: Dict[str, tuple] = {}
+_get_log: Dict[str, "defaultdict"] = defaultdict(lambda: __import__("collections").deque(maxlen=80))
+_RATE_BUDGET = {
+    "api.dexscreener.com": 50,   # documented ~60/min token endpoints
+    "api.coingecko.com":   5,    # free no-key tier is ~5-15/min
+}
+
+def _get_host(url: str) -> str:
+    try:
+        return url.split("/")[2]
+    except Exception:
+        return ""
+
+async def _get(url: str, timeout: int = 10, cache_s: int = 60):
+    now = time.time()
+
+    # 1. response cache
+    cached = _get_cache.get(url)
+    if cached and (now - cached[0]) < cache_s:
+        return cached[1]
+
+    host = _get_host(url)
+    budget = _RATE_BUDGET.get(host)
+    dq = _get_log[host] if budget else None
+
+    # 2. per-host budget — wait for the window instead of hammering
+    if budget:
+        while dq and (now - dq[0]) > 60:
+            dq.popleft()
+        if len(dq) >= budget:
+            wait = max(0.05, 60 - (now - dq[0]) + 0.1)
+            logger.info(f"[THROTTLE] {host} at budget ({budget}/min) — waiting {wait:.1f}s")
+            await asyncio.sleep(wait)
+        now = time.time()
+        dq.append(now)
+
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+    if host == "api.coingecko.com" and CG_DEMO_API_KEY:
+        headers["x-cg-demo-api-key"] = CG_DEMO_API_KEY
+
+    for attempt in (1, 2):
         try:
-            async with s.get(url, timeout=aiohttp.ClientTimeout(total=timeout),
-                             headers={"User-Agent": "Mozilla/5.0"}) as r:
-                if r.status == 200:
-                    return await r.json()
+            async with aiohttp.ClientSession() as s:
+                async with s.get(url, timeout=aiohttp.ClientTimeout(total=timeout),
+                                 headers=headers) as r:
+                    if r.status == 200:
+                        d = await r.json()
+                        if len(_get_cache) > 500:  # prune oldest
+                            for k in list(_get_cache)[:100]:
+                                del _get_cache[k]
+                        _get_cache[url] = (now, d)
+                        return d
+                    if r.status == 429 and attempt == 1:
+                        back = 2.0 + random.random() * 3.0
+                        logger.info(f"[429] {host} rate-limited — backoff {back:.1f}s")
+                        await asyncio.sleep(back)
+                        continue
+                    logger.info(f"GET {url} -> HTTP {r.status}")
+                    return None
         except Exception as e:
             logger.debug(f"GET {url}: {e}")
+            return None
     return None
 
 async def dex_pairs_by_token(addr: str) -> List[Dict]:
@@ -3616,7 +3677,7 @@ async def runners_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     top = runners[:10]
 
     if not top:
-        await msg.edit_text("😴 No sub-$500k runners right now. Market is quiet."); return
+        await msg.edit_text("😴 No runners under $2M right now. Market is quiet."); return
     add_xp(u.effective_user.id, 3)
     out_lines = [f"🏃 *TOP SOLANA RUNNERS — 1H*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n_{len(all_toks)} coins scanned_"]
     for i, tok in enumerate(top, 1):
