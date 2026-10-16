@@ -2825,6 +2825,8 @@ async def _enrich_with_rugcheck(result: Dict) -> Dict:
             # v48b: REAL dev% = creatorBalance / total supply (both raw units)
             cb = float(rc.get("creatorBalance") or 0)
             supply = float((rc.get("token") or {}).get("supply") or 0)
+            if supply > 0:
+                result["supply_total"] = supply
             if cb > 0 and supply > 0:
                 result["dev_pct"] = min(100.0, cb / supply * 100)
             # v48b: insider clusters (replaces dead fresh-wallet metric source)
@@ -3403,9 +3405,9 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     buf.seek(0)
     return buf
 
-async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", reply_markup=None, alert_type: str = "", reply_to: int = 0):
+async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", reply_markup=None, alert_type: str = "", reply_to: int = 0, pro: bool = False):
     """Send a scan card as both image + text (Rick Bot style)."""
-    text_card = build_scan_card(t, ai) if not alert_type else build_alert_card(t, alert_type, ai)
+    text_card = build_ca_card(t, ai) if pro else (build_scan_card(t, ai) if not alert_type else build_alert_card(t, alert_type, ai))
 
     # Try to generate and send image
     img_buf = generate_scan_card_image(t, ai)
@@ -3505,6 +3507,112 @@ def _rick_buttons(ca:str, sym:str="", pair_addr:str="") -> InlineKeyboardMarkup:
 _first_alert_seen: set = set()
 _token_watchers: Dict[str, int] = {}
 
+
+
+
+def build_ca_card(t: Dict, ai: str = "") -> str:
+    """v52: 'Pro' reference layout for CA-drop scans (and refresh).
+    Matches the reference card: header/price/supply/1H-B-S/ATH/socials/
+    security block (Top10, TH, Dev, insiders, LP, DEX Paid)/CA footer."""
+    addr = t.get("address", t.get("addr", ""))
+    sym  = t.get("sym", "?")
+    name = t.get("name", "") or sym
+    mcap = float(t.get("mcap", 0) or t.get("fdv", 0) or 0)
+    price= float(t.get("price", 0) or 0)
+    liq  = float(t.get("liq", 0) or 0)
+    v1h  = float(t.get("v1h", 0) or 0)
+    ch1h = float(t.get("ch1h", 0) or 0)
+    ch24h= float(t.get("ch24h", 0) or 0)
+    watchers = int(_token_watchers.get(addr, 0) or 0)
+
+    # Header: name ($SYM) 🚀 🍃age 👀watchers
+    pump = " \U0001f680" if ch1h >= 5 else ""
+    sym_clean = str(sym).lstrip("$")
+    hdr = (f"\U0001f50e *{name} (${sym_clean})*{pump} "
+           f"\U0001f33f {_age(t.get('created',0))}")
+    if watchers > 0:
+        hdr += f" \U0001f440{watchers}"
+    plat_e, plat_t = _plat(t)
+    L = [hdr, f"{plat_e} {plat_t}", ""]
+
+    # Price block
+    if price >= 0.01: ps = f"{price:.6f}"
+    elif price >= 0.0001: ps = f"{price:.8f}"
+    else: ps = f"{price:.10f}"
+    L.append(f"\U0001f4b0 USD: ${ps} ({_pct(ch24h)} / 24h)")
+    # supply from MC/price — self-consistent (RugCheck raw units include decimals)
+    sup = (mcap / price) if (mcap > 0 and price > 0) else 0
+    if sup >= 1e9: sup_s = f" \U0001f4e6 Sup: {sup/1e9:.1f}B"
+    elif sup >= 1e6: sup_s = f" \U0001f4e6 Sup: {sup/1e6:.1f}M"
+    elif sup > 0: sup_s = f" \U0001f4e6 Sup: {int(sup):,}"
+    else: sup_s = ""
+    L.append(f"\U0001f3e6 MC: {_usd(mcap)} \U0001f4ca Vol: {_usd(v1h)} (1h) \U0001f4a7 Liq: {_usd(liq)}{sup_s}")
+    L.append(f"\U0001f4c8 1H: {_pct(ch1h)} \U0001f535 B {int(t.get('b1h',0) or 0)} \U0001f7e0 S {int(t.get('s1h',0) or 0)}")
+    ath = float(t.get("ath_24h", 0) or 0)
+    if ath > 0 and price > 0 and ath >= price:
+        drop = (1 - price / ath) * 100
+        if mcap > 0:
+            ath_mc = mcap * (ath / price)
+            L.append(f"\U0001f3d4 24h High MC: {_usd(ath_mc)} ({drop:.0f}% below high)")
+        else:
+            L.append(f"\U0001f3d4 24h High: ${ath:.10f} ({drop:.0f}% below)")
+    L.append("")
+
+    # Socials
+    soc = []
+    if t.get("tw_link"):  soc.append(f"[X]({t['tw_link']})")
+    if t.get("web_link"): soc.append(f"[Web]({t['web_link']})")
+    if t.get("tg_link"):  soc.append(f"[TG]({t['tg_link']})")
+    dp = t.get("pair_addr") or addr
+    soc.append(f"[Chart]({'https://dexscreener.com/solana/' + str(dp)})")
+    if soc:
+        L.append("\U0001f517 " + " \u00b7 ".join(soc))
+        L.append("")
+
+    # Security block
+    L.append("\u2501\u2501\u2501 SECURITY \u2501\u2501\u2501")
+    ths = t.get("top_holders", []) or []
+    hc  = int(t.get("holder_count", 0) or 0)
+    if ths:
+        L.append(f"\U0001f3af Top 10: {sum(ths[:10]):.0f}% | {hc} (total)")
+        L.append("\U0001f465 TH: " + "|".join(f"{h:.1f}" for h in ths[:5]))
+    else:
+        L.append(f"\U0001f3af Top 10: \u2014 | {hc} (total)")
+    devp = float(t.get("dev_pct", 0) or 0)
+    dev_usd = devp / 100 * mcap if mcap > 0 else 0
+    big = sum(1 for h in ths if mcap > 0 and h / 100 * mcap >= 100_000)
+    dev_l = f"\U0001f9d1\u200d\U0001f4bb Dev: {devp:.1f}%"
+    if dev_usd > 0: dev_l += f" (~{_usd(dev_usd)})"
+    if ths and mcap > 0: dev_l += f" | {big} \u2265$100K"
+    L.append(dev_l)
+    if (t.get("insider_accounts") or 0) > 0:
+        L.append(f"\U0001f575\ufe0f Insiders: {t.get('insider_clusters',0)} clusters \u00b7 "
+                 f"{t.get('insider_accounts',0)} accts \u00b7 {float(t.get('insider_pct',0) or 0):.1f}%")
+    elif t.get("insider_accounts") is not None:
+        L.append("\U0001f575\ufe0f Insiders: none detected")
+    if t.get("lp_locked"):
+        lp = "\U0001f512 LP Locked"
+    elif t.get("is_pumpfun") or "pump" in plat_t.lower() or "pump" in str(t.get("platform","")).lower():
+        lp = "\U0001f513 Pump.fun BC (protocol-held)"
+    else:
+        lp = "\u26a0\ufe0f LP NOT locked"
+    hon = " \u00b7 \U0001f41a HONEYPOT" if t.get("is_honeypot") else ""
+    tax = f" \u00b7 Tax {float(t.get('buy_tax',0) or 0):.0f}/{float(t.get('sell_tax',0) or 0):.0f}%"
+    L.append(f"{lp}{hon}{tax}")
+    if t.get("boost_active"):
+        L.append("\u2705 DEX Paid (boosted)")
+    rf = t.get("red_flags") or []
+    if rf:
+        L.append("\U0001f6a9 " + " \u00b7 ".join(str(x) for x in rf[:3]))
+    L.append("")
+
+    # Footer
+    L.append(f"`{addr}`")
+    kt = t.get("known_wallet_tags", [])
+    if kt: L.append("\U0001f3f7 " + "\u00b7".join(str(x) for x in kt))
+    if ai and ai.strip():
+        L.append(f"\n\n\U0001f9e0 {ai}")
+    return "\n".join(L).strip()
 
 def build_scan_card(t: Dict, ai: str = "") -> str:
     """Rick Bot format card."""
@@ -3630,7 +3738,7 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await msg.delete()
     sent = await send_scan_card_with_image(
         u.effective_message.bot, u.effective_chat.id, t, "",
-        reply_markup=buttons
+        reply_markup=buttons, pro=True
     )
     if getattr(sent, "message_id", None):
         alert_msg_ids.setdefault(addr, sent.message_id); _alert_ids_prune()
@@ -5215,13 +5323,13 @@ async def handle_refresh_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
     try:
         sent_r = await send_scan_card_with_image(
             query.message.bot, query.message.chat_id, t, ai_verdict,
-            reply_markup=btns, reply_to=query.message.message_id
+            reply_markup=btns, reply_to=query.message.message_id, pro=True
         )
         if getattr(sent_r, "message_id", None):
             alert_msg_ids.setdefault(addr, sent_r.message_id)
     except Exception:
         await query.message.reply_text(
-            build_scan_card(t, ai_verdict), parse_mode="Markdown",
+            build_ca_card(t, ai_verdict), parse_mode="Markdown",
             reply_markup=btns, disable_web_page_preview=True
         )
 
@@ -5423,7 +5531,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                 await scanning_msg.delete()
                 sent = await send_scan_card_with_image(
                     u.effective_message.bot, u.effective_chat.id, t, "",
-                    reply_markup=buttons
+                    reply_markup=buttons, pro=True
                 )
                 if getattr(sent, "message_id", None):
                     alert_msg_ids.setdefault(ca, sent.message_id); _alert_ids_prune()
