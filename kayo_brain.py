@@ -120,6 +120,16 @@ _ai_reply_cooldown: dict           = {}  # uid → last AI reply ts (group rate-
 # BUG FIX: Use OrderedDict as a bounded ordered set so we can evict
 # the OLDEST entries (not random ones like plain set).
 seen_alert_ids:  "OrderedDict[str, int]" = OrderedDict()  # key=id, value=timestamp
+# ── v51: alert thread anchors — updates REPLY to the original card ──
+alert_msg_ids: "OrderedDict[str, int]" = OrderedDict()  # addr → original alert card msg id
+
+def _reply_to(addr: str):
+    """Original alert card message id for this token — None if unknown."""
+    return alert_msg_ids.get(addr) or None
+
+def _alert_ids_prune():
+    while len(alert_msg_ids) > 3000:
+        alert_msg_ids.popitem(last=False)
 
 _live_feed: list = []
 _LIVE_FEED_MAX = 30
@@ -247,6 +257,7 @@ async def _save():
             "reminders": reminders,
             "seen_alert_ids": list(seen_alert_ids.keys())[-3000:],
             "realert_ts": _realert_ts,
+            "alert_msg_ids": list(alert_msg_ids.items())[-3000:],
             "realert_px": _realert_px,
             "ath_tracker": ath_tracker,
             "dropped_calls":  dropped_calls,
@@ -311,6 +322,11 @@ async def _load():
         _saved_seen = d.get("seen_alert_ids", [])
         seen_alert_ids = OrderedDict()
         for sid in _saved_seen[-3000:]: seen_alert_ids[sid] = 1
+        global _realert_ts, _realert_px, alert_msg_ids
+        alert_msg_ids = OrderedDict()
+        for _a, _mid in (d.get("alert_msg_ids") or [])[-3000:]:
+            if isinstance(_a, str) and isinstance(_mid, int):
+                alert_msg_ids[_a] = _mid
         global _realert_ts, _realert_px
         _rt = d.get("realert_ts", {}) or {}
         _rp = d.get("realert_px", {}) or {}
@@ -3387,7 +3403,7 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     buf.seek(0)
     return buf
 
-async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", reply_markup=None, alert_type: str = ""):
+async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", reply_markup=None, alert_type: str = "", reply_to: int = 0):
     """Send a scan card as both image + text (Rick Bot style)."""
     text_card = build_scan_card(t, ai) if not alert_type else build_alert_card(t, alert_type, ai)
 
@@ -3395,29 +3411,31 @@ async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", re
     img_buf = generate_scan_card_image(t, ai)
     if img_buf:
         try:
-            await bot.send_photo(
+            sent = await bot.send_photo(
                 chat_id=chat_id,
                 photo=img_buf,
                 caption=text_card[:1024],  # Telegram caption limit
                 parse_mode="Markdown",
                 reply_markup=reply_markup,
                 disable_web_page_preview=True,
+                reply_to_message_id=reply_to or None,
             )
-            return True
+            return sent
         except Exception as e:
             logger.warning(f"Image card send failed: {e} — falling back to text")
             img_buf.close()
 
     # Fallback: text only
     try:
-        await bot.send_message(
+        sent = await bot.send_message(
             chat_id=chat_id,
             text=text_card,
             parse_mode="Markdown",
             reply_markup=reply_markup,
             disable_web_page_preview=True,
+            reply_to_message_id=reply_to or None,
         )
-        return True
+        return sent
     except Exception as e:
         logger.error(f"Text card send also failed: {e}")
         return False
@@ -3614,6 +3632,8 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         u.effective_message.bot, u.effective_chat.id, t, "",
         reply_markup=buttons
     )
+    if getattr(sent, "message_id", None):
+        alert_msg_ids.setdefault(addr, sent.message_id); _alert_ids_prune()
     # AI verdict as background task — sends follow-up when ready
     async def _scan_ai(msg_id, chat_id, token_data, btns):
         try:
@@ -5162,18 +5182,18 @@ async def handle_refresh_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
     addr  = data.split(":", 1)[1].strip()
     if not addr: return
 
-    # Edit the message to show loading state
+    # Edit the message to show loading state (photo cards need edit_caption!)
     try:
-        await query.message.edit_text("🔄 *Refreshing scan...*", parse_mode="Markdown")
+        if query.message.photo:
+            await query.message.edit_caption("🔄 *Refreshing scan...*", parse_mode="Markdown")
+        else:
+            await query.message.edit_text("🔄 *Refreshing scan...*", parse_mode="Markdown")
     except Exception:
         pass
 
     t = await full_token_scan(addr)
     if t.get("error"):
-        try:
-            await query.message.edit_text(f"❌ {t['error']}")
-        except Exception:
-            await query.message.reply_text(f"❌ {t['error']}")
+        await query.message.reply_text(f"❌ {t['error']}")
         return
 
     ai_verdict = await ai_ask(
@@ -5185,19 +5205,24 @@ async def handle_refresh_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
         fallback="",
         inject_market=True
     )
-    card = build_scan_card(t, ai_verdict)
     btns = scan_buttons(addr, t["sym"], t.get("pair_addr",""))
+    # Photo cards can't edit_text — send a FRESH card as a reply instead,
+    # and strip the old card's buttons so it can't be double-tapped.
     try:
-        await query.message.edit_text(
-            card, parse_mode="Markdown",
-            reply_markup=btns,
-            disable_web_page_preview=True
+        await query.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    try:
+        sent_r = await send_scan_card_with_image(
+            query.message.bot, query.message.chat_id, t, ai_verdict,
+            reply_markup=btns, reply_to=query.message.message_id
         )
+        if getattr(sent_r, "message_id", None):
+            alert_msg_ids.setdefault(addr, sent_r.message_id)
     except Exception:
         await query.message.reply_text(
-            card, parse_mode="Markdown",
-            reply_markup=btns,
-            disable_web_page_preview=True
+            build_scan_card(t, ai_verdict), parse_mode="Markdown",
+            reply_markup=btns, disable_web_page_preview=True
         )
 
 
@@ -5400,6 +5425,8 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                     u.effective_message.bot, u.effective_chat.id, t, "",
                     reply_markup=buttons
                 )
+                if getattr(sent, "message_id", None):
+                    alert_msg_ids.setdefault(ca, sent.message_id); _alert_ids_prune()
                 add_xp(uid, 5)
                 # Fire AI verdict as NON-BLOCKING background task — edits message when ready
                 async def _ca_ai_verdict(msg_id, chat_id, token_data, ca_addr, btns):
@@ -7265,7 +7292,11 @@ async def bg_main_scanner(app: Application):
                         parse_mode="Markdown",
                         reply_markup=buttons,
                         disable_web_page_preview=True,
+                        reply_to_message_id=_reply_to(addr),
                     )
+                    if getattr(sent_msg, "message_id", None):
+                        alert_msg_ids.setdefault(addr, sent_msg.message_id)
+                        _alert_ids_prune()
                     alert_count += 1
                     dropped_calls[addr] = {
                         "sym": sym, "name": name,
@@ -7401,7 +7432,8 @@ async def bg_followup_tracker(app: Application):
                     try:
                         await app.bot.send_message(chat, _mega_msg, parse_mode="Markdown",
                                                    reply_markup=scan_buttons(addr, sym),
-                                                   disable_web_page_preview=True)
+                                                   disable_web_page_preview=True,
+                                                   reply_to_message_id=_reply_to(addr))
                         dropped_calls[addr][f"alerted_{_mega}x"] = True
                         asyncio.create_task(_save())
                     except Exception as e:
@@ -7428,7 +7460,8 @@ async def bg_followup_tracker(app: Application):
                     try:
                         await app.bot.send_message(chat, msg, parse_mode="Markdown",
                                                    reply_markup=scan_buttons(addr, sym),
-                                                   disable_web_page_preview=True)
+                                                   disable_web_page_preview=True,
+                                                   reply_to_message_id=_reply_to(addr))
                         dropped_calls[addr]["alerted_10x"] = True
                         # ── Feed pattern memory (win) ───────────────
                         pm_key = f"{info.get('alert_type','?')}:{info.get('narrative','?')}"
@@ -7454,7 +7487,8 @@ async def bg_followup_tracker(app: Application):
                     try:
                         await app.bot.send_message(chat, msg, parse_mode="Markdown",
                                                    reply_markup=scan_buttons(addr, sym),
-                                                   disable_web_page_preview=True)
+                                                   disable_web_page_preview=True,
+                                                   reply_to_message_id=_reply_to(addr))
                         dropped_calls[addr]["alerted_5x"] = True
                         asyncio.create_task(_save())
                     except Exception as e:
@@ -7473,7 +7507,8 @@ async def bg_followup_tracker(app: Application):
                     try:
                         await app.bot.send_message(chat, msg_2x, parse_mode="Markdown",
                                                   reply_markup=scan_buttons(addr, sym),
-                                                  disable_web_page_preview=True)
+                                                  disable_web_page_preview=True,
+                                                  reply_to_message_id=_reply_to(addr))
                         dropped_calls[addr]["alerted_2x"] = True
                         asyncio.create_task(_save())
                     except Exception as e:
@@ -7503,7 +7538,8 @@ async def bg_followup_tracker(app: Application):
                     )
                     try:
                         await app.bot.send_message(chat, msg, parse_mode="Markdown",
-                                                   disable_web_page_preview=True)
+                                                   disable_web_page_preview=True,
+                                                   reply_to_message_id=_reply_to(addr))
                         dropped_calls[addr]["alerted_rug"] = True
                         # ── Feed pattern memory (loss) ──────────────
                         pm_key2 = f"{info.get('alert_type','?')}:{info.get('narrative','?')}"
@@ -7682,7 +7718,11 @@ async def bg_new_launch_scanner(app: Application):
                         parse_mode="Markdown",
                         reply_markup=scan_buttons(addr, sym, tok_nl.get("pair_addr","")),
                         disable_web_page_preview=True,
+                        reply_to_message_id=_reply_to(addr),
                     )
+                    if getattr(msg_sent_nl, "message_id", None):
+                        alert_msg_ids.setdefault(addr, msg_sent_nl.message_id)
+                        _alert_ids_prune()
                     dropped_calls[addr] = {
                         "sym": sym, "name": name,
                         "entry_price": cur_price_nl,
@@ -7952,7 +7992,11 @@ async def bg_established_scanner(app: Application):
                         parse_mode="Markdown",
                         reply_markup=buttons,
                         disable_web_page_preview=True,
+                        reply_to_message_id=_reply_to(addr),
                     )
+                    if getattr(sent_msg, "message_id", None):
+                        alert_msg_ids.setdefault(addr, sent_msg.message_id)
+                        _alert_ids_prune()
                     dropped_calls[addr] = {
                         "sym": sym, "name": name,
                         "entry_price": tok_est["price"],
@@ -8182,7 +8226,11 @@ async def bg_heat_scanner(app: Application):
                         parse_mode="Markdown",
                         reply_markup=buttons,
                         disable_web_page_preview=True,
+                        reply_to_message_id=_reply_to(addr),
                     )
+                    if getattr(sent_msg, "message_id", None):
+                        alert_msg_ids.setdefault(addr, sent_msg.message_id)
+                        _alert_ids_prune()
                     dropped_calls[addr] = {
                         "sym": sym, "name": name,
                         "entry_price": price,
@@ -8362,11 +8410,15 @@ async def bg_narrative_news_scanner(app: Application):
                             continue
 
                         try:
-                            await send_scan_card_with_image(
+                            sent_n = await send_scan_card_with_image(
                                 app.bot, GROUP_CHAT_ID, tok, ai_why,
                                 reply_markup=scan_buttons(addr, sym, tok["pair_addr"]),
-                                alert_type="narrative"
+                                alert_type="narrative",
+                                reply_to=alert_msg_ids.get(addr) or 0
                             )
+                            if getattr(sent_n, "message_id", None):
+                                alert_msg_ids.setdefault(addr, sent_n.message_id)
+                                _alert_ids_prune()
                             found_count += 1
                             logger.info(f"[NARRATIVE] ${sym} via '{term}': +{ch1h:.0f}%")
                             await asyncio.sleep(2)
