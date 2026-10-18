@@ -1627,6 +1627,12 @@ def gt_parse_pool(pool: Dict) -> Optional[Dict]:
         v1h  = float(vol.get("h1") or 0)
         v24h = float(vol.get("h24") or 0)
         created_str = a.get("pool_created_at", "")
+        created_ms = 0
+        try:
+            created_ms = int(datetime.fromisoformat(
+                created_str.replace("Z", "+00:00")).timestamp() * 1000)
+        except Exception:
+            created_ms = 0
         buy_pct = b1h / max(b1h + s1h, 1) * 100
         avg_5m_vol = v1h / 12 if v1h > 0 else 1
         vol_spike = v5m / max(avg_5m_vol, 1)
@@ -1639,6 +1645,7 @@ def gt_parse_pool(pool: Dict) -> Optional[Dict]:
             "b5m": b5m, "s5m": s5m, "b1h": b1h, "s1h": s1h,
             "b24h": 0, "s24h": 0,
             "buy_pct": buy_pct, "vol_spike": vol_spike,
+            "created": created_ms,
             "created_str": created_str,
             "pair_addr": a.get("address", ""),
             "_source": "gecko",
@@ -3205,7 +3212,7 @@ def _build_rick_card(t: Dict, ai: str = "", is_first_alert: bool = False, watche
     kt = t.get("known_wallet_tags",[])
     tags = ("\n" + "\u00b7".join(kt)) if kt else ""
     fa = f"\n\U0001f308 You are first @ {_short_k(mcap)} \U0001f440 {watchers}" if is_first_alert else (f"\n\U0001f440 {watchers} watching" if watchers>0 else "")
-    src = t.get("_sources", "")
+    src = t.get("_sources") or t.get("_source", "")
     src_l = f" \u00b7 {src}" if src else ""
     ai_l = f"\n\n\U0001f9e0 {ai}" if ai and ai.strip() else ""
     sw = t.get("smart_wallets") or []
@@ -7361,7 +7368,7 @@ async def bg_main_scanner(app: Application):
                 if addr in pumpfun_narratives and pumpfun_narratives[addr]:
                     nar = pumpfun_narratives[addr]
                 pf_meta = pumpfun_meta.get(addr, {})
-                is_pumpfun = bool(pf_meta)
+                is_pumpfun = bool(pf_meta) or addr.endswith("pump")
                 is_graduated = pf_meta.get("is_graduated", False)
                 pf_reply_count = pf_meta.get("reply_count", 0)
                 pf_desc = pf_meta.get("description", "")
@@ -7470,6 +7477,8 @@ async def bg_main_scanner(app: Application):
 
                 cd[addr] = now  # persisted cooldown
 
+                _pl = next((p.get("links") or [] for p in dex_profiles_raw
+                            if p.get("tokenAddress") == addr), [])
                 tok_dict = {
                     "address": addr, "sym": sym, "name": name,
                     "price": price, "fdv": fdv, "mcap": mcap, "liq": liq,
@@ -7486,11 +7495,14 @@ async def bg_main_scanner(app: Application):
                     "is_honeypot": (tok_dict_rug.get("is_honeypot", False) if tok_dict_rug else False),
                     "lp_locked": (tok_dict_rug.get("lp_locked", False) if tok_dict_rug else False),
                     "is_renounced": False,
-                    "created": pairs_map[addr].get("created", 0) if is_pumpfun else 0,
+                    "created": pairs_map[addr].get("created", 0),
                     "narrative": nar,
-                    "tw_link": pf_meta.get("tw_link", "") if is_pumpfun else "",
-                    "tg_link": pf_meta.get("tg_link", "") if is_pumpfun else "",
-                    "web_link": pf_meta.get("web_link", "") if is_pumpfun else "",
+                    "tw_link": (pf_meta.get("tw_link", "") if is_pumpfun else next(
+                        (l.get("url", "") for l in _pl if l.get("type") == "twitter"), "")),
+                    "tg_link": (pf_meta.get("tg_link", "") if is_pumpfun else next(
+                        (l.get("url", "") for l in _pl if l.get("type") == "telegram"), "")),
+                    "web_link": (pf_meta.get("web_link", "") if is_pumpfun else next(
+                        (l.get("url", "") for l in _pl if l.get("type", "").startswith("web")), "")),
                     "boost_active": 1 if is_boosted else 0,
                     "has_profile": addr in profiled_addrs, "has_ad": False,
                     "pair_addr": pair_addr,
