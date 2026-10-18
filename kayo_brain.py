@@ -256,6 +256,8 @@ async def _save():
             "knowledge_base": knowledge_base,
             "reminders": reminders,
             "seen_alert_ids": list(seen_alert_ids.keys())[-3000:],
+            "wallet_registry": {w: {"tokens": v.get("tokens", [])[-60:], "last_seen": v.get("last_seen", 0)}
+                                for w, v in list(wallet_registry.items())[-4000:]},
             "realert_ts": _realert_ts,
             "alert_msg_ids": list(alert_msg_ids.items())[-3000:],
             "realert_px": _realert_px,
@@ -319,6 +321,10 @@ async def _load():
         tracked_wallets = d.get("tracked_wallets", {})
         knowledge_base  = d.get("knowledge_base", [])
         reminders       = d.get("reminders", [])
+        global wallet_registry
+        _saved_wr = d.get("wallet_registry", {})
+        wallet_registry = {w: {"tokens": list(v.get("tokens", []))[-60:], "last_seen": float(v.get("last_seen", 0) or 0)}
+                          for w, v in _saved_wr.items() if isinstance(v, dict)}
         _saved_seen = d.get("seen_alert_ids", [])
         seen_alert_ids = OrderedDict()
         for sid in _saved_seen[-3000:]: seen_alert_ids[sid] = 1
@@ -2820,6 +2826,14 @@ async def _enrich_with_rugcheck(result: Dict) -> Dict:
             pcts = _rugcheck_top10(rc, result.get("pair_addr", ""))
             if pcts:
                 result["top_holders"] = pcts
+            pairs_h = _rugcheck_holder_pairs(rc, result.get("pair_addr", ""))
+            if pairs_h:
+                result["top_holder_owners"] = [(o, p) for p, o in pairs_h]
+                for p, o in pairs_h[:10]:
+                    _wallet_note(o, addr)
+                sw = _smart_wallets_in(pairs_h)
+                if sw:
+                    result["smart_wallets"] = sw
             if rc.get("totalHolders"):
                 result["holder_count"] = int(rc.get("totalHolders") or 0)
             # v48b: REAL dev% = creatorBalance / total supply (both raw units)
@@ -2921,6 +2935,42 @@ async def _gt_token_scan(addr: str) -> Optional[Dict]:
     except Exception as e:
         logger.debug(f"_gt_token_scan: {e}")
         return None
+
+def _apply_rc_enrichment(tok):
+    """v53: reuse the gate's cached RugCheck report to enrich a scanner alert tok
+    in place — holder pcts, insider networks, dev%, smart wallets. No extra API call."""
+    if not isinstance(tok, dict): return
+    addr = tok.get("address") or tok.get("addr") or ""
+    if not addr: return
+    hit = gate_rc_cache.get(addr)
+    if not hit or time.time() - hit[0] > 600: return
+    rc = hit[1]
+    if not rc: return
+    pairs_h = _rugcheck_holder_pairs(rc, tok.get("pair_addr", ""))
+    if pairs_h:
+        tok["top_holders"] = [p for p, _ in pairs_h]
+        tok["top_holder_owners"] = [(o, p) for p, o in pairs_h]
+        for p, o in pairs_h[:10]:
+            _wallet_note(o, addr)
+        sw = _smart_wallets_in(pairs_h)
+        if sw: tok["smart_wallets"] = sw
+    if rc.get("totalHolders"):
+        tok["holder_count"] = int(rc.get("totalHolders") or 0)
+    nets = rc.get("insiderNetworks") or []
+    if nets:
+        tok["insider_clusters"] = len(nets)
+        tok["insider_accounts"] = sum(int(n.get("activeAccounts") or 0) for n in nets)
+        sup = float((rc.get("token") or {}).get("supply") or 0)
+        ih = sum(float(n.get("currentHolding") or 0) for n in nets)
+        tok["insider_pct"] = min(100.0, (ih / sup * 100) if sup > 0 else 0)
+    else:
+        tok.setdefault("insider_accounts", 0)
+        tok.setdefault("insider_clusters", 0)
+    cb = float(rc.get("creatorBalance") or 0)
+    sup2 = float((rc.get("token") or {}).get("supply") or 0)
+    if cb > 0 and sup2 > 0:
+        tok["dev_pct"] = min(100.0, cb / sup2 * 100)
+
 
 async def full_token_scan(address: str) -> Dict:
     """v43: Try unified multi-source scan first, fallback to DexScreener-only."""
@@ -3158,7 +3208,9 @@ def _build_rick_card(t: Dict, ai: str = "", is_first_alert: bool = False, watche
     src = t.get("_sources", "")
     src_l = f" \u00b7 {src}" if src else ""
     ai_l = f"\n\n\U0001f9e0 {ai}" if ai and ai.strip() else ""
-    return "\n".join([hdr,f"{plat_e} {plat_t}",f"\U0001f4b0 USD: {ps}",fdv_l,liq_l,vol_l,txn_l,"",th_l,tot_l,bd_l,fr_l,ch_l,mo_l,"",f"`{addr}`",tags.strip(),fa,ai_l]).strip()
+    sw = t.get("smart_wallets") or []
+    sw_l = ("\n\U00002B50 " + " \u00b7 ".join(f"`{w[:4]}\u2026{w[-4:]}` {p:.1f}% ({n} tokens)" for w, p, n in sw[:2])) if sw else ""
+    return "\n".join([hdr,f"{plat_e} {plat_t}",f"\U0001f4b0 USD: {ps}",fdv_l,liq_l,vol_l,txn_l,"",th_l,tot_l,bd_l,fr_l,ch_l,mo_l,"",f"`{addr}`",tags.strip(),fa,sw_l,ai_l]).strip()
 
 
 # ── VISUAL SCAN CARD (Rick Bot style image) ──────────────────────────────
@@ -3477,6 +3529,62 @@ def _rugcheck_top10(report: Dict, pool_addr: str = "") -> List[float]:
     return pcts
 
 
+def _rugcheck_holder_pairs(report: Dict, pool_addr: str = ""):
+    """v53: [(pct, owner)] from a RugCheck report, same exclusions as _rugcheck_top10."""
+    known = _KNOWN_POOL_ACCOUNTS.copy()
+    ka = report.get("knownAccounts") or {}
+    if isinstance(ka, dict):
+        for acct, info in ka.items():
+            if isinstance(info, dict) and info.get("type") in ("AMM", "POOL", "PROGRAM", "MULTISIG"):
+                known.add(acct)
+    if pool_addr:
+        known.add(pool_addr)
+    pairs = []
+    for h in (report.get("topHolders") or []):
+        owner = (h.get("owner") or h.get("address") or "").strip()
+        if owner in known:
+            continue
+        pct = float(h.get("pct", 0) or 0)
+        if pct > 0:
+            pairs.append((pct, owner))
+        if len(pairs) >= 10:
+            break
+    return pairs
+
+
+# ── v53: SMART WALLET REGISTRY — learned from behavior, not a hardcoded list ──
+# A wallet seen in the top-10 of >= SMART_WALLET_MIN_TOKENS different tokens is a
+# serial accumulator ("smart wallet"). The registry grows as the bot scans.
+wallet_registry: Dict[str, Dict] = {}
+SMART_WALLET_MIN_TOKENS = 3
+INSIDER_ALERT_MIN_ACCOUNTS = 20
+gate_rc_cache: Dict[str, list] = {}   # addr -> [ts, rugcheck report] (10-min TTL)
+
+def _wallet_note(wallet: str, token_addr: str):
+    if not wallet or not token_addr: return
+    w = wallet_registry.get(wallet)
+    if not w:
+        w = {"tokens": [], "last_seen": 0}
+        wallet_registry[wallet] = w
+    if token_addr not in w["tokens"]:
+        w["tokens"].append(token_addr)
+        if len(w["tokens"]) > 60: w["tokens"] = w["tokens"][-60:]
+    w["last_seen"] = time.time()
+    if len(wallet_registry) > 4000:
+        cutoff = time.time() - 14 * 86400
+        stale = [k for k, v in wallet_registry.items() if v.get("last_seen", 0) < cutoff][:1000]
+        for k in stale: wallet_registry.pop(k, None)
+
+def _smart_wallets_in(pairs):
+    """[(wallet, pct, n_tokens)] for holders that are known serial accumulators."""
+    out = []
+    for pct, owner in pairs:
+        w = wallet_registry.get(owner)
+        if w and len(w.get("tokens", [])) >= SMART_WALLET_MIN_TOKENS:
+            out.append((owner, pct, len(w["tokens"])))
+    return out[:3]
+
+
 async def rugcheck_report(addr: str) -> Dict:
     """v48: RugCheck report - real holder data (works where Solscan fails). Free, 12s timeout."""
     try:
@@ -3590,6 +3698,10 @@ def build_ca_card(t: Dict, ai: str = "") -> str:
                  f"{t.get('insider_accounts',0)} accts \u00b7 {float(t.get('insider_pct',0) or 0):.1f}%")
     elif t.get("insider_accounts") is not None:
         L.append("\U0001f575\ufe0f Insiders: none detected")
+    sw = t.get("smart_wallets") or []
+    if sw:
+        L.append("\U00002B50 Smart wallets: " + " \u00b7 ".join(
+            f"`{w[:4]}\u2026{w[-4:]}` {p:.1f}% ({n} tokens)" for w, p, n in sw[:2]))
     if t.get("lp_locked"):
         lp = "\U0001f512 LP Locked"
     elif t.get("is_pumpfun") or "pump" in plat_t.lower() or "pump" in str(t.get("platform","")).lower():
@@ -3629,7 +3741,7 @@ def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
     is_first = ca not in _first_alert_seen
     if is_first: _first_alert_seen.add(ca)
     watchers = _token_watchers.get(ca, 0)
-    icons = {"pump":"🚀","new":"🆕","gem":"💎","whale":"🐋","momentum":"📈","migration":"🔄","rug":"⚠️"}
+    icons = {"pump":"🚀","new":"🆕","gem":"💎","whale":"🐋","momentum":"📈","migration":"🔄","rug":"⚠️","insider":"🕵️"}
     prefix = icons.get(alert_type, "⚡")
     return f"{prefix} " + _build_rick_card(t, ai, is_first_alert=is_first, watchers=watchers)
 
@@ -7020,6 +7132,7 @@ async def hard_quality_gate(addr: str, sym: str, is_pumpfun: Optional[bool] = No
     try:
         rc = await asyncio.wait_for(rugcheck_report(addr), timeout=12)
         if rc:
+            gate_rc_cache[addr] = [time.time(), rc]
             pcts = _rugcheck_top10(rc, pool_addr)
             top10 = sum(pcts[:10])
         else:
@@ -7387,6 +7500,13 @@ async def bg_main_scanner(app: Application):
                     "pf_description": pf_desc,
                 }
                 if alert_count >= 15: break
+
+                # ── v53: QUALITY GATE (restored — main scanner was missing it) ──
+                if not await hard_quality_gate(addr, sym, is_pumpfun=is_pumpfun, pool_addr=pair_addr):
+                    continue
+                _apply_rc_enrichment(tok_dict)
+                if (tok_dict.get("insider_accounts") or 0) >= INSIDER_ALERT_MIN_ACCOUNTS:
+                    alert_type = "insider"
 
                 card = build_alert_card(tok_dict, alert_type, "")
                 buttons = scan_buttons(addr, sym)
@@ -7818,6 +7938,7 @@ async def bg_new_launch_scanner(app: Application):
                     fallback="",
                     inject_market=True
                 )
+                _apply_rc_enrichment(tok_nl)
                 card_nl = build_alert_card(tok_nl, nl_type, ai)
                 try:
                     msg_sent_nl = await app.bot.send_message(
@@ -8093,6 +8214,9 @@ async def bg_established_scanner(app: Application):
                 if GROUP_CHAT_ID == 0: continue
 
                 try:
+                    _apply_rc_enrichment(tok_est)
+                    if (tok_est.get("insider_accounts") or 0) >= INSIDER_ALERT_MIN_ACCOUNTS:
+                        est_type = "insider"
                     card = build_alert_card(tok_est, est_type, "")
                     buttons = scan_buttons(addr, sym, tok_est["pair_addr"])
                     sent_msg = await app.bot.send_message(
@@ -8327,7 +8451,11 @@ async def bg_heat_scanner(app: Application):
                 if GROUP_CHAT_ID == 0: continue
 
                 try:
-                    card = build_alert_card(tok_heat, "revival", "")
+                    _apply_rc_enrichment(tok_heat)
+                    _h_type = ("insider"
+                               if (tok_heat.get("insider_accounts") or 0) >= INSIDER_ALERT_MIN_ACCOUNTS
+                               else "revival")
+                    card = build_alert_card(tok_heat, _h_type, "")
                     buttons = scan_buttons(addr, sym, tok_heat["pair_addr"])
                     sent_msg = await app.bot.send_message(
                         GROUP_CHAT_ID, card,
@@ -8518,6 +8646,7 @@ async def bg_narrative_news_scanner(app: Application):
                             continue
 
                         try:
+                            _apply_rc_enrichment(tok)
                             sent_n = await send_scan_card_with_image(
                                 app.bot, GROUP_CHAT_ID, tok, ai_why,
                                 reply_markup=scan_buttons(addr, sym, tok["pair_addr"]),
