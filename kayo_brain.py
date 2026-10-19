@@ -1647,6 +1647,8 @@ def gt_parse_pool(pool: Dict) -> Optional[Dict]:
             "buy_pct": buy_pct, "vol_spike": vol_spike,
             "created": created_ms,
             "created_str": created_str,
+            "dex_id": a.get("dex", "") or "",
+            "is_graduated": bool(addr.endswith("pump") and a.get("dex", "") not in ("", "pumpfun")),
             "pair_addr": a.get("address", ""),
             "_source": "gecko",
         }
@@ -2579,7 +2581,12 @@ def pumpfun_to_token(coin: Dict) -> Optional[Dict]:
         total_supply = float(coin.get("total_supply", 0) or 0)
         est_price = (mcap / total_supply) if (mcap > 0 and total_supply > 0) else 0
 
+        # v57: pump.fun 'complete' flag = graduated off the bonding curve
+        if coin.get("complete"):
+            pass  # graduation flag set below in return dict
+
         return {
+            "is_graduated": bool(coin.get("complete")),
             "address": mint, "sym": sym, "name": name,
             "price": est_price,
             "created": int(created_ts) if created_ts else 0,
@@ -3512,6 +3519,18 @@ _KNOWN_POOL_ACCOUNTS = {
     "DSo7v6EjHTG7XkDCMytxcFBXvPfQowWvrPP1YBds5zhH",  # Meteora authority
 }
 
+
+
+
+def _on_bonding_curve(addr: str, tok: Optional[Dict] = None) -> bool:
+    """v57: True ONLY while the token is still on the pump.fun bonding curve.
+    Pump mints keep the 'pump' suffix forever — a graduated token (Raydium/pumpswap
+    pool) is NOT bonding-curve and gets the standard strict filters."""
+    if not addr.endswith("pump"):
+        return False
+    if isinstance(tok, dict) and tok.get("is_graduated") is not None:
+        return not bool(tok.get("is_graduated"))
+    return True
 
 def _rugcheck_top10(report: Dict, pool_addr: str = "") -> List[float]:
     """Top-holder pcts from a RugCheck report, excluding AMM/pool/protocol accounts."""
@@ -7124,7 +7143,7 @@ async def quick_rug_check(addr: str) -> Dict:
     return result
 
 
-async def hard_quality_gate(addr: str, sym: str, is_pumpfun: Optional[bool] = None, pool_addr: str = "") -> bool:
+async def hard_quality_gate(addr: str, sym: str, is_pumpfun: Optional[bool] = None, pool_addr: str = "", is_graduated: Optional[bool] = None) -> bool:
     """
     v45 HARD QUALITY GATE — every discovery alert must pass:
       1. LP LOCKED. Non-pump.fun tokens: GoPlus must CONFIRM the LP is locked.
@@ -7160,7 +7179,8 @@ async def hard_quality_gate(addr: str, sym: str, is_pumpfun: Optional[bool] = No
             top10 = float(holders.get("top10_pct", 0) or 0)
     except Exception:
         pass  # holders unverifiable → fail open
-    top10_max = 50 if is_pumpfun else 30   # v54: bonding-curve 50%, everything else 30%
+    on_curve = is_pumpfun and not (bool(is_graduated) if is_graduated is not None else False)
+    top10_max = 50 if on_curve else 30   # v57: 50% ONLY on bonding curve; graduated = 30%
     if top10 > top10_max:
         logger.info(f"[GATE] ${sym} skipped — top10 hold {top10:.0f}% > {top10_max}%")
         return False
@@ -7353,7 +7373,7 @@ async def bg_main_scanner(app: Application):
                 if eff_cap > 2_000_000: continue         # v45: $2M cap (was $300k)
                 if eff_cap < 5_000: continue             # below $5k = rug/dust
                 if liq < 2_000: continue                  # need $2k+ liquidity
-                if v1h < (2_000 if addr.endswith("pump") else 5_000): continue                  # v54: $2k pump.fun / $5k others
+                if v1h < (2_000 if _on_bonding_curve(addr, tok) else 5_000): continue                  # v54: $2k pump.fun / $5k others
 
                 # ── v44: VOLUME SNAPSHOT FOR DEAD-TOKEN DETECTION ──
                 # Update volume snapshot for every token we see
@@ -7528,7 +7548,7 @@ async def bg_main_scanner(app: Application):
                 if alert_count >= 15: break
 
                 # ── v53: QUALITY GATE (restored — main scanner was missing it) ──
-                if not await hard_quality_gate(addr, sym, is_pumpfun=is_pumpfun, pool_addr=pair_addr):
+                if not await hard_quality_gate(addr, sym, is_pumpfun=is_pumpfun, pool_addr=pair_addr, is_graduated=is_graduated):
                     continue
                 _apply_rc_enrichment(tok_dict)
                 if (tok_dict.get("insider_accounts") or 0) >= INSIDER_ALERT_MIN_ACCOUNTS:
@@ -7875,7 +7895,7 @@ async def bg_new_launch_scanner(app: Application):
                 if liq < 2_000: continue                          # need $2k+ liquidity — no rugs
                 if eff_fdv > 2_000_000: continue                 # v45: $2M cap
                 if eff_fdv < 5_000: continue                     # below $5k = dust/rug
-                if v1h_new < (2_000 if addr.endswith("pump") else 5_000): continue                      # v54: $2k pump.fun / $5k others
+                if v1h_new < (2_000 if (addr.endswith("pump") and pd.get("dexId") == "pumpfun") else 5_000): continue                      # v54: $2k pump.fun / $5k others
 
                 # Scoring
                 score = 0
@@ -7909,7 +7929,7 @@ async def bg_new_launch_scanner(app: Application):
                 asyncio.create_task(_save())
 
                 # ── v45: QUALITY GATE — LP locked + top10 ≤ 30% ──
-                if not await hard_quality_gate(addr, sym):
+                if not await hard_quality_gate(addr, sym, is_graduated=(addr.endswith("pump") and pd.get("dexId") not in ("pumpfun",))):
                     continue
 
                 tw_link = next((lk.get("url", "") for lk in links if lk.get("type") == "twitter"), "")
@@ -8131,7 +8151,7 @@ async def bg_established_scanner(app: Application):
                 if eff_cap > 2_000_000: continue
                 if eff_cap < 5_000: continue
                 if liq < 2_000: continue
-                if v1h < (2_000 if addr.endswith("pump") else 5_000): continue          # v54: $2k pump.fun / $5k others
+                if v1h < (2_000 if _on_bonding_curve(addr, tok) else 5_000): continue          # v54: $2k pump.fun / $5k others
 
                 # v44: NO AGE CEILING — scan old AND new tokens
                 # Just need >2h old to avoid duplicating the main scanner
@@ -8200,7 +8220,7 @@ async def bg_established_scanner(app: Application):
                 asyncio.create_task(_save())
 
                 # ── v45: QUALITY GATE — LP locked + top10 ≤ 30% ──
-                if not await hard_quality_gate(addr, sym):
+                if not await hard_quality_gate(addr, sym, is_graduated=bool(tok.get("is_graduated"))):
                     continue
 
                 nar = detect_narrative(f"{name} {sym}")
@@ -8416,7 +8436,7 @@ async def bg_heat_scanner(app: Application):
                 if age_min < 1440 and created > 0: continue  # must be > 1 day old
 
                 # Fresh spike: volume jumped from near-zero to $2k+
-                if v1h < (2_000 if addr.endswith("pump") else 5_000): continue           # v54: $2k pump.fun / $5k others
+                if v1h < (2_000 if _on_bonding_curve(addr, tok) else 5_000): continue           # v54: $2k pump.fun / $5k others
                 if buy_pct < 50: continue
                 if ch1h < 2 and b1h < 3: continue  # need some actual price action or buys
 
@@ -8437,7 +8457,7 @@ async def bg_heat_scanner(app: Application):
                 }
 
                 # ── v45: QUALITY GATE — LP locked + top10 ≤ 30% ──
-                if not await hard_quality_gate(addr, sym):
+                if not await hard_quality_gate(addr, sym, is_graduated=bool(tok.get("is_graduated"))):
                     continue
 
                 nar = detect_narrative(f"{name} {sym}")
@@ -8668,7 +8688,7 @@ async def bg_narrative_news_scanner(app: Application):
                             "mscore": min(100, int(abs(ch1h) + buy_pct/2 + vs*10)),
                         }
                         # ── v45: QUALITY GATE — LP locked + top10 ≤ 30% ──
-                        if not await hard_quality_gate(addr, sym, pool_addr=p.get("pairAddress", "")):
+                        if not await hard_quality_gate(addr, sym, pool_addr=p.get("pairAddress", ""), is_graduated=bool(tok.get("is_graduated"))):
                             continue
 
                         try:
