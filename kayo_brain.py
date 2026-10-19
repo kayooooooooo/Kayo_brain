@@ -3748,7 +3748,20 @@ def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
     is_first = ca not in _first_alert_seen
     if is_first: _first_alert_seen.add(ca)
     watchers = _token_watchers.get(ca, 0)
-    icons = {"pump":"🚀","new":"🆕","gem":"💎","whale":"🐋","momentum":"📈","migration":"🔄","rug":"⚠️","insider":"🕵️"}
+    # v56: every alert type gets its own emoji — one glance = what kind of play
+    icons = {
+        "pump": "🚀", "new": "🆕", "gem": "💎", "whale": "🐋", "momentum": "📈",
+        "migration": "🔄", "rug": "⚠️", "insider": "🕵️",
+        "launch": "🐣",        # pump.fun bonding-curve launch
+        "revival": "♻️",       # dead coin waking up (heat + est)
+        "rebound": "🔁",       # dumped then bouncing
+        "ancient": "🏛",       # years-old token moving
+        "unusual": "👀",       # odd volume pattern
+        "rebrand": "🏴",       # community takeover / rename
+        "narrative": "📖",     # narrative scanner play
+        "graduation": "🎓",    # pump.fun -> Raydium migration
+        "est": "⚡", "mega": "🏆",
+    }
     prefix = icons.get(alert_type, "⚡")
     return f"{prefix} " + _build_rick_card(t, ai, is_first_alert=is_first, watchers=watchers)
 
@@ -7389,7 +7402,7 @@ async def bg_main_scanner(app: Application):
                 elif is_pumpfun and not is_graduated:
                     if mcap >= 5_000 and mcap <= 2_000_000 and not pairs_map[addr].get("is_banned", False):
                         if pf_desc or pf_reply_count >= 3 or mcap >= 10_000:
-                            alert_type = "new"
+                            alert_type = "launch"
 
                 # ── NEW LAUNCH: fresh token with any liquidity + buy pressure ──
                 elif is_fresh and liq >= 100 and buy_pct >= 50:
