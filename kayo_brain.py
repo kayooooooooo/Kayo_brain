@@ -2868,6 +2868,7 @@ async def _enrich_with_rugcheck(result: Dict) -> Dict:
                 result["insider_clusters"] = 0
                 result["insider_accounts"] = 0
                 result["insider_pct"] = 0
+            _rugcheck_authority_flags(rc, result)
             score = rc.get("score_normalised") or rc.get("score") or 0
             if score:
                 result["rugcheck_score"] = score
@@ -2984,6 +2985,7 @@ def _apply_rc_enrichment(tok):
     sup2 = float((rc.get("token") or {}).get("supply") or 0)
     if cb > 0 and sup2 > 0:
         tok["dev_pct"] = min(100.0, cb / sup2 * 100)
+    _rugcheck_authority_flags(rc, tok)
 
 
 async def full_token_scan(address: str) -> Dict:
@@ -3555,6 +3557,25 @@ def _rugcheck_top10(report: Dict, pool_addr: str = "") -> List[float]:
     return pcts
 
 
+def _rugcheck_authority_flags(report: Dict, result: Dict):
+    """v58: mint/freeze authority detection from the RugCheck report.
+    Burned/locked LP means nothing if the dev can print fresh supply."""
+    tok = report.get("token") or {}
+    mint_active = bool(tok.get("mintAuthority"))
+    freeze_active = bool(tok.get("freezeAuthority"))
+    if isinstance(result, dict):
+        result["mint_authority_active"] = mint_active
+        result["freeze_authority_active"] = freeze_active
+    if mint_active:
+        rf = result.setdefault("red_flags", [])
+        if not any("MINT AUTHORITY" in str(x) for x in rf):
+            rf.append("\U0001f6a9 MINT AUTHORITY ACTIVE \u2014 dev can print supply")
+    if freeze_active:
+        rf = result.setdefault("red_flags", [])
+        if not any("FREEZE AUTHORITY" in str(x) for x in rf):
+            rf.append("\U0001f6a9 FREEZE AUTHORITY ACTIVE \u2014 dev can freeze sells")
+
+
 def _rugcheck_holder_pairs(report: Dict, pool_addr: str = ""):
     """v53: [(pct, owner)] from a RugCheck report, same exclusions as _rugcheck_top10."""
     known = _KNOWN_POOL_ACCOUNTS.copy()
@@ -3737,6 +3758,15 @@ def build_ca_card(t: Dict, ai: str = "") -> str:
     hon = " \u00b7 \U0001f41a HONEYPOT" if t.get("is_honeypot") else ""
     tax = f" \u00b7 Tax {float(t.get('buy_tax',0) or 0):.0f}/{float(t.get('sell_tax',0) or 0):.0f}%"
     L.append(f"{lp}{hon}{tax}")
+    mint_a = bool(t.get("mint_authority_active"))
+    freeze_a = bool(t.get("freeze_authority_active"))
+    if mint_a or freeze_a:
+        parts = []
+        if mint_a:   parts.append("\U0001f6a9 Mint authority ACTIVE (dev can print supply)")
+        if freeze_a: parts.append("\U0001f6a9 Freeze authority ACTIVE (dev can freeze sells)")
+        L.append(" | ".join(parts))
+    elif t.get("mint_authority_active") is False and t.get("freeze_authority_active") is False:
+        L.append("\u2705 Mint/freeze renounced")
     if t.get("boost_active"):
         L.append("\u2705 DEX Paid (boosted)")
     rf = t.get("red_flags") or []
