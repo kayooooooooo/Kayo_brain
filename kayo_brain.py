@@ -342,6 +342,12 @@ async def _load():
         global _first_alert_seen, _token_watchers
         _first_alert_seen = set(d.get("first_alert_seen", []))
         _token_watchers = d.get("token_watchers", {})
+        global ath_tracker
+        _saved_ath = d.get("ath_tracker", {}) or {}
+        if len(_saved_ath) > 2000:
+            _sorted_ath = sorted(_saved_ath.items(), key=lambda kv: (kv[1] or {}).get("first_seen", 0))
+            _saved_ath = dict(_sorted_ath[-2000:])
+        ath_tracker = _saved_ath
         global dropped_calls, pattern_memory, scanner_cooldowns, volume_snapshots, last_scan_ts
         dropped_calls   = d.get("dropped_calls", {})
         pattern_memory  = d.get("pattern_memory", {})
@@ -1437,6 +1443,7 @@ _RATE_BUDGET = {
     "api.coingecko.com":   5,    # free no-key tier is ~5-15/min
     "api.geckoterminal.com": 30, # free tier ~30/min — protect it like DS
     "api.rugcheck.xyz": 25,      # v59: stop 429 storms that broke the holder gate
+    "api.gopluslabs.io": 20,     # v60: same protection for the LP/honeypot check
 }
 
 def _get_host(url: str) -> str:
@@ -7126,48 +7133,45 @@ async def quick_rug_check(addr: str) -> Dict:
     """
     result = {"is_rug": False, "risk_score": 0, "red_flags": [], "buy_tax": 0, "sell_tax": 0, "lp_locked": False, "is_honeypot": False}
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://api.gopluslabs.io/api/v1/token_security/solana?contract_addresses={addr}",
-                timeout=aiohttp.ClientTimeout(total=12)
-            ) as r:
-                if r.status == 200:
-                    d = await r.json()
-                    sec = (d.get("result") or {}).get(addr, {})
-                    if not sec: return result
+        d = await _get(
+            f"https://api.gopluslabs.io/api/v1/token_security/solana?contract_addresses={addr}",
+            timeout=12)
+        if d:
+            sec = (d.get("result") or {}).get(addr, {})
+            if not sec: return result
 
-                    is_honeypot = sec.get("is_honeypot", "0") == "1"
-                    buy_tax  = float(sec.get("buy_tax", 0) or 0)
-                    sell_tax  = float(sec.get("sell_tax", 0) or 0)
-                    lp_locked = sec.get("is_lock_pool", "0") == "1" or sec.get("lp_locked", "0") == "1"
-                    is_blacklisted = sec.get("is_blacklisted", "0") == "1"
-                    can_take_back = sec.get("can_take_back_ownership", "0") == "1"
-                    is_proxy = sec.get("is_proxy", "0") == "1"
+            is_honeypot = sec.get("is_honeypot", "0") == "1"
+            buy_tax  = float(sec.get("buy_tax", 0) or 0)
+            sell_tax  = float(sec.get("sell_tax", 0) or 0)
+            lp_locked = sec.get("is_lock_pool", "0") == "1" or sec.get("lp_locked", "0") == "1"
+            is_blacklisted = sec.get("is_blacklisted", "0") == "1"
+            can_take_back = sec.get("can_take_back_ownership", "0") == "1"
+            is_proxy = sec.get("is_proxy", "0") == "1"
 
-                    risk = 0
-                    flags = []
-                    if is_honeypot:
-                        risk += 80; flags.append("HONEYPOT")
-                    if buy_tax > 10:
-                        risk += 25; flags.append(f"High buy tax {buy_tax:.0f}%")
-                    if sell_tax > 10:
-                        risk += 30; flags.append(f"High sell tax {sell_tax:.0f}%")
-                    if is_blacklisted:
-                        risk += 40; flags.append("Blacklisted function")
-                    if can_take_back:
-                        risk += 20; flags.append("Can reclaim ownership")
-                    if is_proxy:
-                        risk += 15; flags.append("Proxy contract")
+            risk = 0
+            flags = []
+            if is_honeypot:
+                risk += 80; flags.append("HONEYPOT")
+            if buy_tax > 10:
+                risk += 25; flags.append(f"High buy tax {buy_tax:.0f}%")
+            if sell_tax > 10:
+                risk += 30; flags.append(f"High sell tax {sell_tax:.0f}%")
+            if is_blacklisted:
+                risk += 40; flags.append("Blacklisted function")
+            if can_take_back:
+                risk += 20; flags.append("Can reclaim ownership")
+            if is_proxy:
+                risk += 15; flags.append("Proxy contract")
 
-                    result = {
-                        "is_rug": risk >= 50 or is_honeypot,
-                        "risk_score": min(100, risk),
-                        "red_flags": flags,
-                        "buy_tax": buy_tax,
-                        "sell_tax": sell_tax,
-                        "lp_locked": lp_locked,
-                        "is_honeypot": is_honeypot,
-                    }
+            result = {
+                "is_rug": risk >= 50 or is_honeypot,
+                "risk_score": min(100, risk),
+                "red_flags": flags,
+                "buy_tax": buy_tax,
+                "sell_tax": sell_tax,
+                "lp_locked": lp_locked,
+                "is_honeypot": is_honeypot,
+            }
     except Exception:
         pass
     return result
@@ -7203,6 +7207,10 @@ async def hard_quality_gate(addr: str, sym: str, is_pumpfun: Optional[bool] = No
         rc = await asyncio.wait_for(rugcheck_report(addr), timeout=12)
         if rc:
             gate_rc_cache[addr] = [time.time(), rc]
+            _tok_rc = rc.get("token") or {}
+            if _tok_rc.get("mintAuthority") or _tok_rc.get("freezeAuthority"):
+                logger.info(f"[GATE] ${sym} skipped \u2014 active mint/freeze authority")
+                return False
             pcts = _rugcheck_top10(rc, pool_addr)
             top10 = sum(pcts[:10])
             holders_verified = True
@@ -8682,7 +8690,7 @@ async def bg_narrative_news_scanner(app: Application):
                         liq  = float((p.get("liquidity") or {}).get("usd", 0) or 0)
                         if not (5_000 <= fdv <= 2_000_000) or liq < 2_000: continue   # v45: $2M cap
                         _v1h = float((p.get("volume") or {}).get("h1", 0) or 0)
-                        if _v1h < 5_000: continue   # v54: $2k pump.fun / $5k others
+                        if _v1h < (2_000 if (addr.endswith("pump") and p.get("dexId") == "pumpfun") else 5_000): continue  # v60
                         ch1h = float((p.get("priceChange") or {}).get("h1", 0) or 0)
                         if ch1h < 5: continue
                         b1h  = int(((p.get("txns") or {}).get("h1") or {}).get("buys", 0) or 0)
@@ -9079,6 +9087,25 @@ async def post_init(app: Application):
         BotCommand("diag", "🩺 Data source diagnostics"),
         BotCommand("ping",          "📶 Latency check"),
         BotCommand("ath", "🏆 ATH leaderboard"),
+        BotCommand("best", "🏆 Best calls"),
+        BotCommand("worst", "💀 Worst calls"),
+        BotCommand("top", "📈 Top movers"),
+        BotCommand("hot", "🔥 Hot right now"),
+        BotCommand("last", "🕐 Last alerts"),
+        BotCommand("metas", "🧠 Trending metas"),
+        BotCommand("migrate", "🎓 Graduations"),
+        BotCommand("soc", "🌍 Social metrics"),
+        BotCommand("kol", "📢 KOL feed"),
+        BotCommand("s", "⚡ Quick stats"),
+        BotCommand("pnl", "💰 PnL tracking"),
+        BotCommand("smart", "🧠 Smart wallets"),
+        BotCommand("smartscan", "🔬 Smart scan"),
+        BotCommand("escan", "🩺 Elite scan"),
+        BotCommand("wallet", "👛 Wallet lookup"),
+        BotCommand("copy", "📋 Copy tracking"),
+        BotCommand("bundle", "📦 Bundle check"),
+        BotCommand("snipe", "🎯 Sniper check"),
+        BotCommand("groupburp", "💬 Group summary"),
         BotCommand("burpboard", "📊 BurpBoard top calls"),
         BotCommand("pvp", "⚔️ PVP competing tokens"),
         BotCommand("pc", "🍝 Pasta Check (copy contract)"),
@@ -9118,6 +9145,9 @@ async def post_init(app: Application):
         BotCommand("gp",        "🏅 Group XP leaderboard"),
         BotCommand("help",      "📋 Full command list"),
     ]
+    # v60: dedupe — 18 duplicate entries existed; Telegram caps the menu at 100
+    _seen_bc = set()
+    all_cmds = [bc for bc in all_cmds if not (bc.command in _seen_bc or _seen_bc.add(bc.command))]
 
     try:
         from telegram import (
