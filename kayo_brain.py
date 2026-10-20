@@ -1436,6 +1436,7 @@ _RATE_BUDGET = {
     "api.dexscreener.com": 50,   # documented ~60/min token endpoints
     "api.coingecko.com":   5,    # free no-key tier is ~5-15/min
     "api.geckoterminal.com": 30, # free tier ~30/min — protect it like DS
+    "api.rugcheck.xyz": 25,      # v59: stop 429 storms that broke the holder gate
 }
 
 def _get_host(url: str) -> str:
@@ -1893,6 +1894,7 @@ async def unified_token_scan(address: str) -> Dict:
         "has_profile": bool(p.get("links")),
         "pair_addr": p.get("pairAddress", ""),
         "dex_url": p.get("url", f"https://dexscreener.com/solana/{address}"),
+        "is_graduated": bool(address.endswith("pump") and p.get("dexId", "") not in ("", "pumpfun")),
         "created": p.get("pairCreatedAt", 0),
         "holder_count": holder_count,
         "is_zero_liq": is_zero_liq,
@@ -3530,9 +3532,11 @@ def _on_bonding_curve(addr: str, tok: Optional[Dict] = None) -> bool:
     pool) is NOT bonding-curve and gets the standard strict filters."""
     if not addr.endswith("pump"):
         return False
-    if isinstance(tok, dict) and tok.get("is_graduated") is not None:
-        return not bool(tok.get("is_graduated"))
-    return True
+    if isinstance(tok, dict):
+        # v59: ONLY known on-curve (is_graduated explicitly False) gets the
+        # loose gates. Unknown (None) or graduated = strict.
+        return tok.get("is_graduated") is False
+    return False
 
 def _rugcheck_top10(report: Dict, pool_addr: str = "") -> List[float]:
     """Top-holder pcts from a RugCheck report, excluding AMM/pool/protocol accounts."""
@@ -3634,17 +3638,11 @@ def _smart_wallets_in(pairs):
 
 async def rugcheck_report(addr: str) -> Dict:
     """v48: RugCheck report - real holder data (works where Solscan fails). Free, 12s timeout."""
-    try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                f"https://api.rugcheck.xyz/v1/tokens/{addr}/report",
-                timeout=aiohttp.ClientTimeout(total=12)
-            ) as r:
-                if r.status == 200:
-                    return await r.json()
-    except Exception as e:
-        logger.debug(f"rugcheck_report: {e}")
-    return {}
+    # v59: routed through _get — rate budget (25/min), 429 backoff, 60s cache.
+    # The old direct call had no throttling → RugCheck 429'd the server IP
+    # → empty reports → holder gate failed open.
+    d = await _get(f"https://api.rugcheck.xyz/v1/tokens/{addr}/report", timeout=12)
+    return d if isinstance(d, dict) else {}
 
 def _rick_buttons(ca:str, sym:str="", pair_addr:str="") -> InlineKeyboardMarkup:
     dp = pair_addr or ca
@@ -3751,6 +3749,8 @@ def build_ca_card(t: Dict, ai: str = "") -> str:
             f"`{w[:4]}\u2026{w[-4:]}` {p:.1f}% ({n} tokens)" for w, p, n in sw[:2]))
     if t.get("lp_locked"):
         lp = "\U0001f512 LP Locked"
+    elif t.get("is_pumpfun") and t.get("is_graduated"):
+        lp = "\U0001f525 LP Burned (graduated pump.fun)"
     elif t.get("is_pumpfun") or "pump" in plat_t.lower() or "pump" in str(t.get("platform","")).lower():
         lp = "\U0001f513 Pump.fun BC (protocol-held)"
     else:
@@ -7198,21 +7198,33 @@ async def hard_quality_gate(addr: str, sym: str, is_pumpfun: Optional[bool] = No
             return False
     # ── TOP-10 HOLDER GATE (≤ 30%) — RugCheck primary, Solscan backup ──
     top10 = 0.0
+    holders_verified = False
     try:
         rc = await asyncio.wait_for(rugcheck_report(addr), timeout=12)
         if rc:
             gate_rc_cache[addr] = [time.time(), rc]
             pcts = _rugcheck_top10(rc, pool_addr)
             top10 = sum(pcts[:10])
+            holders_verified = True
         else:
             holders = await asyncio.wait_for(fetch_token_holders(addr), timeout=10)
-            top10 = float(holders.get("top10_pct", 0) or 0)
+            if holders:
+                top10 = float(holders.get("top10_pct", 0) or 0)
+                holders_verified = True
     except Exception:
-        pass  # holders unverifiable → fail open
-    on_curve = is_pumpfun and not (bool(is_graduated) if is_graduated is not None else False)
-    top10_max = 50 if on_curve else 30   # v57: 50% ONLY on bonding curve; graduated = 30%
+        pass
+    # v59: loose ONLY when KNOWN on the curve (is_graduated explicitly False).
+    # Unknown graduation state (None) = strict 30%. Old bug: bool(None)=False
+    # treated graduated tokens as on-curve — they slipped through at up to 50%.
+    on_curve = is_pumpfun and (is_graduated is False)
+    top10_max = 50 if on_curve else 30
     if top10 > top10_max:
         logger.info(f"[GATE] ${sym} skipped — top10 hold {top10:.0f}% > {top10_max}%")
+        return False
+    if not holders_verified and not on_curve:
+        # v59: fail-closed — no holder data = no call (matches the LP rule).
+        # Curve tokens stay fail-open (fresh launches often unindexed).
+        logger.info(f"[GATE] ${sym} skipped — holders unverifiable (fail-closed)")
         return False
     return True
 
@@ -7432,7 +7444,9 @@ async def bg_main_scanner(app: Application):
                     nar = pumpfun_narratives[addr]
                 pf_meta = pumpfun_meta.get(addr, {})
                 is_pumpfun = bool(pf_meta) or addr.endswith("pump")
-                is_graduated = pf_meta.get("is_graduated", False)
+                is_graduated = pf_meta.get("is_graduated")
+                if is_graduated is None and addr in pairs_map:
+                    is_graduated = pairs_map[addr].get("is_graduated")
                 pf_reply_count = pf_meta.get("reply_count", 0)
                 pf_desc = pf_meta.get("description", "")
                 is_boosted  = addr in boosted_addrs
@@ -8250,7 +8264,7 @@ async def bg_established_scanner(app: Application):
                 asyncio.create_task(_save())
 
                 # ── v45: QUALITY GATE — LP locked + top10 ≤ 30% ──
-                if not await hard_quality_gate(addr, sym, is_graduated=bool(tok.get("is_graduated"))):
+                if not await hard_quality_gate(addr, sym, is_graduated=tok.get("is_graduated")):
                     continue
 
                 nar = detect_narrative(f"{name} {sym}")
@@ -8487,7 +8501,7 @@ async def bg_heat_scanner(app: Application):
                 }
 
                 # ── v45: QUALITY GATE — LP locked + top10 ≤ 30% ──
-                if not await hard_quality_gate(addr, sym, is_graduated=bool(tok.get("is_graduated"))):
+                if not await hard_quality_gate(addr, sym, is_graduated=tok.get("is_graduated")):
                     continue
 
                 nar = detect_narrative(f"{name} {sym}")
@@ -8718,7 +8732,7 @@ async def bg_narrative_news_scanner(app: Application):
                             "mscore": min(100, int(abs(ch1h) + buy_pct/2 + vs*10)),
                         }
                         # ── v45: QUALITY GATE — LP locked + top10 ≤ 30% ──
-                        if not await hard_quality_gate(addr, sym, pool_addr=p.get("pairAddress", ""), is_graduated=bool(tok.get("is_graduated"))):
+                        if not await hard_quality_gate(addr, sym, pool_addr=p.get("pairAddress", ""), is_graduated=tok.get("is_graduated")):
                             continue
 
                         try:
