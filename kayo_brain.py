@@ -256,7 +256,7 @@ async def _save():
             "knowledge_base": knowledge_base,
             "reminders": reminders,
             "seen_alert_ids": list(seen_alert_ids.keys())[-3000:],
-            "wallet_registry": {w: {"tokens": v.get("tokens", [])[-60:], "last_seen": v.get("last_seen", 0)}
+            "wallet_registry": {w: {"tokens": v.get("tokens", [])[-60:], "last_seen": v.get("last_seen", 0), "wins": v.get("wins", 0), "losses": v.get("losses", 0)}
                                 for w, v in list(wallet_registry.items())[-4000:]},
             "realert_ts": _realert_ts,
             "alert_msg_ids": list(alert_msg_ids.items())[-3000:],
@@ -323,7 +323,7 @@ async def _load():
         reminders       = d.get("reminders", [])
         global wallet_registry
         _saved_wr = d.get("wallet_registry", {})
-        wallet_registry = {w: {"tokens": list(v.get("tokens", []))[-60:], "last_seen": float(v.get("last_seen", 0) or 0)}
+        wallet_registry = {w: {"tokens": list(v.get("tokens", []))[-60:], "last_seen": float(v.get("last_seen", 0) or 0), "wins": int(v.get("wins", 0) or 0), "losses": int(v.get("losses", 0) or 0)}
                           for w, v in _saved_wr.items() if isinstance(v, dict)}
         _saved_seen = d.get("seen_alert_ids", [])
         seen_alert_ids = OrderedDict()
@@ -3234,7 +3234,8 @@ def _build_rick_card(t: Dict, ai: str = "", is_first_alert: bool = False, watche
     src_l = f" \u00b7 {src}" if src else ""
     ai_l = f"\n\n\U0001f9e0 {ai}" if ai and ai.strip() else ""
     sw = t.get("smart_wallets") or []
-    sw_l = ("\n\U00002B50 " + " \u00b7 ".join(f"`{w[:4]}\u2026{w[-4:]}` {p:.1f}% ({n} tokens)" for w, p, n in sw[:2])) if sw else ""
+    _wf = _wallet_flag_line(sw)
+    sw_l = ("\n" + _wf) if _wf else ""
     return "\n".join([hdr,f"{plat_e} {plat_t}",f"\U0001f4b0 USD: {ps}",fdv_l,liq_l,vol_l,txn_l,"",th_l,tot_l,bd_l,fr_l,ch_l,mo_l,"",f"`{addr}`",tags.strip(),fa,sw_l,ai_l]).strip()
 
 
@@ -3634,13 +3635,49 @@ def _wallet_note(wallet: str, token_addr: str):
         for k in stale: wallet_registry.pop(k, None)
 
 def _smart_wallets_in(pairs):
-    """[(wallet, pct, n_tokens)] for holders that are known serial accumulators."""
+    """v61: [(wallet, pct, n_tokens, wins, losses)] — outcome-aware.
+    A wallet in the top-10 of >=2 RUGGED tokens is a serial rug wallet;
+    >=2 wins (tokens that hit milestones) is a proven smart wallet."""
     out = []
     for pct, owner in pairs:
         w = wallet_registry.get(owner)
-        if w and len(w.get("tokens", [])) >= SMART_WALLET_MIN_TOKENS:
-            out.append((owner, pct, len(w["tokens"])))
+        if not w:
+            continue
+        n      = len(w.get("tokens", []))
+        wins   = int(w.get("wins", 0) or 0)
+        losses = int(w.get("losses", 0) or 0)
+        if n >= SMART_WALLET_MIN_TOKENS or wins >= 2 or losses >= 2:
+            out.append((owner, pct, n, wins, losses))
     return out[:3]
+
+
+def _wallet_outcome(token_addr: str, is_win: bool):
+    """v61: record a win/loss for every known wallet holding this token.
+    Called when a tracked token hits a milestone (win) or rugs (loss)."""
+    if not token_addr:
+        return
+    for v in wallet_registry.values():
+        if token_addr in (v.get("tokens") or []):
+            if is_win:
+                v["wins"] = int(v.get("wins", 0) or 0) + 1
+            else:
+                v["losses"] = int(v.get("losses", 0) or 0) + 1
+
+
+def _wallet_flag_line(sw) -> str:
+    """v61: render wallet flags for cards — smart vs serial rug."""
+    if not sw:
+        return ""
+    parts = []
+    for w, p, n, wins, losses in sw[:2]:
+        tag = "`{0}...{1}` {2:.1f}%".format(w[:4], w[-4:], p)
+        if losses >= 2:
+            parts.append("\U0001f6a8 " + tag + " \u2014 serial rug wallet (" + str(losses) + " rugged)")
+        elif wins >= 2:
+            parts.append("\U00002B50 " + tag + " \u2014 " + str(wins) + " wins / " + str(n) + " tokens")
+        else:
+            parts.append("\U00002B50 " + tag + " (" + str(n) + " tokens)")
+    return " \u00b7 ".join(parts)
 
 
 async def rugcheck_report(addr: str) -> Dict:
@@ -3751,9 +3788,9 @@ def build_ca_card(t: Dict, ai: str = "") -> str:
     elif t.get("insider_accounts") is not None:
         L.append("\U0001f575\ufe0f Insiders: none detected")
     sw = t.get("smart_wallets") or []
-    if sw:
-        L.append("\U00002B50 Smart wallets: " + " \u00b7 ".join(
-            f"`{w[:4]}\u2026{w[-4:]}` {p:.1f}% ({n} tokens)" for w, p, n in sw[:2]))
+    _wf = _wallet_flag_line(sw)
+    if _wf:
+        L.append(_wf)
     if t.get("lp_locked"):
         lp = "\U0001f512 LP Locked"
     elif t.get("is_pumpfun") and t.get("is_graduated"):
@@ -7761,6 +7798,7 @@ async def bg_followup_tracker(app: Application):
                                                    disable_web_page_preview=True,
                                                    reply_to_message_id=_reply_to(addr))
                         dropped_calls[addr][f"alerted_{_mega}x"] = True
+                        _wallet_outcome(addr, True)
                         asyncio.create_task(_save())
                     except Exception as e:
                         logger.debug(f"followup {_mega}x: {e}")
@@ -7789,6 +7827,7 @@ async def bg_followup_tracker(app: Application):
                                                    disable_web_page_preview=True,
                                                    reply_to_message_id=_reply_to(addr))
                         dropped_calls[addr]["alerted_10x"] = True
+                        _wallet_outcome(addr, True)
                         # ── Feed pattern memory (win) ───────────────
                         pm_key = f"{info.get('alert_type','?')}:{info.get('narrative','?')}"
                         pm = pattern_memory.setdefault(pm_key, {"wins":0,"losses":0,"total":0,"avg_mult":0.0,"last_updated":0})
@@ -7816,6 +7855,7 @@ async def bg_followup_tracker(app: Application):
                                                    disable_web_page_preview=True,
                                                    reply_to_message_id=_reply_to(addr))
                         dropped_calls[addr]["alerted_5x"] = True
+                        _wallet_outcome(addr, True)
                         asyncio.create_task(_save())
                     except Exception as e:
                         logger.debug(f"followup 5x: {e}")
@@ -7836,6 +7876,7 @@ async def bg_followup_tracker(app: Application):
                                                   disable_web_page_preview=True,
                                                   reply_to_message_id=_reply_to(addr))
                         dropped_calls[addr]["alerted_2x"] = True
+                        _wallet_outcome(addr, True)
                         asyncio.create_task(_save())
                     except Exception as e:
                         logger.debug(f"followup 2x: {e}")
@@ -7867,6 +7908,7 @@ async def bg_followup_tracker(app: Application):
                                                    disable_web_page_preview=True,
                                                    reply_to_message_id=_reply_to(addr))
                         dropped_calls[addr]["alerted_rug"] = True
+                        _wallet_outcome(addr, False)
                         # ── Feed pattern memory (loss) ──────────────
                         pm_key2 = f"{info.get('alert_type','?')}:{info.get('narrative','?')}"
                         pm2 = pattern_memory.setdefault(pm_key2, {"wins":0,"losses":0,"total":0,"avg_mult":0.0,"last_updated":0})
