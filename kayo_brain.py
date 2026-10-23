@@ -3242,7 +3242,7 @@ def _build_rick_card(t: Dict, ai: str = "", is_first_alert: bool = False, watche
 # ── VISUAL SCAN CARD (Rick Bot style image) ──────────────────────────────
 import io as _io
 
-def _draw_sparkline(draw, data, x, y, w, h, color_up, color_down):
+def _draw_sparkline(draw, data, x, y, w, h, color_up, color_down, bg=(22, 27, 34)):
     """Draw a mini sparkline chart on an ImageDraw object."""
     if not data or len(data) < 2:
         draw.text((x, y + h//2 - 8), "No chart data", fill="#666666")
@@ -3257,11 +3257,53 @@ def _draw_sparkline(draw, data, x, y, w, h, color_up, color_down):
     # Fill area
     fill_pts = points + [(points[-1][0], y + h), (points[0][0], y + h)]
     color = color_up if data[-1] >= data[0] else color_down
-    draw.polygon(fill_pts, fill=color + "20")  # semi-transparent fill
+    # v62: tuple-safe area fill (was tuple+str crash — killed every image card)
+    fill = tuple(int(cv * 0.18 + bv * 0.82) for cv, bv in zip(color, bg))
+    draw.polygon(fill_pts, fill=fill)
     # Line
     draw.line(points, fill=color, width=2)
     # Last point dot
     draw.ellipse([points[-1][0]-3, points[-1][1]-3, points[-1][0]+3, points[-1][1]+3], fill=color)
+
+def _card_fonts():
+    """v62: Inter (labels) + JetBrains Mono (numbers) for the scan card image.
+    Bundled in fonts/ — falls back to DejaVu then PIL default."""
+    import os as _os
+    from PIL import ImageFont
+    inter_path = next((p for p in ("fonts/Inter.ttf", "/app/fonts/Inter.ttf") if _os.path.exists(p)), None)
+    mono_path  = next((p for p in ("fonts/JetBrainsMono.ttf", "/app/fonts/JetBrainsMono.ttf") if _os.path.exists(p)), None)
+    DV  = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    DVB = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+
+    def _f(path, size, axes=None, fb=None):
+        try:
+            f = ImageFont.truetype(path, size)
+            if axes:
+                try: f.set_variation_by_axes(axes)
+                except Exception: pass
+            return f
+        except Exception:
+            for cand in (fb, DV, DVB):
+                if not cand: continue
+                try: return ImageFont.truetype(cand, size)
+                except Exception: continue
+            return ImageFont.load_default()
+
+    if inter_path:
+        return {
+            "lg":      _f(inter_path, 30, [28, 700], DVB),
+            "md":      _f(inter_path, 17, [16, 600]),
+            "sm":      _f(inter_path, 14, [14, 500]),
+            "xs":      _f(inter_path, 11, [11, 500]),
+            "bold":    _f(mono_path or inter_path, 22, [800], DVB),
+            "mono_md": _f(mono_path or inter_path, 16, [700], DVB),
+            "mono_sm": _f(mono_path or inter_path, 12, [600]),
+        }
+    return {
+        "lg": _f(DVB, 28), "md": _f(DV, 18), "sm": _f(DV, 14), "xs": _f(DV, 11),
+        "bold": _f(DVB, 20), "mono_md": _f(DVB, 17), "mono_sm": _f(DV, 12),
+    }
+
 
 def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     """Generate a Rick Bot-style visual scan card as a PNG image."""
@@ -3288,22 +3330,11 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     img = Image.new('RGB', (W, H), BG)
     draw = ImageDraw.Draw(img)
 
-    # Try to load fonts
-    try:
-        font_lg = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 28)
-        font_md = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 18)
-        font_sm = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 14)
-        font_xs = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 11)
-        font_bold = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 20)
-    except:
-        try:
-            font_lg = ImageFont.truetype("DejaVuSans-Bold.ttf", 28)
-            font_md = ImageFont.truetype("DejaVuSans.ttf", 18)
-            font_sm = ImageFont.truetype("DejaVuSans.ttf", 14)
-            font_xs = ImageFont.truetype("DejaVuSans.ttf", 11)
-            font_bold = ImageFont.truetype("DejaVuSans-Bold.ttf", 20)
-        except:
-            font_lg = font_md = font_sm = font_xs = font_bold = ImageFont.load_default()
+    # v62: Inter + JetBrains Mono (bundled), graceful fallback
+    F = _card_fonts()
+    font_lg, font_md, font_sm = F["lg"], F["md"], F["sm"]
+    font_xs, font_bold = F["xs"], F["bold"]
+    font_mono_md, font_mono_sm = F["mono_md"], F["mono_sm"]
 
     # Extract data
     sym = t.get("sym", "???")
@@ -3389,7 +3420,7 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
         draw.rounded_rectangle([cx, cy, cx + cell_w, cy + cell_h], radius=8, fill=CARD_BG)
         draw.text((cx + 12, cy + 8), label, font=font_xs, fill=MUTED)
         val_color = GREEN if "+" in value and "Change" in label and float(value.replace("+","").replace("%","")) > 0 else RED if "Change" in label and float(value.replace("+","").replace("%","")) < 0 else TEXT
-        draw.text((cx + 12, cy + 26), value, font=font_md, fill=val_color)
+        draw.text((cx + 12, cy + 26), value, font=font_mono_md, fill=val_color)
 
     y = y_grid + 2 * (cell_h + 10) + 10
 
@@ -3404,8 +3435,9 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     draw.rounded_rectangle([30, y, 30 + bar_w, y + bar_h], radius=6, fill=(30, 30, 35))
     if buy_w > 0:
         draw.rounded_rectangle([30, y, 30 + buy_w, y + bar_h], radius=6, fill=GREEN)
-    draw.text((40, y + 3), f"🟢 {b1h} Buys ({bp:.0f}%)", font=font_xs, fill=(0, 0, 0))
-    draw.text((30 + bar_w - 120, y + 3), f"{100-bp:.0f}% 🔴 {s1h} Sells", font=font_xs, fill=RED)
+        buy_fill = (0, 0, 0) if bp >= 30 else GREEN
+    draw.text((40, y + 5), f"BUYS {b1h}  ({bp:.0f}%)", font=font_mono_sm, fill=buy_fill)
+    draw.text((30 + bar_w - 140, y + 5), f"({100-bp:.0f}%)  SELLS {s1h}", font=font_mono_sm, fill=RED)
     y += bar_h + 20
 
     # ── HOLDER INFO ──
@@ -3427,15 +3459,16 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
 
     # ── BADGES ──
     badges = []
-    if t.get("is_renounced"): badges.append(("✅ Renounced", GREEN))
-    if t.get("lp_locked"): badges.append(("🔒 LP Locked", GREEN))
-    if t.get("boost_active", 0) > 0: badges.append(("💰 Boosted", YELLOW))
-    if t.get("has_profile"): badges.append(("📋 Verified", BLUE))
-    if t.get("is_honeypot"): badges.append(("🚨 Honeypot", RED))
+    if t.get("is_renounced"): badges.append(("Renounced", GREEN))
+    if t.get("lp_locked"): badges.append(("LP Locked", GREEN))
+    if t.get("boost_active", 0) > 0: badges.append(("Boosted", YELLOW))
+    if t.get("has_profile"): badges.append(("Verified", BLUE))
+    if t.get("is_honeypot"): badges.append(("Honeypot", RED))
     bx = 30
     for badge_text, badge_color in badges[:5]:
-        bw = len(badge_text) * 7 + 16
-        draw.rounded_rectangle([bx, y, bx + bw, y + 22], radius=6, fill=badge_color + "30")
+        bw = int(len(badge_text) * 7.2) + 22
+        pill = tuple(int(cv * 0.22 + bv * 0.78) for cv, bv in zip(badge_color, (13, 17, 23)))
+        draw.rounded_rectangle([bx, y, bx + bw, y + 22], radius=6, fill=pill)
         draw.text((bx + 8, y + 3), badge_text, font=font_xs, fill=badge_color)
         bx += bw + 8
         if bx > W - 100: break
@@ -3446,14 +3479,14 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     y += 10
     short_addr = f"{addr[:20]}...{addr[-12:]}" if len(addr) > 35 else addr
     draw.text((30, y), f"Contract:", font=font_xs, fill=MUTED)
-    draw.text((100, y), short_addr, font=font_xs, fill=BLUE)
+    draw.text((100, y), short_addr, font=font_mono_sm, fill=BLUE)
     y += 20
 
     # ── AI VERDICT ──
     if ai and ai.strip():
         draw.line([20, y, W - 20, y], fill=BORDER, width=1)
         y += 10
-        draw.text((30, y), "🧠 KAYO AI VERDICT", font=font_sm, fill=PURPLE)
+        draw.text((30, y), "KAYO AI VERDICT", font=font_sm, fill=PURPLE)
         y += 22
         # Wrap AI text
         ai_text = ai.strip()[:200]
@@ -3475,7 +3508,7 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     y_footer = H - 50
     draw.rectangle([0, y_footer, W, H], fill=CARD_BG)
     draw.line([0, y_footer, W, y_footer], fill=BORDER, width=1)
-    draw.text((30, y_footer + 10), "🦅 KAYO BRAIN", font=font_xs, fill=ORANGE)
+    draw.text((30, y_footer + 10), "KAYO BRAIN", font=font_xs, fill=ORANGE)
     draw.text((W - 150, y_footer + 10), "Powered by Kayo", font=font_xs, fill=MUTED)
 
     buf = _io.BytesIO()
