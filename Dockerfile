@@ -13,6 +13,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app code + state file
 COPY kayo_brain.py .
 COPY kayo_state.json .
+COPY fonts/ ./fonts/
 
 # Kayo starts its own Flask health server on $PORT (Render injects this)
 CMD ["python", "kayo_brain.py"]
