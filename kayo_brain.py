@@ -7779,12 +7779,10 @@ async def bg_main_scanner(app: Application):
                 if GROUP_CHAT_ID == 0: continue
 
                 try:
-                    sent_msg = await app.bot.send_message(
-                        GROUP_CHAT_ID, card,
-                        parse_mode="Markdown",
-                        reply_markup=buttons,
-                        disable_web_page_preview=True,
-                        reply_to_message_id=_reply_to(addr),
+                    sent_msg = await send_scan_card_with_image(
+                        app.bot, GROUP_CHAT_ID, tok_dict, "",
+                        reply_markup=buttons, alert_type=alert_type,
+                        reply_to=_reply_to(addr),
                     )
                     if getattr(sent_msg, "message_id", None):
                         alert_msg_ids.setdefault(addr, sent_msg.message_id)
@@ -7807,7 +7805,8 @@ async def bg_main_scanner(app: Application):
                 # Fire AI verdict as non-blocking task
                 async def _add_ai_verdict(msg_id: int, chat_id: int, sym_: str, at: str,
                                            fdv_: float, liq_: float, ch5m_: float, ch1h_: float,
-                                           b1h_: int, s1h_: int, bp_: float, vs_: float, nar_: str):
+                                           b1h_: int, s1h_: int, bp_: float, vs_: float, nar_: str,
+                                           is_photo: bool = False):
                     try:
                         ai_v = await asyncio.wait_for(
                             ai_ask(
@@ -7822,23 +7821,32 @@ async def bg_main_scanner(app: Application):
                             timeout=12
                         )
                         if ai_v and ai_v.strip():
+                            # v66: photo cards get their CAPTION edited, text cards their text
                             try:
-                                await app.bot.edit_message_text(
+                                await (app.bot.edit_message_caption(
+                                    chat_id=chat_id, message_id=msg_id,
+                                    caption=(card + f"\n\n\U0001f9e0 *Kayo:* _{ai_v}_")[:1024],
+                                    parse_mode="Markdown",
+                                    reply_markup=buttons,
+                                ) if is_photo else app.bot.edit_message_text(
                                     chat_id=chat_id, message_id=msg_id,
                                     text=card + f"\n\n\U0001f9e0 *Kayo:* _{ai_v}_",
                                     parse_mode="Markdown",
                                     reply_markup=buttons,
                                     disable_web_page_preview=True,
-                                )
+                                ))
                             except Exception:
                                 try:
                                     plain_ai = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', ai_v)
-                                    await app.bot.edit_message_text(
+                                    await (app.bot.edit_message_caption(
+                                        chat_id=chat_id, message_id=msg_id,
+                                        caption=(card + f"\n\U0001f9e0 Kayo: {plain_ai}")[:1024],
+                                    ) if is_photo else app.bot.edit_message_text(
                                         chat_id=chat_id, message_id=msg_id,
                                         text=card + f"\n\U0001f9e0 Kayo: {plain_ai}",
                                         reply_markup=buttons,
                                         disable_web_page_preview=True,
-                                    )
+                                    ))
                                 except Exception:
                                     pass
                     except Exception:
@@ -7847,7 +7855,8 @@ async def bg_main_scanner(app: Application):
                 asyncio.create_task(_add_ai_verdict(
                     sent_msg.message_id, GROUP_CHAT_ID,
                     sym, alert_type, fdv, liq, ch5m, ch1h,
-                    b1h, s1h, buy_pct, vol_spike, nar
+                    b1h, s1h, buy_pct, vol_spike, nar,
+                    bool(getattr(sent_msg, "photo", None)),
                 ))
 
                 await asyncio.sleep(1)
@@ -8233,13 +8242,11 @@ async def bg_new_launch_scanner(app: Application):
                 _apply_rc_enrichment(tok_nl)
                 card_nl = build_alert_card(tok_nl, nl_type, ai)
                 try:
-                    msg_sent_nl = await app.bot.send_message(
-                        chat_id=GROUP_CHAT_ID,
-                        text=card_nl,
-                        parse_mode="Markdown",
+                    msg_sent_nl = await send_scan_card_with_image(
+                        app.bot, GROUP_CHAT_ID, tok_nl, ai,
                         reply_markup=scan_buttons(addr, sym, tok_nl.get("pair_addr","")),
-                        disable_web_page_preview=True,
-                        reply_to_message_id=_reply_to(addr),
+                        alert_type=nl_type,
+                        reply_to=_reply_to(addr),
                     )
                     if getattr(msg_sent_nl, "message_id", None):
                         alert_msg_ids.setdefault(addr, msg_sent_nl.message_id)
@@ -8511,12 +8518,10 @@ async def bg_established_scanner(app: Application):
                         est_type = "insider"
                     card = build_alert_card(tok_est, est_type, "")
                     buttons = scan_buttons(addr, sym, tok_est["pair_addr"])
-                    sent_msg = await app.bot.send_message(
-                        GROUP_CHAT_ID, card,
-                        parse_mode="Markdown",
-                        reply_markup=buttons,
-                        disable_web_page_preview=True,
-                        reply_to_message_id=_reply_to(addr),
+                    sent_msg = await send_scan_card_with_image(
+                        app.bot, GROUP_CHAT_ID, tok_est, "",
+                        reply_markup=buttons, alert_type=est_type,
+                        reply_to=_reply_to(addr),
                     )
                     if getattr(sent_msg, "message_id", None):
                         alert_msg_ids.setdefault(addr, sent_msg.message_id)
@@ -8749,12 +8754,10 @@ async def bg_heat_scanner(app: Application):
                                else "revival")
                     card = build_alert_card(tok_heat, _h_type, "")
                     buttons = scan_buttons(addr, sym, tok_heat["pair_addr"])
-                    sent_msg = await app.bot.send_message(
-                        GROUP_CHAT_ID, card,
-                        parse_mode="Markdown",
-                        reply_markup=buttons,
-                        disable_web_page_preview=True,
-                        reply_to_message_id=_reply_to(addr),
+                    sent_msg = await send_scan_card_with_image(
+                        app.bot, GROUP_CHAT_ID, tok_heat, "",
+                        reply_markup=buttons, alert_type=_h_type,
+                        reply_to=_reply_to(addr),
                     )
                     if getattr(sent_msg, "message_id", None):
                         alert_msg_ids.setdefault(addr, sent_msg.message_id)
