@@ -4089,7 +4089,7 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     buttons = scan_buttons(addr, t.get("sym", ""), t.get("pair_addr", ""))
     await msg.delete()
     sent = await send_scan_card_with_image(
-        u.effective_message.bot, u.effective_chat.id, t, "",
+        c.bot, u.effective_chat.id, t, "",
         reply_markup=buttons, pro=True
     )
     if getattr(sent, "message_id", None):
@@ -5674,7 +5674,7 @@ async def handle_refresh_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
         pass
     try:
         sent_r = await send_scan_card_with_image(
-            query.message.bot, query.message.chat_id, t, ai_verdict,
+            c.bot, query.message.chat_id, t, ai_verdict,
             reply_markup=btns, reply_to=query.message.message_id, pro=True
         )
         if getattr(sent_r, "message_id", None):
@@ -5882,7 +5882,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                 buttons = scan_buttons(ca, t.get("sym", ""), t.get("pair_addr", ""))
                 await scanning_msg.delete()
                 sent = await send_scan_card_with_image(
-                    u.effective_message.bot, u.effective_chat.id, t, "",
+                    c.bot, u.effective_chat.id, t, "",
                     reply_markup=buttons, pro=True
                 )
                 if getattr(sent, "message_id", None):
