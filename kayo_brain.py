@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v48 — PRO REBUILD                     ║
+║                    KAYO BRAIN v69 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v48", 200
+def _root(): return "🦅 Kayo Brain v69", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -613,7 +613,6 @@ async def get_live_market_context() -> str:
     Used to ground every AI prompt — no more outdated price hallucinations.
     Refreshes at most once per minute (cached).
     """
-    global _market_ctx_cache
     now = time.time()
     if _market_ctx_cache["data"] and (now - _market_ctx_cache["ts"]) < _MARKET_CTX_TTL:
         return _market_ctx_cache["data"]
@@ -634,10 +633,6 @@ async def get_live_market_context() -> str:
             ) as r:
                 if r.status == 200:
                     d = await r.json()
-                    btc  = d.get("bitcoin", {})
-                    sol  = d.get("solana", {})
-                    eth  = d.get("ethereum", {})
-                    bnb  = d.get("binancecoin", {})
                     fg   = await cg_fear_greed()
                     fg_v = fg.get("value", "?")
                     fg_c = fg.get("value_classification", "?")
@@ -656,7 +651,6 @@ async def get_live_market_context() -> str:
                         pass
 
                     # (Solana gainers removed — was adding 5-10s latency to every AI call)
-                    sol_gainers = ""
 
                     # Format all coins dynamically
                     def _fmt_coin(name_id, data, d):
@@ -1243,7 +1237,7 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
             if price_lines:
                 # Prepend fresh prices to the system message
                 fresh_block = (
-                    f"\n\n[ON-DEMAND LIVE PRICES — fetched just now]\n"
+                    "\n\n[ON-DEMAND LIVE PRICES — fetched just now]\n"
                     + "\n".join(price_lines)
                     + "\nUse THESE prices — they are more recent than the context above.\n"
                 )
@@ -1871,7 +1865,6 @@ async def unified_token_scan(address: str) -> Dict:
     vol_spike = v5m / max(avg_5m_vol, 1)
 
     # Birdeye extra: age, market data
-    age_str = be_ov_data.get("age", "")
     market_cap_be = float(be_ov_data.get("marketCap", 0) or 0)
 
     # Risk score
@@ -2130,12 +2123,12 @@ async def cmd_hourly_burp(u, c):
             card += f"{i}. ${t['sym']} `{_short_k(t.get('mcap',0))}` +{ch:.1f}% Liq `{_short_k(t.get('liq',0))}`\n"
 
         if dipped:
-            card += f"\n💨 *DIPPED (potential bounce)*\n"
+            card += "\n💨 *DIPPED (potential bounce)*\n"
             for i, t in enumerate(dipped, 1):
                 ch = t.get("ch1h", 0)
                 card += f"{i}. ${t['sym']} `{_short_k(t.get('mcap',0))}` {ch:.1f}% Liq `{_short_k(t.get('liq',0))}`\n"
 
-        card += f"\n━━━━━━━━━━━━━━━━━━━━━\n"
+        card += "\n━━━━━━━━━━━━━━━━━━━━━\n"
         card += f"Sources: DS+GT+BE+JUP · {len(tokens)} tokens scanned"
 
         await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
@@ -2204,7 +2197,7 @@ async def cmd_ticker_search(u, c):
             card += f"{i}. ${t['sym']} — {_short_k(t['mcap'])}{ch_str} · {age}\n"
             card += f"   `{t['addr'][:20]}...`\n"
 
-        card += f"\n━━━━━━━━━━━━━━━━━━━━━"
+        card += "\n━━━━━━━━━━━━━━━━━━━━━"
         card += "\nOldest first · verify before buying"
 
         await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
@@ -2228,7 +2221,7 @@ async def cmd_channel_summary(u, c):
 
         summary = await asyncio.wait_for(
             ai_ask(
-                f"Summarize the recent conversation in this crypto chat. "
+                "Summarize the recent conversation in this crypto chat. "
                 f"Key topics discussed, tokens mentioned, sentiment, and any important calls. "
                 f"Keep it to 5-6 bullet points max.\n\nMessages:\n" + "\n".join(messages[:40]),
                 fallback="Unable to summarize.",
@@ -2308,12 +2301,12 @@ async def cmd_zeros(u, c):
             await msg.edit_text("✅ No zero-liquidity tokens found in current scan. Market looks clean.")
             return
 
-        card = f"🚨 *ZERO LIQUIDITY ALERT*\n━━━━━━━━━━━━━━━━━━━━━\n"
+        card = "🚨 *ZERO LIQUIDITY ALERT*\n━━━━━━━━━━━━━━━━━━━━━\n"
         card += f"Found {len(zeros)} tokens with ZERO liquidity\n\n"
         for i, t in enumerate(zeros[:15], 1):
             card += f"{i}. ${t.get('sym','???')} — MC `{_short_k(t.get('mcap',0))}` · 🔴 RUG RISK\n"
             card += f"   `{t.get('address','')[:20]}...`\n"
-        card += f"\n⚠️ These tokens CANNOT be sold. Avoid or wait for liquidity."
+        card += "\n⚠️ These tokens CANNOT be sold. Avoid or wait for liquidity."
         await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
     except Exception as e:
         await msg.edit_text(f"❌ Scan failed: {e}")
@@ -2597,15 +2590,9 @@ def pumpfun_to_token(coin: Dict) -> Optional[Dict]:
         total_supply = float(coin.get("total_supply", 0) or 0)
         est_price = (mcap / total_supply) if (mcap > 0 and total_supply > 0) else 0
 
-        # v57: pump.fun 'complete' flag = graduated off the bonding curve
-        if coin.get("complete"):
-            pass  # graduation flag set below in return dict
-
         return {
-            "is_graduated": bool(coin.get("complete")),
             "address": mint, "sym": sym, "name": name,
             "price": est_price,
-            "created": int(created_ts) if created_ts else 0,
             "fdv": mcap, "mcap": mcap, "liq": liq,
             "liq_ratio": 30 if mcap > 0 else 0,
             "ch5m": 0, "ch1h": 0, "ch6h": 0, "ch24h": 0,
@@ -2625,7 +2612,7 @@ def pumpfun_to_token(coin: Dict) -> Optional[Dict]:
             "is_pumpfun_live": is_live,
             "is_graduated": is_graduated,
             "is_banned": is_banned,
-            "created": created_ts,
+            "created": int(created_ts * 1000) if created_ts else 0,  # ms — _age expects ms
             "_source": "pumpfun",
         }
     except Exception:
@@ -4178,13 +4165,13 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         try:
             ai_v = await asyncio.wait_for(
                 ai_ask(
-                    f"Solana token ${token_data['sym']} — MCap {_usd(token_data['mcap'])}, "
-                    f"liq {_usd(token_data['liq'])}, age {_age(token_data['created'])}, "
-                    f"5m {_pct(token_data['ch5m'])}, 1h {_pct(token_data['ch1h'])}, "
-                    f"24h {_pct(token_data['ch24h'])}, buy ratio {token_data['buy_pct']:.0f}%, "
-                    f"vol spike {token_data['vol_spike']:.1f}x, momentum {token_data['mscore']}/100, "
-                    f"risk {token_data['risk_score']}/100, narrative #{token_data['narrative']}, "
-                    f"honeypot={token_data['is_honeypot']}, lp_locked={token_data['lp_locked']}. "
+                    f"Solana token ${token_data.get('sym', '?')} — MCap {_usd(token_data.get('mcap', 0))}, "
+                    f"liq {_usd(token_data.get('liq', 0))}, age {_age(token_data.get('created', 0))}, "
+                    f"5m {_pct(token_data.get('ch5m', 0))}, 1h {_pct(token_data.get('ch1h', 0))}, "
+                    f"24h {_pct(token_data.get('ch24h', 0))}, buy ratio {token_data.get('buy_pct', 0):.0f}%, "
+                    f"vol spike {token_data.get('vol_spike', 0):.1f}x, momentum {token_data.get('mscore', 0)}/100, "
+                    f"risk {token_data.get('risk_score', 0)}/100, narrative #{token_data.get('narrative', '-')}, "
+                    f"honeypot={token_data.get('is_honeypot', False)}, lp_locked={token_data.get('lp_locked', False)}. "
                     "Give a sharp alpha verdict: is this worth aping right now? "
                     "Consider the current market conditions from your live context. "
                     "Call out any red flags. 2-3 direct sentences.",
@@ -5155,7 +5142,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v48 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v69 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -5736,10 +5723,10 @@ async def handle_refresh_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
         return
 
     ai_verdict = await ai_ask(
-        f"Solana token ${t['sym']} — MCap {_usd(t['mcap'])}, liq {_usd(t['liq'])}, "
-        f"age {_age(t['created'])}, 5m {_pct(t['ch5m'])}, 1h {_pct(t['ch1h'])}, "
-        f"24h {_pct(t['ch24h'])}, buy ratio {t['buy_pct']:.0f}%, vol spike {t['vol_spike']:.1f}x, "
-        f"momentum {t['mscore']}/100, risk {t['risk_score']}/100. "
+        f"Solana token ${t.get('sym', '?')} — MCap {_usd(t.get('mcap', 0))}, liq {_usd(t.get('liq', 0))}, "
+        f"age {_age(t.get('created', 0))}, 5m {_pct(t.get('ch5m', 0))}, 1h {_pct(t.get('ch1h', 0))}, "
+        f"24h {_pct(t.get('ch24h', 0))}, buy ratio {t.get('buy_pct', 0):.0f}%, vol spike {t.get('vol_spike', 0):.1f}x, "
+        f"momentum {t.get('mscore', 0)}/100, risk {t.get('risk_score', 0)}/100. "
         "Sharp verdict: is this still worth aping right now? 2 sentences.",
         fallback="",
         inject_market=True
@@ -5996,13 +5983,13 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                     try:
                         ai_v = await asyncio.wait_for(
                             ai_ask(
-                                f"Solana token ${token_data['sym']} — MCap {_usd(token_data['mcap'])}, "
-                                f"liq {_usd(token_data['liq'])}, age {_age(token_data['created'])}, "
-                                f"5m {_pct(token_data['ch5m'])}, 1h {_pct(token_data['ch1h'])}, "
-                                f"24h {_pct(token_data['ch24h'])}, buy ratio {token_data['buy_pct']:.0f}%, "
-                                f"vol spike {token_data['vol_spike']:.1f}x, momentum {token_data['mscore']}/100, "
-                                f"risk {token_data['risk_score']}/100, narrative #{token_data['narrative']}, "
-                                f"honeypot={token_data['is_honeypot']}, lp_locked={token_data['lp_locked']}. "
+                                f"Solana token ${token_data.get('sym', '?')} — MCap {_usd(token_data.get('mcap', 0))}, "
+                                f"liq {_usd(token_data.get('liq', 0))}, age {_age(token_data.get('created', 0))}, "
+                                f"5m {_pct(token_data.get('ch5m', 0))}, 1h {_pct(token_data.get('ch1h', 0))}, "
+                                f"24h {_pct(token_data.get('ch24h', 0))}, buy ratio {token_data.get('buy_pct', 0):.0f}%, "
+                                f"vol spike {token_data.get('vol_spike', 0):.1f}x, momentum {token_data.get('mscore', 0)}/100, "
+                                f"risk {token_data.get('risk_score', 0)}/100, narrative #{token_data.get('narrative', '-')}, "
+                                f"honeypot={token_data.get('is_honeypot', False)}, lp_locked={token_data.get('lp_locked', False)}. "
                                 "Give a sharp alpha verdict: is this worth aping right now? "
                                 "Call out any red flags. 2-3 direct sentences.",
                                 fallback="",
@@ -9494,7 +9481,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v48 ready — "
+        f"🦅 Kayo Brain v69 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
