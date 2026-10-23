@@ -10095,7 +10095,7 @@ def main():
             asyncio.create_task(bg_wallet_tracker(app))
             asyncio.create_task(bg_migrate_monitor(app))
             asyncio.create_task(bg_weekly_leaderboard(app))
-            asyncio.create_task(bg_live_card_updater(app))  # v67: LIVE self-updating cards
+            # v68: LIVE auto-updater DISABLED per user — cards only update via the refresh button
             logger.info("13 scanners started OK — v44")
             if GROUP_CHAT_ID:
                 logger.info("GROUP_CHAT_ID=%s — alerts ENABLED", GROUP_CHAT_ID)
