@@ -173,6 +173,8 @@ ath_tracker:     Dict[str, dict]         = {}  # addr -> {sym, first_mcap, ath_m
 # v44: Persistence for scanner resume + dead-token detection
 scanner_cooldowns: Dict[str, Dict[str, float]] = {}  # scanner_name -> {addr: last_alert_ts}
 volume_snapshots:  Dict[str, Dict] = {}  # addr -> {vol_1h, vol_24h, ts, mcap, sym, age_days}
+liq_snapshots:     Dict[str, Dict] = {}  # v63: addr -> {liq, ts} — liquidity-drain early warning
+holder_snapshots:  Dict[str, Dict] = {}  # v63: addr -> {h, ts, h_prev, ts_prev} — holder trend
 last_scan_ts:      float = 0  # last successful scan timestamp (for resume)
 watchlist_seen:  "OrderedDict[str, int]" = OrderedDict()
 seen_news_ids:   Set[str]                = set()
@@ -268,6 +270,8 @@ async def _save():
             "token_watchers": dict(list(_token_watchers.items())[-500:]),
             "scanner_cooldowns": scanner_cooldowns,
             "volume_snapshots": dict(list(volume_snapshots.items())[-2000:]),
+            "liq_snapshots":    dict(list(liq_snapshots.items())[-2000:]),
+            "holder_snapshots": dict(list(holder_snapshots.items())[-2000:]),
             "last_scan_ts": last_scan_ts,
         }
         raw = json.dumps(data)
@@ -348,8 +352,10 @@ async def _load():
             _sorted_ath = sorted(_saved_ath.items(), key=lambda kv: (kv[1] or {}).get("first_seen", 0))
             _saved_ath = dict(_sorted_ath[-2000:])
         ath_tracker = _saved_ath
-        global dropped_calls, pattern_memory, scanner_cooldowns, volume_snapshots, last_scan_ts
+        global dropped_calls, pattern_memory, scanner_cooldowns, volume_snapshots, last_scan_ts, liq_snapshots, holder_snapshots
         dropped_calls   = d.get("dropped_calls", {})
+        liq_snapshots    = d.get("liq_snapshots", {}) or {}
+        holder_snapshots = d.get("holder_snapshots", {}) or {}
         pattern_memory  = d.get("pattern_memory", {})
         scanner_cooldowns = d.get("scanner_cooldowns", {})
         volume_snapshots  = d.get("volume_snapshots", {})
@@ -2857,8 +2863,20 @@ async def _enrich_with_rugcheck(result: Dict) -> Dict:
                 sw = _smart_wallets_in(pairs_h)
                 if sw:
                     result["smart_wallets"] = sw
+                _sg, _rg = _wallet_signals(sw)
+                if _sg:
+                    result["smart_money_in"] = True
+                if _rg:
+                    result["rug_wallet_in"] = True
+                    _rf = result.setdefault("red_flags", [])
+                    if not any("SERIAL RUG WALLET" in str(x) for x in _rf):
+                        _rf.append("\U0001f6a8 SERIAL RUG WALLET in top holders ({0} rugged tokens)".format(_rg[0][2]))
             if rc.get("totalHolders"):
                 result["holder_count"] = int(rc.get("totalHolders") or 0)
+                _holder_trend_update(result.get("address") or addr, result["holder_count"])
+                _hd = _holder_trend_str({"address": result.get("address") or addr, "holder_count": result["holder_count"]})
+                if _hd:
+                    result["holder_delta_s"] = _hd
             # v48b: REAL dev% = creatorBalance / total supply (both raw units)
             cb = float(rc.get("creatorBalance") or 0)
             supply = float((rc.get("token") or {}).get("supply") or 0)
@@ -2978,8 +2996,20 @@ def _apply_rc_enrichment(tok):
             _wallet_note(o, addr)
         sw = _smart_wallets_in(pairs_h)
         if sw: tok["smart_wallets"] = sw
+        _sg, _rg = _wallet_signals(sw)
+        if _sg:
+            tok["smart_money_in"] = True
+        if _rg:
+            tok["rug_wallet_in"] = True
+            _rf = tok.setdefault("red_flags", [])
+            if not any("SERIAL RUG WALLET" in str(x) for x in _rf):
+                _rf.append("\U0001f6a8 SERIAL RUG WALLET in top holders ({0} rugged tokens)".format(_rg[0][2]))
     if rc.get("totalHolders"):
         tok["holder_count"] = int(rc.get("totalHolders") or 0)
+        _holder_trend_update(addr, tok["holder_count"])
+        _hd = _holder_trend_str({"address": addr, "holder_count": tok["holder_count"]})
+        if _hd:
+            tok["holder_delta_s"] = _hd
     nets = rc.get("insiderNetworks") or []
     if nets:
         tok["insider_clusters"] = len(nets)
@@ -3211,7 +3241,8 @@ def _build_rick_card(t: Dict, ai: str = "", is_first_alert: bool = False, watche
     else: th_l = "\U0001f465 TH: \u2014"
     hc = int(t.get("holder_count",0) or 0)
     aw = t.get("avg_wallet_age_weeks",0)
-    tot_l = f"\U0001f91d Total: {hc}" + (f" \u00b7 avg {int(aw)}w old" if aw else "")
+    _hd_s = f" \u00b7 {t['holder_delta_s']}" if t.get("holder_delta_s") else ""
+    tot_l = f"\U0001f91d Total: {hc}" + _hd_s + (f" \u00b7 avg {int(aw)}w old" if aw else "")
     bd_l = f"\u21b3 \U0001f4e6 {float(t.get('bundle_pct',0) or 0):.0f}% \U0001f3af {float(t.get('sniper_pct',0) or 0):.0f}% \U0001f464 {float(t.get('dev_pct',0) or 0):.1f}%"
     if t.get("insider_accounts") is not None and t.get("insider_accounts", 0) > 0:
         fr_l = (f"\U0001f575\ufe0f Insiders: {t.get('insider_clusters',0)} clusters \u00b7 "
@@ -3236,6 +3267,10 @@ def _build_rick_card(t: Dict, ai: str = "", is_first_alert: bool = False, watche
     sw = t.get("smart_wallets") or []
     _wf = _wallet_flag_line(sw)
     sw_l = ("\n" + _wf) if _wf else ""
+    if t.get("smart_money_in"):
+        sw_l += "\n\U0001f7e2 SMART MONEY IN \u2014 proven winner wallet holding"
+    if t.get("rug_wallet_in"):
+        sw_l += "\n\U0001f6a8 SERIAL RUG WALLET in top holders \u2014 caution"
     return "\n".join([hdr,f"{plat_e} {plat_t}",f"\U0001f4b0 USD: {ps}",fdv_l,liq_l,vol_l,txn_l,"",th_l,tot_l,bd_l,fr_l,ch_l,mo_l,"",f"`{addr}`",tags.strip(),fa,sw_l,ai_l]).strip()
 
 
@@ -3443,7 +3478,8 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     # ── HOLDER INFO ──
     draw.line([20, y, W - 20, y], fill=BORDER, width=1)
     y += 10
-    holder_text = f"Holders: {holders}" if holders > 0 else "Holders: —"
+    _hd_img = f"  ({t['holder_delta_s']})" if t.get("holder_delta_s") else ""
+    holder_text = f"Holders: {holders}" + _hd_img if holders > 0 else "Holders: —"
     liq_ratio = (liq / mcap * 100) if mcap > 0 else 0
     draw.text((30, y), holder_text, font=font_sm, fill=MUTED)
     draw.text((W - 200, y), f"Liq/MCap: {liq_ratio:.1f}%", font=font_sm, fill=MUTED)
@@ -3464,6 +3500,8 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     if t.get("boost_active", 0) > 0: badges.append(("Boosted", YELLOW))
     if t.get("has_profile"): badges.append(("Verified", BLUE))
     if t.get("is_honeypot"): badges.append(("Honeypot", RED))
+    if t.get("smart_money_in"): badges.append(("Smart Money", PURPLE))
+    if t.get("rug_wallet_in"): badges.append(("Rug Wallet", RED))
     bx = 30
     for badge_text, badge_color in badges[:5]:
         bw = int(len(badge_text) * 7.2) + 22
@@ -3697,6 +3735,37 @@ def _wallet_outcome(token_addr: str, is_win: bool):
                 v["losses"] = int(v.get("losses", 0) or 0) + 1
 
 
+def _wallet_signals(sw):
+    """v63: smart-money-in / serial-rug-in detection from outcome-aware wallet flags."""
+    smart = [(w, p, wins) for w, p, n, wins, losses in (sw or []) if wins >= 2 and losses < 2]
+    rug   = [(w, p, losses) for w, p, n, wins, losses in (sw or []) if losses >= 2]
+    return smart, rug
+
+
+def _holder_trend_update(addr: str, holder_count: int) -> None:
+    """v63: track holder count over time for +N/1h trend lines."""
+    now = time.time()
+    _hs = holder_snapshots.get(addr)
+    if not _hs:
+        holder_snapshots[addr] = {"h": holder_count, "ts": now, "h_prev": 0, "ts_prev": 0}
+        return
+    if _hs.get("h") and now - _hs.get("ts", 0) >= 1800:
+        _hs["h_prev"], _hs["ts_prev"] = _hs["h"], _hs["ts"]
+    _hs["h"], _hs["ts"] = holder_count, now
+
+
+def _holder_trend_str(t: Dict) -> str:
+    """v63: '+340 / 2h' holder delta for cards (needs a sample >=30min old)."""
+    hs = holder_snapshots.get(t.get("address") or "")
+    if not hs or not hs.get("h_prev"):
+        return ""
+    hrs = max(1, int((time.time() - hs.get("ts_prev", 0)) / 3600))
+    delta = int(t.get("holder_count", 0) or 0) - hs["h_prev"]
+    if delta == 0:
+        return ""
+    return "{0:+,} / {1}h".format(delta, hrs)
+
+
 def _wallet_flag_line(sw) -> str:
     """v61: render wallet flags for cards — smart vs serial rug."""
     if not sw:
@@ -3803,11 +3872,12 @@ def build_ca_card(t: Dict, ai: str = "") -> str:
     L.append("\u2501\u2501\u2501 SECURITY \u2501\u2501\u2501")
     ths = t.get("top_holders", []) or []
     hc  = int(t.get("holder_count", 0) or 0)
+    _ca_hd = f" ({t['holder_delta_s']})" if t.get("holder_delta_s") else ""
     if ths:
-        L.append(f"\U0001f3af Top 10: {sum(ths[:10]):.0f}% | {hc} (total)")
+        L.append(f"\U0001f3af Top 10: {sum(ths[:10]):.0f}% | {hc} (total){_ca_hd}")
         L.append("\U0001f465 TH: " + "|".join(f"{h:.1f}" for h in ths[:5]))
     else:
-        L.append(f"\U0001f3af Top 10: \u2014 | {hc} (total)")
+        L.append(f"\U0001f3af Top 10: \u2014 | {hc} (total){_ca_hd}")
     devp = float(t.get("dev_pct", 0) or 0)
     dev_usd = devp / 100 * mcap if mcap > 0 else 0
     big = sum(1 for h in ths if mcap > 0 and h / 100 * mcap >= 100_000)
@@ -3824,6 +3894,10 @@ def build_ca_card(t: Dict, ai: str = "") -> str:
     _wf = _wallet_flag_line(sw)
     if _wf:
         L.append(_wf)
+    if t.get("smart_money_in"):
+        L.append("\U0001f7e2 SMART MONEY IN \u2014 proven winner wallet holding")
+    if t.get("rug_wallet_in"):
+        L.append("\U0001f6a8 SERIAL RUG WALLET in top holders \u2014 caution")
     if t.get("lp_locked"):
         lp = "\U0001f512 LP Locked"
     elif t.get("is_pumpfun") and t.get("is_graduated"):
@@ -3879,6 +3953,7 @@ def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
         "pump": "🚀", "new": "🆕", "gem": "💎", "whale": "🐋", "momentum": "📈",
         "migration": "🔄", "rug": "⚠️", "insider": "🕵️",
         "launch": "🐣",        # pump.fun bonding-curve launch
+        "smart": "🎯",         # v63: proven smart money in the token
         "revival": "♻️",       # dead coin waking up (heat + est)
         "rebound": "🔁",       # dumped then bouncing
         "ancient": "🏛",       # years-old token moving
@@ -7675,6 +7750,8 @@ async def bg_main_scanner(app: Application):
                 _apply_rc_enrichment(tok_dict)
                 if (tok_dict.get("insider_accounts") or 0) >= INSIDER_ALERT_MIN_ACCOUNTS:
                     alert_type = "insider"
+                if tok_dict.get("smart_money_in") and alert_type in ("new", "launch", "pump"):
+                    alert_type = "smart"
 
                 card = build_alert_card(tok_dict, alert_type, "")
                 buttons = scan_buttons(addr, sym)
@@ -7809,6 +7886,29 @@ async def bg_followup_tracker(app: Application):
                 name = info.get("name", "")
                 chat = info.get("chat_id", GROUP_CHAT_ID)
                 age_since = _age(int(info.get("time", now) * 1000))
+
+                # ── v63: LIQUIDITY-DRAIN EARLY WARNING ── pre-rug alarm
+                _ls = liq_snapshots.get(addr) or {}
+                _prev_liq = float(_ls.get("liq", 0) or 0)
+                if liq_now > 0 and _prev_liq >= 2000 and liq_now < _prev_liq * 0.75 and not info.get("alerted_liqdrain"):
+                    _pct_drop = (1 - liq_now / _prev_liq) * 100
+                    _drain_msg = (
+                        f"\U0001f6a8 *LIQUIDITY DRAINING — ${sym}*\n"
+                        f"\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\n"
+                        f"Liquidity: `{_usd(_prev_liq)}` \u2192 `{_usd(liq_now)}` \u2014 *-{_pct_drop:.0f}%* since last check\n"
+                        f"Price still `{_price(cur_price)}` \u2014 exit window may be closing\n"
+                        f"`{addr}`"
+                    )
+                    try:
+                        await app.bot.send_message(chat, _drain_msg, parse_mode="Markdown",
+                                                   reply_markup=scan_buttons(addr, sym),
+                                                   disable_web_page_preview=True,
+                                                   reply_to_message_id=_reply_to(addr))
+                        dropped_calls[addr]["alerted_liqdrain"] = True
+                        asyncio.create_task(_save())
+                    except Exception as e:
+                        logger.debug(f"liq drain alert: {e}")
+                liq_snapshots[addr] = {"liq": liq_now, "ts": now}
 
                 # ── v46: MEGA milestones — 25x / 50x / 100x ─────────────
                 _mega = 0
