@@ -175,6 +175,7 @@ scanner_cooldowns: Dict[str, Dict[str, float]] = {}  # scanner_name -> {addr: la
 volume_snapshots:  Dict[str, Dict] = {}  # addr -> {vol_1h, vol_24h, ts, mcap, sym, age_days}
 liq_snapshots:     Dict[str, Dict] = {}  # v63: addr -> {liq, ts} — liquidity-drain early warning
 holder_snapshots:  Dict[str, Dict] = {}  # v63: addr -> {h, ts, h_prev, ts_prev} — holder trend
+_live_cards:       Dict[str, Dict] = {}  # v67: addr -> {msg_id, chat_id, until, photo} — LIVE self-updating cards
 last_scan_ts:      float = 0  # last successful scan timestamp (for resume)
 watchlist_seen:  "OrderedDict[str, int]" = OrderedDict()
 seen_news_ids:   Set[str]                = set()
@@ -3554,6 +3555,82 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     buf.seek(0)
     return buf
 
+def generate_update_card_image(kind: str, sym: str, data: Dict) -> "_io.BytesIO":
+    """v67: small styled banner for milestone/rug/drain followup updates."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+    W = 600
+    BG = (13, 17, 23); CARD_BG = (22, 27, 34)
+    TEXT = (240, 246, 252); MUTED = (139, 148, 158)
+    KINDS = {
+        "2x":    ((63, 185, 80),  "CALL CONFIRMED"),
+        "5x":    ((63, 185, 80),  "RUNNING"),
+        "10x":   ((63, 185, 80),  "MONSTER"),
+        "god":   ((255, 196, 0),  "GOD TIER"),
+        "rug":   ((248, 81, 73),  "RUGGED"),
+        "drain": ((255, 159, 70), "LIQ DRAINING"),
+    }
+    color, label = KINDS.get(kind, ((88, 166, 255), "UPDATE"))
+    mult = data.get("mult")
+    rows = data.get("rows", [])
+    H = 80 + (50 if mult else 0) + len(rows) * 30 + 14
+    img = Image.new('RGB', (W, H), BG)
+    draw = ImageDraw.Draw(img)
+    F = _card_fonts()
+    draw.rectangle([0, 0, W, 64], fill=CARD_BG)
+    draw.line([0, 64, W, 64], fill=color, width=3)
+    draw.text((30, 12), f"${sym}", font=F["lg"], fill=TEXT)
+    tag_w = int(len(label) * 7.2) + 30
+    draw.rounded_rectangle([W - tag_w - 30, 20, W - 30, 46], radius=8, fill=color)
+    draw.text((W - tag_w - 15, 25), label, font=F["xs"], fill=(13, 17, 23))
+    y = 78
+    if mult:
+        draw.text((30, y), f"{mult:.1f}x", font=F["bold"], fill=color)
+        y += 50
+    for lbl, val in rows:
+        draw.text((30, y), str(lbl), font=F["sm"], fill=MUTED)
+        draw.text((170, y), str(val), font=F["mono_md"], fill=TEXT)
+        y += 30
+    buf = _io.BytesIO()
+    img.save(buf, format='PNG', optimize=True)
+    buf.seek(0)
+    return buf
+
+
+async def send_update_card(bot, chat_id: int, caption: str, addr: str, sym: str,
+                           kind: str, data: Dict, reply_markup=None, reply_to: int = 0):
+    """v67: styled banner for followup updates (milestones/rug/drain).
+    Falls back to the existing text message if the image fails."""
+    buf = None
+    try:
+        buf = generate_update_card_image(kind, sym, data)
+    except Exception as e:
+        logger.debug(f"update card gen: {e}")
+    if buf:
+        try:
+            sent = await bot.send_photo(chat_id=chat_id, photo=buf, caption=caption[:1024],
+                                        parse_mode="Markdown", reply_markup=reply_markup,
+                                        disable_web_page_preview=True,
+                                        reply_to_message_id=reply_to or None)
+            buf.close()
+            return sent
+        except Exception as e:
+            logger.warning(f"update card send failed: {e} — text fallback")
+            try:
+                buf.close()
+            except Exception:
+                pass
+    try:
+        return await bot.send_message(chat_id=chat_id, text=caption, parse_mode="Markdown",
+                                      reply_markup=reply_markup, disable_web_page_preview=True,
+                                      reply_to_message_id=reply_to or None)
+    except Exception as e:
+        logger.error(f"update text send failed: {e}")
+        return False
+
+
 async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", reply_markup=None, alert_type: str = "", reply_to: int = 0, pro: bool = False):
     """Send a scan card as both image + text (Rick Bot style).
     v64: every stage is individually guarded — a failure in card text or
@@ -4094,6 +4171,8 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     )
     if getattr(sent, "message_id", None):
         alert_msg_ids.setdefault(addr, sent.message_id); _alert_ids_prune()
+        _live_cards[addr] = {"msg_id": sent.message_id, "chat_id": u.effective_chat.id,
+                             "until": time.time() + 3600, "photo": bool(getattr(sent, "photo", None))}
     # AI verdict as background task — sends follow-up when ready
     async def _scan_ai(msg_id, chat_id, token_data, btns):
         try:
@@ -5666,24 +5745,46 @@ async def handle_refresh_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
         inject_market=True
     )
     btns = scan_buttons(addr, t["sym"], t.get("pair_addr",""))
-    # Photo cards can't edit_text — send a FRESH card as a reply instead,
-    # and strip the old card's buttons so it can't be double-tapped.
+    # v67: refresh UPDATES THE CARD IN PLACE — no new message.
+    fresh_card = build_ca_card(t, "") + f"\n\n\U0001f504 Refreshed \u00b7 {time.strftime('%H:%M')}"
     try:
-        await query.message.edit_reply_markup(reply_markup=None)
+        if query.message.photo:
+            await query.message.edit_caption(caption=fresh_card[:1024], parse_mode="Markdown",
+                                             reply_markup=btns)
+        else:
+            await query.message.edit_text(text=fresh_card, parse_mode="Markdown",
+                                          reply_markup=btns, disable_web_page_preview=True)
+        _live_cards[addr] = {"msg_id": query.message.message_id, "chat_id": query.message.chat_id,
+                              "until": time.time() + 3600, "photo": bool(query.message.photo)}
+        alert_msg_ids.setdefault(addr, query.message.message_id); _alert_ids_prune()
+        if ai_verdict and ai_verdict.strip():
+            try:
+                await c.bot.send_message(
+                    query.message.chat_id,
+                    f"\U0001f9e0 *AI Verdict \u2014 ${t['sym']}*\n\n{ai_verdict}",
+                    parse_mode="Markdown", reply_markup=btns,
+                    disable_web_page_preview=True,
+                    reply_to_message_id=query.message.message_id)
+            except Exception:
+                pass
     except Exception:
-        pass
-    try:
-        sent_r = await send_scan_card_with_image(
-            c.bot, query.message.chat_id, t, ai_verdict,
-            reply_markup=btns, reply_to=query.message.message_id, pro=True
-        )
-        if getattr(sent_r, "message_id", None):
-            alert_msg_ids.setdefault(addr, sent_r.message_id)
-    except Exception:
-        await query.message.reply_text(
-            build_ca_card(t, ai_verdict), parse_mode="Markdown",
-            reply_markup=btns, disable_web_page_preview=True
-        )
+        # fallback: old behavior — fresh card as reply
+        try:
+            await query.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        try:
+            sent_r = await send_scan_card_with_image(
+                c.bot, query.message.chat_id, t, ai_verdict,
+                reply_markup=btns, reply_to=query.message.message_id, pro=True
+            )
+            if getattr(sent_r, "message_id", None):
+                alert_msg_ids.setdefault(addr, sent_r.message_id)
+        except Exception:
+            await query.message.reply_text(
+                build_ca_card(t, ai_verdict), parse_mode="Markdown",
+                reply_markup=btns, disable_web_page_preview=True
+            )
 
 
 async def handle_menu_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -5887,6 +5988,8 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                 )
                 if getattr(sent, "message_id", None):
                     alert_msg_ids.setdefault(ca, sent.message_id); _alert_ids_prune()
+                    _live_cards[ca] = {"msg_id": sent.message_id, "chat_id": u.effective_chat.id,
+                                       "until": time.time() + 3600, "photo": bool(getattr(sent, "photo", None))}
                 add_xp(uid, 5)
                 # Fire AI verdict as NON-BLOCKING background task — edits message when ready
                 async def _ca_ai_verdict(msg_id, chat_id, token_data, ca_addr, btns):
@@ -7872,6 +7975,40 @@ async def bg_main_scanner(app: Application):
 
         await asyncio.sleep(30)
 
+async def bg_live_card_updater(app: Application):
+    """v67: LIVE cards — freshly scanned cards update their own caption in place
+    every 5 min for 1 hour. No new messages; the data stays current."""
+    await asyncio.sleep(300)
+    while True:
+        try:
+            now = time.time()
+            for addr, info in list(_live_cards.items()):
+                if now > info.get("until", 0):
+                    _live_cards.pop(addr, None)
+                    continue
+                try:
+                    t = await full_token_scan(addr)
+                    if t.get("error"):
+                        continue
+                    card = build_ca_card(t, "") + f"\n\n\U0001f534 LIVE \u00b7 {time.strftime('%H:%M')}"
+                    btns = scan_buttons(addr, t.get("sym", ""), t.get("pair_addr", ""))
+                    if info.get("photo"):
+                        await app.bot.edit_message_caption(
+                            chat_id=info["chat_id"], message_id=info["msg_id"],
+                            caption=card[:1024], parse_mode="Markdown", reply_markup=btns)
+                    else:
+                        await app.bot.edit_message_text(
+                            chat_id=info["chat_id"], message_id=info["msg_id"],
+                            text=card, parse_mode="Markdown", reply_markup=btns,
+                            disable_web_page_preview=True)
+                except Exception as e:
+                    logger.debug(f"live card {addr}: {e}")
+                await asyncio.sleep(3)
+        except Exception as e:
+            logger.error(f"bg_live_card_updater: {e}", exc_info=True)
+        await asyncio.sleep(300)
+
+
 async def bg_followup_tracker(app: Application):
     """
     Tracks tokens Kayo dropped — fires celebratory or warning follow-ups.
@@ -7928,10 +8065,9 @@ async def bg_followup_tracker(app: Application):
                         f"`{addr}`"
                     )
                     try:
-                        await app.bot.send_message(chat, _drain_msg, parse_mode="Markdown",
-                                                   reply_markup=scan_buttons(addr, sym),
-                                                   disable_web_page_preview=True,
-                                                   reply_to_message_id=_reply_to(addr))
+                        await send_update_card(app.bot, chat, _drain_msg, addr, sym, "drain",
+                                               {"mult": None, "rows": [("Price", _price(cur_price)), ("Liquidity", f"{_usd(_prev_liq)} → {_usd(liq_now)}"), ("Drop", f"-{_pct_drop:.0f}%")]},
+                                               reply_markup=scan_buttons(addr, sym), reply_to=_reply_to(addr))
                         dropped_calls[addr]["alerted_liqdrain"] = True
                         asyncio.create_task(_save())
                     except Exception as e:
@@ -7954,10 +8090,9 @@ async def bg_followup_tracker(app: Application):
                         f"`{addr}`"
                     )
                     try:
-                        await app.bot.send_message(chat, _mega_msg, parse_mode="Markdown",
-                                                   reply_markup=scan_buttons(addr, sym),
-                                                   disable_web_page_preview=True,
-                                                   reply_to_message_id=_reply_to(addr))
+                        await send_update_card(app.bot, chat, _mega_msg, addr, sym, "god",
+                                               {"mult": _mega, "rows": [("From call", _price(entry)), ("Now", _price(cur_price)), ("MCap", _usd(cur_mcap)), ("Since call", age_since)]},
+                                               reply_markup=scan_buttons(addr, sym), reply_to=_reply_to(addr))
                         dropped_calls[addr][f"alerted_{_mega}x"] = True
                         _wallet_outcome(addr, True)
                         asyncio.create_task(_save())
@@ -7983,10 +8118,9 @@ async def bg_followup_tracker(app: Application):
                         f"\U0001f9e0 _{ai_verdict}_"
                     )
                     try:
-                        await app.bot.send_message(chat, msg, parse_mode="Markdown",
-                                                   reply_markup=scan_buttons(addr, sym),
-                                                   disable_web_page_preview=True,
-                                                   reply_to_message_id=_reply_to(addr))
+                        await send_update_card(app.bot, chat, msg, addr, sym, "10x",
+                                               {"mult": mult, "rows": [("From call", _price(entry)), ("Now", _price(cur_price)), ("MCap", _usd(cur_mcap)), ("Since call", age_since)]},
+                                               reply_markup=scan_buttons(addr, sym), reply_to=_reply_to(addr))
                         dropped_calls[addr]["alerted_10x"] = True
                         _wallet_outcome(addr, True)
                         # ── Feed pattern memory (win) ───────────────
@@ -8011,10 +8145,9 @@ async def bg_followup_tracker(app: Application):
                         f"`{addr}`"
                     )
                     try:
-                        await app.bot.send_message(chat, msg, parse_mode="Markdown",
-                                                   reply_markup=scan_buttons(addr, sym),
-                                                   disable_web_page_preview=True,
-                                                   reply_to_message_id=_reply_to(addr))
+                        await send_update_card(app.bot, chat, msg, addr, sym, "5x",
+                                               {"mult": mult, "rows": [("From call", _price(entry)), ("Now", _price(cur_price)), ("MCap", _usd(cur_mcap)), ("Since call", age_since)]},
+                                               reply_markup=scan_buttons(addr, sym), reply_to=_reply_to(addr))
                         dropped_calls[addr]["alerted_5x"] = True
                         _wallet_outcome(addr, True)
                         asyncio.create_task(_save())
@@ -8032,10 +8165,9 @@ async def bg_followup_tracker(app: Application):
                         f"`{addr}`"
                     )
                     try:
-                        await app.bot.send_message(chat, msg_2x, parse_mode="Markdown",
-                                                  reply_markup=scan_buttons(addr, sym),
-                                                  disable_web_page_preview=True,
-                                                  reply_to_message_id=_reply_to(addr))
+                        await send_update_card(app.bot, chat, msg_2x, addr, sym, "2x",
+                                               {"mult": mult, "rows": [("From call", _price(entry)), ("Now", _price(cur_price)), ("MCap", _usd(cur_mcap)), ("Since call", age_since)]},
+                                               reply_markup=scan_buttons(addr, sym), reply_to=_reply_to(addr))
                         dropped_calls[addr]["alerted_2x"] = True
                         _wallet_outcome(addr, True)
                         asyncio.create_task(_save())
@@ -8065,9 +8197,9 @@ async def bg_followup_tracker(app: Application):
                         f"`{addr}`"
                     )
                     try:
-                        await app.bot.send_message(chat, msg, parse_mode="Markdown",
-                                                   disable_web_page_preview=True,
-                                                   reply_to_message_id=_reply_to(addr))
+                        await send_update_card(app.bot, chat, msg, addr, sym, "rug",
+                                               {"mult": None, "rows": [("From call", _price(entry)), ("Now", _price(cur_price)), ("Liq", _usd(liq_now)), ("Since call", age_since)]},
+                                               reply_markup=scan_buttons(addr, sym), reply_to=_reply_to(addr))
                         dropped_calls[addr]["alerted_rug"] = True
                         _wallet_outcome(addr, False)
                         # ── Feed pattern memory (loss) ──────────────
@@ -9963,6 +10095,7 @@ def main():
             asyncio.create_task(bg_wallet_tracker(app))
             asyncio.create_task(bg_migrate_monitor(app))
             asyncio.create_task(bg_weekly_leaderboard(app))
+            asyncio.create_task(bg_live_card_updater(app))  # v67: LIVE self-updating cards
             logger.info("13 scanners started OK — v44")
             if GROUP_CHAT_ID:
                 logger.info("GROUP_CHAT_ID=%s — alerts ENABLED", GROUP_CHAT_ID)
