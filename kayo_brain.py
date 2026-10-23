@@ -3555,11 +3555,19 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     return buf
 
 async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", reply_markup=None, alert_type: str = "", reply_to: int = 0, pro: bool = False):
-    """Send a scan card as both image + text (Rick Bot style)."""
-    text_card = build_ca_card(t, ai) if pro else (build_scan_card(t, ai) if not alert_type else build_alert_card(t, alert_type, ai))
-
-    # Try to generate and send image
-    img_buf = generate_scan_card_image(t, ai)
+    """Send a scan card as both image + text (Rick Bot style).
+    v64: every stage is individually guarded — a failure in card text or
+    image generation degrades to the next format instead of killing the scan."""
+    try:
+        text_card = build_ca_card(t, ai) if pro else (build_scan_card(t, ai) if not alert_type else build_alert_card(t, alert_type, ai))
+    except Exception as e:
+        logger.error(f"Card text build failed: {e}", exc_info=True)
+        text_card = f"\u26a0\ufe0f Card error for `{t.get('address', '?')}` — raw scan data available via /diag"
+    img_buf = None
+    try:
+        img_buf = generate_scan_card_image(t, ai)
+    except Exception as e:
+        logger.error(f"Card image generation failed: {e}", exc_info=True)
     if img_buf:
         try:
             sent = await bot.send_photo(
@@ -3589,7 +3597,18 @@ async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", re
         return sent
     except Exception as e:
         logger.error(f"Text card send also failed: {e}")
-        return False
+        # v64: last resort — plain text, no Markdown, no buttons
+        try:
+            sent = await bot.send_message(
+                chat_id=chat_id,
+                text=str(text_card)[:4000],
+                disable_web_page_preview=True,
+                reply_to_message_id=reply_to or None,
+            )
+            return sent
+        except Exception as e2:
+            logger.error(f"Plain-text card send failed too: {e2}")
+            return False
 
 
 # Known protocol/AMM accounts to exclude from holder concentration
@@ -5918,7 +5937,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                 logger.error(f"CA auto-scan error for {ca}: {_ca_err}", exc_info=True)
                 try:
                     await u.effective_message.reply_text(
-                        f"\u274c Scan failed. Try `/scan {ca}`"
+                        f"\u274c Scan failed: {str(_ca_err)[:150]}\nTry `/scan {ca}`"
                     )
                 except Exception:
                     pass
