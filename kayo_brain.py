@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v69 — PRO REBUILD                     ║
+║                    KAYO BRAIN v70 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v69", 200
+def _root(): return "🦅 Kayo Brain v70", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -3818,6 +3818,12 @@ def _wallet_outcome(token_addr: str, is_win: bool):
                 v["losses"] = int(v.get("losses", 0) or 0) + 1
 
 
+def _cto_signal(name: str, desc: str, sym: str = "") -> bool:
+    """v70: CTO (community takeover) meta detection from name/symbol/description."""
+    import re as _re
+    blob = f"{name} {sym} {desc}".lower()
+    return bool(_re.search(r"\bcto\b", blob) or "community takeover" in blob or "community take over" in blob)
+
 def _wallet_signals(sw):
     """v63: smart-money-in / serial-rug-in detection from outcome-aware wallet flags."""
     smart = [(w, p, wins) for w, p, n, wins, losses in (sw or []) if wins >= 2 and losses < 2]
@@ -4037,6 +4043,7 @@ def build_alert_card(t: Dict, alert_type: str, ai: str = "") -> str:
         "migration": "🔄", "rug": "⚠️", "insider": "🕵️",
         "launch": "🐣",        # pump.fun bonding-curve launch
         "smart": "🎯",         # v63: proven smart money in the token
+        "cto": "🤝",          # v70: community takeover meta
         "revival": "♻️",       # dead coin waking up (heat + est)
         "rebound": "🔁",       # dumped then bouncing
         "ancient": "🏛",       # years-old token moving
@@ -5142,7 +5149,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v69 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v70 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6199,6 +6206,7 @@ def _be_token_to_pair(token: Dict) -> Optional[Dict]:
         if not addr: return None
         return {
             "address": addr,
+            "is_pumpfun": bool(addr.endswith("pump")),
             "sym": token.get("symbol", "???"),
             "name": token.get("name", token.get("symbol", "???")),
             "price": float(token.get("price", 0) or 0),
@@ -7142,21 +7150,19 @@ async def calc_token_velocity(addr: str) -> Dict:
 
 # ── 5. /migrate — Pump.fun → Raydium migration detector ──────────────
 async def _fetch_pump_graduated() -> List[Dict]:
-    """Get tokens that recently graduated from Pump.fun to Raydium."""
+    """v70: graduated pump.fun->pumpswap tokens via GeckoTerminal
+    (the pump.fun frontend API is dead - 403 since Oct 2026)."""
     try:
-        async with aiohttp.ClientSession() as s:
-            async with s.get(
-                "https://frontend-api-v3.pump.fun/coins",
-                params={"offset": "0", "limit": "50", "sort": "market_cap", "order": "DESC"},
-                headers=_PUMPFUN_HEADERS,
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as r:
-                if r.status == 200:
-                    coins = await r.json()
-                    if isinstance(coins, list):
-                        return [c for c in coins if c.get("raydium_pool")]
-    except Exception:
-        pass
+        coins = await pumpfun_latest(20) + await pumpfun_trending(20)
+        seen, out = set(), []
+        for c in coins:
+            pool = c.get("raydium_pool", "")
+            if pool and pool not in seen:
+                seen.add(pool)
+                out.append(c)
+        return out[:20]
+    except Exception as e:
+        logger.debug(f"_fetch_pump_graduated: {e}")
     return []
 
 async def migrate_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -7199,6 +7205,7 @@ async def bg_migrate_monitor(app):
     """
     await asyncio.sleep(300)
     seen_pools: Set[str] = set()
+    primed = False  # v70: first cycle only fills the dedupe set (no boot-spam)
 
     while True:
         try:
@@ -7211,33 +7218,35 @@ async def bg_migrate_monitor(app):
                 mint = coin.get("mint", "")
                 if not pool or pool in seen_pools: continue
                 seen_pools.add(pool)
+                if not primed:
+                    continue  # v70: boot cycle primes dedupe only
 
                 sym  = coin.get("symbol", "???")
                 name = coin.get("name", "")[:20]
                 mcap = float(coin.get("usd_market_cap", 0) or 0)
                 if mcap > 2_000_000 or mcap < 1000: continue   # v45: $2M cap
 
-                alert = (
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🔄 *PUMP → RAYDIUM*\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"🪙 *${sym}* — _{_md(name)}_\n"
-                    f"📊 MCap: `{_usd(mcap)}`\n"
-                    f"📋 `{mint}`\n"
-                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"_Just graduated to Raydium — early entry window_\n"
-                    f"Use `/scan {mint}` to analyze"
-                )
+                tok = {
+                    "address": mint, "sym": sym, "name": name,
+                    "price": 0, "mcap": mcap, "fdv": mcap, "liq": 0,
+                    "v1h": 0, "v24h": 0, "ch5m": 0, "ch1h": 0, "ch24h": 0,
+                    "b1h": 0, "s1h": 0, "buy_pct": 0, "vol_spike": 0,
+                    "holder_count": 0, "risk_score": 0, "narrative": "",
+                    "pair_addr": pool, "created": int(coin.get("created_timestamp", 0) or 0),
+                    "is_pumpfun": True, "is_graduated": True,
+                    "lp_locked": False, "lp_burned_graduated": True,
+                }
                 try:
-                    await app.bot.send_message(
-                        chat_id=GROUP_CHAT_ID,
-                        text=alert,
-                        parse_mode="Markdown",
+                    await send_scan_card_with_image(
+                        app.bot, GROUP_CHAT_ID, tok,
+                        "Just graduated from pump.fun to pumpswap/Raydium - early entry window. Tap Refresh for live data.",
+                        reply_markup=scan_buttons(mint, sym, pool),
+                        alert_type="migration",
                     )
                     await asyncio.sleep(1)
                 except Exception:
                     pass
-
+            primed = True
             await asyncio.sleep(300)
         except Exception as e:
             logger.error(f"[MIGRATE MONITOR] {e}")
@@ -7640,6 +7649,9 @@ async def bg_main_scanner(app: Application):
                                         "s1h": int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0),
                                         "buy_pct": 0, "vol_spike": 0,
                                         "pair_addr": p.get("pairAddress", ""),
+                                        "dex_id": p.get("dexId", ""),
+                                        "is_pumpfun": p.get("dexId") in ("pumpfun", "pumpswap"),
+                                        "is_graduated": p.get("dexId") in ("pumpswap", "raydium"),
                                         "created_str": "",
                                     }
                 except Exception as e:
@@ -7725,7 +7737,7 @@ async def bg_main_scanner(app: Application):
                         alert_type = "graduation"
 
                 # ── PUMP.FUN NEW LAUNCH — also low bar ──
-                elif is_pumpfun and not is_graduated:
+                elif is_pumpfun and is_graduated is False:  # v70: duck ONLY for certain curve tokens
                     if mcap >= 5_000 and mcap <= 2_000_000 and not pairs_map[addr].get("is_banned", False):
                         if pf_desc or pf_reply_count >= 3 or mcap >= 10_000:
                             alert_type = "launch"
@@ -7740,6 +7752,7 @@ async def bg_main_scanner(app: Application):
                 elif ch5m >= 5 and buy_pct >= 50:                               alert_type = "pump"
                 elif ch5m >= 3 and b5m >= 2 and buy_pct >= 50:                   alert_type = "pump"
                 elif ch5m >= 10 and buy_pct >= 40:                               alert_type = "pump"
+                elif buy_pct >= 65 and b1h >= 3 and vol_spike >= 1.2:             alert_type = "whale"  # v70: moved up — was unreachable behind 8 branches
 
                 # ── MOMENTUM: sustained 1h grind ──
                 elif ch1h >= 15 and buy_pct >= 45:                               alert_type = "momentum"
@@ -7755,8 +7768,7 @@ async def bg_main_scanner(app: Application):
                 elif is_boosted and buy_pct >= 48 and b1h >= 1:                   alert_type = "new"
 
                 # ── WHALE: heavy accumulation ──
-                elif buy_pct >= 65 and b1h >= 3 and vol_spike >= 1.2:             alert_type = "whale"
-
+                
                 # ── REVIVAL: dead token waking up (check volume snapshot) ──
                 elif addr in volume_snapshots:
                     snap = volume_snapshots[addr]
@@ -7771,6 +7783,9 @@ async def bg_main_scanner(app: Application):
                 # ── UNUSUAL: vol spike or narrative play ──
                 elif vol_spike >= 1.4 and b1h >= 2 and buy_pct >= 48:             alert_type = "unusual"
                 elif is_rebranded and buy_pct >= 48 and (ch1h >= 1 or ch5m >= 1): alert_type = "rebrand"
+
+                if alert_type and _cto_signal(name, pf_desc, sym):
+                    alert_type = "cto"  # v70: CTO meta trumps basic types
 
                 if not alert_type: continue
 
@@ -8347,7 +8362,7 @@ async def bg_new_launch_scanner(app: Application):
                 if tg_link:    tok_nl["green_flags"].append("\U0001f4e8 Telegram community")
 
                 # Determine display type — new vs unusual
-                nl_type = "new" if age_min < 60 else ("unusual" if vs_new >= 3 else "gem")
+                nl_type = "narrative"  # v70: news-matched plays type themselves
 
                 ai = await ai_ask(
                     f"Solana token ${sym} (age {int(age_min)}min, score {score}/100): "
@@ -8490,6 +8505,9 @@ async def bg_established_scanner(app: Application):
                                         "s1h": int(((p.get("txns") or {}).get("h1") or {}).get("sells", 0) or 0),
                                         "buy_pct": 0, "vol_spike": 0,
                                         "pair_addr": p.get("pairAddress", ""),
+                                        "dex_id": p.get("dexId", ""),
+                                        "is_pumpfun": p.get("dexId") in ("pumpfun", "pumpswap"),
+                                        "is_graduated": p.get("dexId") in ("pumpswap", "raydium"),
                                         "created_str": "",
                                     }
                 except Exception as e:
@@ -9053,6 +9071,9 @@ async def bg_narrative_news_scanner(app: Application):
                             "narrative": nar, "tw_link": "", "tg_link": "", "web_link": "",
                             "boost_active": 0, "has_profile": False, "has_ad": False,
                             "pair_addr": p.get("pairAddress", ""),
+                            "dex_id": p.get("dexId", ""),
+                            "is_pumpfun": p.get("dexId") in ("pumpfun", "pumpswap"),
+                            "is_graduated": p.get("dexId") in ("pumpswap", "raydium"),
                             "mscore": min(100, int(abs(ch1h) + buy_pct/2 + vs*10)),
                         }
                         # ── v45: QUALITY GATE — LP locked + top10 ≤ 30% ──
@@ -9481,7 +9502,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v69 ready — "
+        f"🦅 Kayo Brain v70 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
