@@ -1,8 +1,10 @@
 FROM python:3.11-slim
 
-# Prevent Python from writing .pyc files and buffering stdout/stderr
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
+
+# v78: ffmpeg for voice notes (edge-tts MP3 -> Telegram OGG/Opus)
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg
 
 WORKDIR /app
 
@@ -13,7 +15,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app code + state file
 COPY kayo_brain.py .
 COPY kayo_state.json .
-COPY fonts/ ./fonts/
 
-# Kayo starts its own Flask health server on $PORT (Render injects this)
+# Ciel starts her own Flask health server on $PORT (Render injects this)
 CMD ["python", "kayo_brain.py"]
