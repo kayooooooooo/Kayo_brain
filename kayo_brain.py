@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v81 — PRO REBUILD                     ║
+║                    CIEL BRAIN v82 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -20,7 +20,7 @@ import aiohttp
 import redis.asyncio as aioredis
 import xml.etree.ElementTree as ET
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
-from telegram import WebAppInfo
+from telegram import WebAppInfo, MenuButtonWebApp
 from telegram.ext import (
     Application, CommandHandler, ContextTypes,
     CallbackQueryHandler, MessageHandler, MessageReactionHandler, filters,
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v81", 200
+def _root(): return "💠 Ciel Brain v82", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -4575,6 +4575,7 @@ def scan_buttons(addr: str, sym: str = "", pair_addr: str = "") -> InlineKeyboar
 async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
     add_xp(u.effective_user.id, 10)
     name = u.effective_user.first_name or "degen"
+    _dash_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
     markup = InlineKeyboardMarkup([
         [
             InlineKeyboardButton("\U0001f52c Scan Token",   callback_data="menu:scan"),
@@ -4612,8 +4613,14 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("\U0001f4cb Full Command List", callback_data="menu:help"),
         ],
     ])
+    # v82: dashboard launcher on top when host available
+    if _dash_host:
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("\U0001f4a0 Open Dashboard", web_app=WebAppInfo(url=f"https://{_dash_host}/app"))]]
+            + [list(r) for r in markup.inline_keyboard]
+        )
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v81*\n"
+        f"\U0001f4a0 *CIEL BRAIN v82*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4626,7 +4633,10 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """Paginated help with tappable category buttons."""
     markup = InlineKeyboardMarkup([
         [
+            InlineKeyboardButton("\U0001f4a0 Ciel Suite",  callback_data="help:suite"),
             InlineKeyboardButton("\U0001f52c Scan & Analyze",  callback_data="help:scan"),
+        ],
+        [
             InlineKeyboardButton("\U0001f50d Discover",        callback_data="help:discover"),
         ],
         [
@@ -4650,7 +4660,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v81 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v82 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5674,7 +5684,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v81 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v82 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6070,7 +6080,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v81 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v82 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -6094,6 +6104,18 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 
 HELP_PAGES = {
+    "suite": (
+        "💠 *CIEL SUITE* — the new weapons\n\n"
+        "┌ `/dash` — 📊 *Mini App Dashboard*: live feed, my calls, leaderboard, smart money, meta — one tap from the ☰ button\n"
+        "├ `/voice on|off` — 🎙️ voice notes: ask anything and add 'voice note' to hear Ciel speak\n"
+        "├ `/commentary on|off` — 📡 Ciel posts unsolicited analysis when BTC/SOL moves ±4%\n"
+        "├ `/backtest` — 📈 *'if you aped every call'* — measured win rates per alert type\n"
+        "├ `/callers` — 👥 caller reputation, graded by measured multiples\n"
+        "├ `/crowd` — 🦍🗑️ what the group thinks of each call\n"
+        "├ `/setfilters` — 🎯 your personal mcap/liq/type alert filters\n"
+        "└ `/mirror on|off` — 📩 matching alerts mirrored to your DM\n\n"
+        "_React 🦍 or 🗑️ on any alert card to vote on the call._"
+    ),
     "scan": (
         "\U0001f52c *SCAN & ANALYZE*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
@@ -10438,8 +10460,21 @@ async def post_init(app: Application):
         logger.info(f"✅ {len(all_cmds)} private + {len(group_cmds)} group commands registered")
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
+    # v82: pin the Mini App to the chat menu button (☰) — always-visible launcher
+    try:
+        _host = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
+        if _host:
+            await app.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(
+                    text="💠 Ciel Dashboard",
+                    web_app=WebAppInfo(url=f"https://{_host}/app"),
+                )
+            )
+            logger.info("💠 Mini App pinned to menu button")
+    except Exception as e:
+        logger.warning(f"set_chat_menu_button: {e}")
     logger.info(
-        f"💠 Ciel Brain v81 ready — "
+        f"💠 Ciel Brain v82 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
