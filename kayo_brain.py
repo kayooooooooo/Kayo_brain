@@ -11009,7 +11009,7 @@ def main():
     async def run():
         async with app:
             await app.start()
-            await app.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_UPDATES)
+            await app.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
             asyncio.create_task(bg_state_saver(app))
             asyncio.create_task(bg_main_scanner(app))
             asyncio.create_task(bg_followup_tracker(app))
