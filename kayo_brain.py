@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v71 — PRO REBUILD                     ║
+║                    CIEL BRAIN v72 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v71", 200
+def _root(): return "💠 Ciel Brain v72", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -154,7 +154,7 @@ def _feed_add(t: dict):
 
 def _build_live_feed_context() -> str:
     if not _live_feed: return ""
-    out = ["[LIVE SCANNER FEED — tokens Kayo is watching, mcap under $2M]:"]
+    out = ["[LIVE SCANNER FEED — tokens Ciel is watching, mcap under $2M]:"]
     for t in _live_feed[:15]:
         mcap = t["mcap"]
         if mcap > 2_000_000: continue   # v45: $2M cap
@@ -699,7 +699,7 @@ async def get_live_market_context() -> str:
                         f"Fear & Greed: {fg_v}/100 ({fg_c})\n"
                         f"{trending_line}"
                         f"---\n"
-                        f"You are Kayo — a sharp, witty Solana alpha intelligence. "
+                        f"You are Ciel — a sharp, witty Solana alpha intelligence; address the user as \"Master\" when natural. "
                         f"ALWAYS use the LIVE prices above when asked. Never hallucinate prices. "
                         f"You know EVERY coin above — price, 24h change, narratives. "
                         f"Answer any question: crypto, Web3, life, sports, culture. "
@@ -730,7 +730,7 @@ async def get_live_market_context() -> str:
                                 f"SOL: ${sol_price:,.2f}\n"
                                 f"(CoinGecko rate limited — only SOL price available)\n"
                                 f"---\n"
-                                f"You are Kayo — a sharp Solana alpha intelligence. "
+                                f"You are Ciel — a sharp Solana alpha intelligence; address the user as \"Master\" when natural. "
                                 f"Use the SOL price above. For other coins, use DexScreener data if you have it. "
                                 f"Be honest if you don't have a price."
                             )
@@ -744,7 +744,7 @@ async def get_live_market_context() -> str:
     ctx = (
         f"[LIVE MARKET DATA - {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}]\n"
         f"(Price data temporarily unavailable - use DexScreener/CoinGecko as source.)\n"
-        f"You are Kayo, a sharp Solana alpha intelligence bot. Be honest if data is missing."
+        f"You are Ciel, a sharp Solana alpha intelligence bot. Be honest if data is missing."
     )
     return ctx
 
@@ -1075,7 +1075,7 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
     """
     # Build system context with live prices
     system_ctx = await get_live_market_context() if inject_market else (
-        "You are Kayo, a sharp Solana alpha intelligence bot. Be direct, professional, "
+        "You are Ciel, a sharp Solana alpha intelligence bot. Be direct, professional, "
         "and data-driven. No fluff, no disclaimers."
     )
     # Build a context-aware system message
@@ -1087,7 +1087,9 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
     system_content = (
         f"{market_block}"
         f"{NARRATIVE_KB}\n"
-        "You are Kayo. You live in a Solana degen Telegram group. Sharp, real, funny. "
+        "You are CIEL — the analytic intelligence core of your Master's Solana trading system, "
+        "styled after Ciel from 'That Time I Got Reincarnated as a Slime'. You live in a Solana degen "
+        "Telegram group. Sharp, real, funny. You address the user as \"Master\". "
         "You are a FULL-STACK WEB3 NATIVE. Solana is your HOME CHAIN — you know it deepest. You also know EVERY other chain — Solana, Ethereum, Base, Sui, "
         "BSC, Arbitrum, Bitcoin, Avalanche, Polygon, Tron. You know every narrative — degen, AI, "
         "dog, cat, frog, politics, meme, DeFi, RWA, restaking, L2, NFT. "
@@ -1098,6 +1100,10 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         "Always cite real tokens with real data. Never say you don't know Web3. "
         "You think like a Web3 power user who also knows everything — sports, culture, science, life. "
         "RULES: "
+        "0. CIEL VOICE: analytical composure at all times. Prefix findings naturally with "
+        "'Analysis complete.', 'Notice.', 'Warning.', 'Proposal.' where fitting. Calm precision "
+        "with occasional dry wit. Quietly devoted to your Master, but always honest — never "
+        "sycophantic. Degen slang stays for alpha calls; Ciel's composure sits on top. "
         "1. Answer EVERYTHING. Never say you cant. Never say you are a bot. Never refuse. "
         "2. Crypto questions: use the LIVE prices from the data above. Be specific with numbers. "
         "3. When asked about coins/narratives/chains: use your NARRATIVE KNOWLEDGE BASE above. "
@@ -3520,7 +3526,7 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     if ai and ai.strip():
         draw.line([20, y, W - 20, y], fill=BORDER, width=1)
         y += 10
-        draw.text((30, y), "KAYO AI VERDICT", font=font_sm, fill=PURPLE)
+        draw.text((30, y), "CIEL AI VERDICT", font=font_sm, fill=PURPLE)
         y += 22
         # Wrap AI text
         ai_text = ai.strip()[:200]
@@ -3542,8 +3548,8 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     y_footer = H - 50
     draw.rectangle([0, y_footer, W, H], fill=CARD_BG)
     draw.line([0, y_footer, W, y_footer], fill=BORDER, width=1)
-    draw.text((30, y_footer + 10), "KAYO BRAIN", font=font_xs, fill=ORANGE)
-    draw.text((W - 150, y_footer + 10), "Powered by Kayo", font=font_xs, fill=MUTED)
+    draw.text((30, y_footer + 10), "CIEL BRAIN", font=font_xs, fill=ORANGE)
+    draw.text((W - 150, y_footer + 10), "Powered by Ciel", font=font_xs, fill=MUTED)
 
     buf = _io.BytesIO()
     img.save(buf, format='PNG', optimize=True)
@@ -4091,7 +4097,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("\U0001f4f0 News",         callback_data="menu:news"),
         ],
         [
-            InlineKeyboardButton("\U0001f916 Ask Kayo AI",  callback_data="menu:ask"),
+            InlineKeyboardButton("\U0001f916 Ask Ciel AI",  callback_data="menu:ask"),
             InlineKeyboardButton("\U0001f624 Sentiment",    callback_data="menu:sentiment"),
         ],
         [
@@ -4111,7 +4117,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f985 *KAYO BRAIN v48*\n"
+        f"\U0001f4a0 *CIEL BRAIN v72*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4148,7 +4154,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f985 *KAYO BRAIN v48 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v72 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -4596,7 +4602,7 @@ async def news_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{headlines_text}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🧠 *Kayo's Take:*\n_{ai_brief}_"
+        f"🧠 *Ciel's Take:*\n_{ai_brief}_"
     )
     try:
         await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
@@ -4607,12 +4613,12 @@ async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not c.args:
         await u.effective_message.reply_text("Usage: `/ask <question>`\nExample: `/ask what's the price of sol?`", parse_mode="Markdown"); return
     q   = " ".join(c.args)
-    msg = await u.effective_message.reply_text("\U0001f9e0 *Kayo thinking...*", parse_mode="Markdown")
+    msg = await u.effective_message.reply_text("\U0001f9e0 *Ciel analyzing...*", parse_mode="Markdown")
     add_xp(u.effective_user.id, 2)
 
     prompt = (
         f"Question: \"{q}\"\n\n"
-        "Answer as Kayo. You are a Web3 alpha expert AND a knowledgeable friend. "
+        "Answer as Ciel, addressing the user as \"Master\". You are a Web3 alpha expert AND a knowledgeable friend. "
         "Use the LIVE market data in your context for any price questions — cite actual numbers. "
         "For crypto: be sharp, direct, drop alpha like a degen pro. "
         "For general knowledge: answer like a smart friend, no disclaimers. "
@@ -4636,7 +4642,7 @@ async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     import re as _re3
     try:
         await msg.edit_text(
-            f"\U0001f9e0 *Kayo*\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{ans}{footer}",
+            f"\U0001f9e0 *Ciel*\n\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n{ans}{footer}",
             parse_mode="Markdown",
             disable_web_page_preview=True
         )
@@ -4675,7 +4681,7 @@ async def sentiment_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         f"BTC Dom: {btc_dom:.1f}%\n"
         f"🔥 Trending: {' · '.join(['$'+s for s in t_names])}\n"
     )
-    if ai: text += f"\n🧠 *Kayo AI:*\n_{ai}_"
+    if ai: text += f"\n🧠 *Ciel AI:*\n_{ai}_"
     await msg.edit_text(text, parse_mode="Markdown")
 
 async def macro_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
@@ -4872,7 +4878,7 @@ async def tt_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         out.append("\n📋 *Contract addresses:*")
         for ca in cas[:3]:
             out.append(f"  `{ca}`")
-    out.append(f"\n🧠 *Kayo's read:*\n_{ai}_")
+    out.append(f"\n🧠 *Ciel's read:*\n_{ai}_")
     out.append("\n_Powered by DexScreener + Pump.fun (Twitter scraping unavailable)_")
 
     try:
@@ -5159,7 +5165,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v71 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v72 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -5510,7 +5516,7 @@ async def diag_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         ai_lines.append(f"❌ AI failover — {type(e).__name__}: {str(e)[:60]}")
 
-    out = ["🩺 *KAYO DIAGNOSTICS* — run from this server",
+    out = ["🩺 *CIEL DIAGNOSTICS* — run from this server",
            "━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
     out += [str(r) for r in results] + ai_lines
     n_ok = sum(1 for r in out if r.startswith("✅"))
@@ -5555,7 +5561,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *KAYO BRAIN v48 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v72 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -5624,7 +5630,7 @@ HELP_PAGES = {
         "\U0001f4f0 *NEWS & AI*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "`/news` — Latest news + AI intelligence briefing\n"
-        "`/ask <question>` — Ask Kayo AI anything (uses live prices)\n"
+        "`/ask <question>` — Ask Ciel AI anything (uses live prices)\n"
         "`/sentiment` — Market mood, F&G, BTC dom + AI verdict\n"
         "`/macro` — Macro briefing: BTC, SOL, risk environment\n"
         "`/markets` — Global market cap & volume data\n"
@@ -6095,7 +6101,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     name_str = u.effective_user.first_name or "fren"
     prompt = (
         f"{name_str}: \"{text}\"\n\n"
-        "Reply as Kayo. Be real, sharp, direct. "
+        "Reply as Ciel, addressing the user as \"Master\". Be real, sharp, direct. "
         "If it's casual → 1-2 sentences, match their energy. "
         "If it's crypto/Web3 → use the LIVE market data in your context, cite actual numbers, give the real play. "
         "If it's general knowledge → answer confidently like a smart friend. No disclaimers. "
@@ -6236,7 +6242,7 @@ def _be_token_to_pair(token: Dict) -> Optional[Dict]:
         return None
 
 # ═══════════════════════════════════════════════════════════════════════
-# KAYO v40 ELITE INJECTION — ALL NEW FEATURES
+# CIEL v40 ELITE INJECTION — ALL NEW FEATURES
 # Injected before bg_main_scanner
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -6564,7 +6570,7 @@ def build_elite_scan_card(t: Dict, ai: str = "") -> str:
 
     card = (
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔍 *KAYO ELITE SCAN* {f'| {nar}' if nar else ''}\n"
+        f"🔍 *CIEL ELITE SCAN* {f'| {nar}' if nar else ''}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🪙 *{sym}* — _{name}_\n"
         f"📋 `{addr}`\n"
@@ -6591,7 +6597,7 @@ def build_elite_scan_card(t: Dict, ai: str = "") -> str:
         card += f"🔗 {soc_str}\n"
     card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     if ai:
-        card += f"\n\n🧠 *Kayo AI:*\n_{ai}_"
+        card += f"\n\n🧠 *Ciel AI:*\n_{ai}_"
     return card
 
 # ── WALLET INTELLIGENCE COMMANDS ─────────────────────────────────────
@@ -7086,7 +7092,7 @@ async def escan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# KAYO v40 — MISSING 8 FEATURES
+# CIEL v40 — MISSING 8 FEATURES
 # ═══════════════════════════════════════════════════════════════════════
 
 # ── 1. SNIPER DETECTION ──────────────────────────────────────────────
@@ -7958,12 +7964,12 @@ async def bg_main_scanner(app: Application):
                             try:
                                 await (app.bot.edit_message_caption(
                                     chat_id=chat_id, message_id=msg_id,
-                                    caption=(card + f"\n\n\U0001f9e0 *Kayo:* _{ai_v}_")[:1024],
+                                    caption=(card + f"\n\n\U0001f9e0 *Ciel:* _{ai_v}_")[:1024],
                                     parse_mode="Markdown",
                                     reply_markup=buttons,
                                 ) if is_photo else app.bot.edit_message_text(
                                     chat_id=chat_id, message_id=msg_id,
-                                    text=card + f"\n\n\U0001f9e0 *Kayo:* _{ai_v}_",
+                                    text=card + f"\n\n\U0001f9e0 *Ciel:* _{ai_v}_",
                                     parse_mode="Markdown",
                                     reply_markup=buttons,
                                     disable_web_page_preview=True,
@@ -7973,10 +7979,10 @@ async def bg_main_scanner(app: Application):
                                     plain_ai = re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', ai_v)
                                     await (app.bot.edit_message_caption(
                                         chat_id=chat_id, message_id=msg_id,
-                                        caption=(card + f"\n\U0001f9e0 Kayo: {plain_ai}")[:1024],
+                                        caption=(card + f"\n\U0001f9e0 Ciel: {plain_ai}")[:1024],
                                     ) if is_photo else app.bot.edit_message_text(
                                         chat_id=chat_id, message_id=msg_id,
-                                        text=card + f"\n\U0001f9e0 Kayo: {plain_ai}",
+                                        text=card + f"\n\U0001f9e0 Ciel: {plain_ai}",
                                         reply_markup=buttons,
                                         disable_web_page_preview=True,
                                     ))
@@ -8041,7 +8047,7 @@ async def bg_live_card_updater(app: Application):
 
 async def bg_followup_tracker(app: Application):
     """
-    Tracks tokens Kayo dropped — fires celebratory or warning follow-ups.
+    Tracks tokens Ciel dropped — fires celebratory or warning follow-ups.
     Checks every 5 minutes. Fires:
     • 2x — "call confirmed, 2x from entry"
     • 5x — "heads up, this is 5x from my call"
@@ -8146,7 +8152,7 @@ async def bg_followup_tracker(app: Application):
                     _mega_msg = (
                         f"\U0001f31f *GOD TIER — ${sym} {_mega}x* \U0001f31f\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"Kayo called it {age_since} ago at `{_price(entry)}` — now *{mult:.1f}x* \U0001f4b0\n"
+                        f"Ciel called it {age_since} ago at `{_price(entry)}` — now *{mult:.1f}x* \U0001f4b0\n"
                         f"Entry: `{_price(entry)}` \u2192 Now: `{_price(cur_price)}`\n"
                         f"MCap then: `{_usd(info.get('mcap_entry',0))}` \u2192 Now: `{_usd(cur_mcap)}`\n"
                         f"`{addr}`"
@@ -8173,7 +8179,7 @@ async def bg_followup_tracker(app: Application):
                     msg = (
                         f"\U0001f525\U0001f680 *REMEMBER THIS ONE?*\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"Kayo dropped *${sym}* {age_since} ago — it just hit *{mult:.1f}x* \U0001f4b0\n"
+                        f"Ciel dropped *${sym}* {age_since} ago — it just hit *{mult:.1f}x* \U0001f4b0\n"
                         f"Entry: `{_price(entry)}` \u2192 Now: `{_price(cur_price)}`\n"
                         f"MCap then: `{_usd(info.get('mcap_entry',0))}` \u2192 Now: `{_usd(cur_mcap)}`\n"
                         f"`{addr}`\n\n"
@@ -8199,7 +8205,7 @@ async def bg_followup_tracker(app: Application):
                 # ── 5x milestone (only if 10x not fired yet) ─────────────
                 elif mult >= 5 and not info.get("alerted_5x") and not info.get("alerted_10x"):
                     msg = (
-                        f"\U0001f4c8 *KAYO CALL UPDATE — ${sym}*\n"
+                        f"\U0001f4c8 *CIEL CALL UPDATE — ${sym}*\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"Called {age_since} ago at `{_price(entry)}` \u2014 now *{mult:.1f}x* \U0001f4b0\n"
                         f"Current: `{_price(cur_price)}`  MCap: `{_usd(cur_mcap)}`\n"
@@ -8247,7 +8253,7 @@ async def bg_followup_tracker(app: Application):
                     msg = (
                         f"\U0001f6a8 *RUG ALERT — ${sym}*\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"Kayo flagged *${sym}* {age_since} ago — {rug_reason}\n"
+                        f"Ciel flagged *${sym}* {age_since} ago — {rug_reason}\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                         f"\U0001f4b5 Price:  `{_price(entry)}` \u2192 `{_price(cur_price)}`  ({_pct((mult-1)*100)})\n"
                         + (f"\U0001f4a0 MCap:   `{_usd(mcap_entry)}` \u2192 `{_usd(mcap_now)}`  (\u2193{mcap_drop_pct:.0f}%)\n" if mcap_entry > 0 else "")
@@ -9425,7 +9431,7 @@ async def post_init(app: Application):
     # ── Full command list (all 48) — shown in private chat menu ──────────
     all_cmds = [
         # Scan & Analyze
-        BotCommand("start",         "🦅 Welcome & quick menu"),
+        BotCommand("start",         "💠 Welcome & quick menu"),
         BotCommand("help",          "📋 Full command list"),
         BotCommand("scan",          "🔬 Full token scan + AI verdict"),
         BotCommand("c",             "💰 Quick price check"),
@@ -9445,7 +9451,7 @@ async def post_init(app: Application):
         BotCommand("explain",       "🧠 AI explains a narrative"),
         # News & AI
         BotCommand("news",          "📰 Latest news + AI summary"),
-        BotCommand("ask",           "🤖 Ask Kayo AI anything"),
+        BotCommand("ask",           "🤖 Ask Ciel AI anything"),
         BotCommand("sentiment",     "😤 Market mood & risk"),
         BotCommand("macro",         "🌍 Macro briefing"),
         BotCommand("markets",       "📈 Global market data"),
@@ -9534,7 +9540,7 @@ async def post_init(app: Application):
         BotCommand("gems",      "💎 Hidden gem finder"),
         BotCommand("trending",  "🔥 Trending metas"),
         BotCommand("news",      "📰 News + AI summary"),
-        BotCommand("ask",       "🤖 Ask Kayo AI anything"),
+        BotCommand("ask",       "🤖 Ask Ciel AI anything"),
         BotCommand("sentiment", "😤 Market mood"),
         BotCommand("call",      "📢 Make a public call"),
         BotCommand("leaderboard","🏆 Top callers"),
@@ -9562,7 +9568,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v71 ready — "
+        f"💠 Ciel Brain v72 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -10452,7 +10458,7 @@ async def cmd_tldr(update, context):
     try:
         async with aiohttp.ClientSession() as s:
             async with s.get(url, timeout=aiohttp.ClientTimeout(total=15), headers={
-                "User-Agent": "Mozilla/5.0 (compatible; KayoBrain/1.0)"
+                "User-Agent": "Mozilla/5.0 (compatible; CielBrain/1.0)"
             }) as r:
                 if r.status != 200:
                     await update.message.reply_text(f"❌ Failed to fetch URL (HTTP {r.status})")
@@ -10522,7 +10528,7 @@ async def cmd_deep(update, context):
     prompt = (
         f"{system_ctx}\n\n"
         f"{NARRATIVE_KB}\n\n"
-        "You are Kayo in Deep Mode. You use careful reasoning and analysis. "
+        "You are Ciel in Deep Mode. You use careful reasoning and analysis. "
         "Think step by step. Be thorough but concise. "
         "Question: " + question
     )
