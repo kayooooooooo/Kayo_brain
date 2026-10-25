@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v76 — PRO REBUILD                     ║
+║                    CIEL BRAIN v77 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v76", 200
+def _root(): return "💠 Ciel Brain v77", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1064,6 +1064,178 @@ async def fetch_chain_trending(chain: str = "") -> str:
     return "\n".join(lines) if lines else ""
 
 
+# ---- v77: sticky provider circuit breaker - ONE AI provider at a time ----
+# When a provider hits its limit (429) it goes on cooldown (70s, escalating
+# to 600s on repeats) and the bot STAYS on the fallback until it recovers.
+_AI_PROVIDERS = ["groq", "gemini", "openrouter"]
+_ai_provider_state: Dict = {"active": "groq", "cooldown": {}}
+
+def _ai_key_ok(p):
+    return {"groq": GROQ_API_KEY, "gemini": GEMINI_API_KEY, "openrouter": OPENROUTER_API_KEY}.get(p, "")
+
+def _ai_provider_ready(p):
+    return bool(_ai_key_ok(p)) and _ai_provider_state["cooldown"].get(p, 0) <= time.time()
+
+def _ai_mark_limited(p):
+    now = time.time()
+    hot = _ai_provider_state["cooldown"].get(p, 0) > now
+    _ai_provider_state["cooldown"][p] = now + (600 if hot else 70)
+    nxt = next((q for q in _AI_PROVIDERS if q != p and _ai_provider_ready(q)), "")
+    if nxt:
+        _ai_provider_state["active"] = nxt
+    logger.warning(f"AI provider {p} at limit -> sticky switch to {nxt or 'cooldown-wait'}")
+
+def _ai_provider_order():
+    act = _ai_provider_state["active"]
+    order = [act] + [p for p in _AI_PROVIDERS if p != act]
+    ready = [p for p in order if _ai_provider_ready(p)]
+    return ready or sorted(_AI_PROVIDERS, key=lambda p: _ai_provider_state["cooldown"].get(p, 0))
+
+
+async def _ai_groq(system_msg, prompt, max_tokens, system_ctx=""):
+    if GROQ_API_KEY:
+        async with aiohttp.ClientSession() as s:
+            for model in GROQ_MODELS:
+                try:
+                    async with s.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {GROQ_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": model,
+                            "messages": [system_msg, {"role": "user", "content": prompt}],
+                            "max_tokens": max_tokens,
+                            "temperature": 0.7,
+                        },
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as r:
+                        if r.status == 200:
+                            d = await r.json()
+                            text_out = d["choices"][0]["message"]["content"].strip()
+                            if text_out:
+                                logger.debug(f"ai_ask: Groq {model} OK")
+                                _ai_provider_state["active"] = "groq"
+                                return text_out
+                        elif r.status == 429:
+                            # v77: circuit breaker — stop using this provider until cooldown ends
+                            _ai_mark_limited("groq")
+                            return ""
+                        elif r.status == 400:
+                            # Bad request — model likely decommissioned, skip
+                            err = await r.text()
+                            if "decommissioned" in err or "no longer supported" in err:
+                                logger.warning(f"Groq {model} DECOMMISSIONED — skip")
+                            else:
+                                logger.error(f"Groq {model} 400: {err[:100]}")
+                            continue
+                        else:
+                            err_body = await r.text()
+                            logger.error(f"Groq {model} HTTP {r.status}: {err_body[:100]}")
+                            continue
+                except asyncio.TimeoutError:
+                    logger.warning(f"Groq {model} timeout — next model")
+                    continue
+                except Exception as e:
+                    logger.error(f"Groq {model}: {e}")
+                    continue
+
+
+
+async def _ai_gemini(system_msg, prompt, max_tokens, system_ctx=""):
+    # Gemini fallback — try multiple models in case one hits quota
+    if GEMINI_API_KEY:
+        gemini_models = [
+            "gemini-3.1-flash",        # Oct 2026 — documented 2.5 migration target
+            "gemini-3.8-flash",        # Newest flash flagship
+            "gemini-2.5-flash",        # Legacy — may still serve on AI Studio keys
+            "gemini-2.5-flash-lite",   # Legacy lightweight
+        ]
+        full_prompt = f"{system_ctx}\n\n{prompt}"
+        async with aiohttp.ClientSession() as s:
+            for gem_model in gemini_models:
+                try:
+                    async with s.post(
+                        f"https://generativelanguage.googleapis.com/v1beta/models/{gem_model}:generateContent?key={GEMINI_API_KEY}",
+                        json={
+                            "contents": [{"parts": [{"text": full_prompt}]}],
+                            "generationConfig": {"maxOutputTokens": max_tokens}
+                        },
+                        timeout=aiohttp.ClientTimeout(total=20),
+                    ) as r:
+                        if r.status == 200:
+                            d = await r.json()
+                            text_out = d["candidates"][0]["content"]["parts"][0]["text"].strip()
+                            if text_out:
+                                logger.debug(f"ai_ask: Gemini {gem_model} OK")
+                                _ai_provider_state["active"] = "gemini"
+                                return text_out
+                        elif r.status == 429:
+                            # v77: circuit breaker — stop using this provider until cooldown ends
+                            _ai_mark_limited("gemini")
+                            return ""
+                        else:
+                            err_body = await r.text()
+                            logger.error(f"Gemini {gem_model} HTTP {r.status}: {err_body[:100]}")
+                            continue
+                except asyncio.TimeoutError:
+                    logger.warning(f"Gemini {gem_model} timeout")
+                    continue
+                except Exception as e:
+                    logger.error(f"Gemini {gem_model}: {e}")
+                    continue
+
+
+
+
+async def _ai_openrouter(system_msg, prompt, max_tokens, system_ctx=""):
+    # OpenRouter fallback — free models available
+    OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+    if OPENROUTER_API_KEY:
+        or_models = [
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "openai/gpt-oss-20b:free",
+            "google/gemma-3-27b-it:free",
+        ]
+        full_prompt = f"{system_ctx}\n\n{prompt}"
+        async with aiohttp.ClientSession() as s:
+            for or_model in or_models:
+                try:
+                    async with s.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": or_model,
+                            "messages": [system_msg, {"role": "user", "content": prompt}],
+                            "max_tokens": max_tokens,
+                        },
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as r:
+                        if r.status == 200:
+                            d = await r.json()
+                            text_out = d["choices"][0]["message"]["content"].strip()
+                            if text_out:
+                                logger.debug(f"ai_ask: OpenRouter {or_model} OK")
+                                _ai_provider_state["active"] = "openrouter"
+                                return text_out
+                        elif r.status == 429:
+                            # v77: circuit breaker — stop using this provider until cooldown ends
+                            _ai_mark_limited("openrouter")
+                            return ""
+                        else:
+                            err_body = await r.text()
+                            logger.error(f"OpenRouter {or_model} HTTP {r.status}: {err_body[:100]}")
+                            continue
+                except Exception as e:
+                    logger.error(f"OpenRouter {or_model}: {e}")
+                    continue
+
+
+
 async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
                  inject_market: bool = True) -> str:
     """
@@ -1270,136 +1442,20 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
                         "content": system_content + narrative_block
                     }
 
-    if GROQ_API_KEY:
-        async with aiohttp.ClientSession() as s:
-            for model in GROQ_MODELS:
-                try:
-                    async with s.post(
-                        "https://api.groq.com/openai/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {GROQ_API_KEY}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": model,
-                            "messages": [system_msg, {"role": "user", "content": prompt}],
-                            "max_tokens": max_tokens,
-                            "temperature": 0.7,
-                        },
-                        timeout=aiohttp.ClientTimeout(total=15),
-                    ) as r:
-                        if r.status == 200:
-                            d = await r.json()
-                            text_out = d["choices"][0]["message"]["content"].strip()
-                            if text_out:
-                                logger.debug(f"ai_ask: Groq {model} OK")
-                                return text_out
-                        elif r.status == 429:
-                            # Rate limited — immediately try next model, no wait
-                            logger.warning(f"Groq 429 on {model} — trying next")
-                            continue
-                        elif r.status == 400:
-                            # Bad request — model likely decommissioned, skip
-                            err = await r.text()
-                            if "decommissioned" in err or "no longer supported" in err:
-                                logger.warning(f"Groq {model} DECOMMISSIONED — skip")
-                            else:
-                                logger.error(f"Groq {model} 400: {err[:100]}")
-                            continue
-                        else:
-                            err_body = await r.text()
-                            logger.error(f"Groq {model} HTTP {r.status}: {err_body[:100]}")
-                            continue
-                except asyncio.TimeoutError:
-                    logger.warning(f"Groq {model} timeout — next model")
-                    continue
-                except Exception as e:
-                    logger.error(f"Groq {model}: {e}")
-                    continue
-
-    # Gemini fallback — try multiple models in case one hits quota
-    if GEMINI_API_KEY:
-        gemini_models = [
-            "gemini-3.1-flash",        # Oct 2026 — documented 2.5 migration target
-            "gemini-3.8-flash",        # Newest flash flagship
-            "gemini-2.5-flash",        # Legacy — may still serve on AI Studio keys
-            "gemini-2.5-flash-lite",   # Legacy lightweight
-        ]
-        full_prompt = f"{system_ctx}\n\n{prompt}"
-        async with aiohttp.ClientSession() as s:
-            for gem_model in gemini_models:
-                try:
-                    async with s.post(
-                        f"https://generativelanguage.googleapis.com/v1beta/models/{gem_model}:generateContent?key={GEMINI_API_KEY}",
-                        json={
-                            "contents": [{"parts": [{"text": full_prompt}]}],
-                            "generationConfig": {"maxOutputTokens": max_tokens}
-                        },
-                        timeout=aiohttp.ClientTimeout(total=20),
-                    ) as r:
-                        if r.status == 200:
-                            d = await r.json()
-                            text_out = d["candidates"][0]["content"]["parts"][0]["text"].strip()
-                            if text_out:
-                                logger.debug(f"ai_ask: Gemini {gem_model} OK")
-                                return text_out
-                        elif r.status == 429:
-                            logger.warning(f"Gemini {gem_model} quota exhausted — trying next")
-                            continue
-                        else:
-                            err_body = await r.text()
-                            logger.error(f"Gemini {gem_model} HTTP {r.status}: {err_body[:100]}")
-                            continue
-                except asyncio.TimeoutError:
-                    logger.warning(f"Gemini {gem_model} timeout")
-                    continue
-                except Exception as e:
-                    logger.error(f"Gemini {gem_model}: {e}")
-                    continue
-
-
-    # OpenRouter fallback — free models available
-    OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-    if OPENROUTER_API_KEY:
-        or_models = [
-            "meta-llama/llama-3.3-70b-instruct:free",
-            "openai/gpt-oss-20b:free",
-            "google/gemma-3-27b-it:free",
-        ]
-        full_prompt = f"{system_ctx}\n\n{prompt}"
-        async with aiohttp.ClientSession() as s:
-            for or_model in or_models:
-                try:
-                    async with s.post(
-                        "https://openrouter.ai/api/v1/chat/completions",
-                        headers={
-                            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                            "Content-Type": "application/json",
-                        },
-                        json={
-                            "model": or_model,
-                            "messages": [system_msg, {"role": "user", "content": prompt}],
-                            "max_tokens": max_tokens,
-                        },
-                        timeout=aiohttp.ClientTimeout(total=15),
-                    ) as r:
-                        if r.status == 200:
-                            d = await r.json()
-                            text_out = d["choices"][0]["message"]["content"].strip()
-                            if text_out:
-                                logger.debug(f"ai_ask: OpenRouter {or_model} OK")
-                                return text_out
-                        elif r.status == 429:
-                            logger.warning(f"OpenRouter {or_model} rate limited")
-                            continue
-                        else:
-                            err_body = await r.text()
-                            logger.error(f"OpenRouter {or_model} HTTP {r.status}: {err_body[:100]}")
-                            continue
-                except Exception as e:
-                    logger.error(f"OpenRouter {or_model}: {e}")
-                    continue
-
+    # ---- v77: sticky failover - ONE active provider at a time ----
+    # Limited providers are skipped until cooldown expires; the active
+    # provider is always tried first. A success keeps it sticky.
+    for _p in _ai_provider_order():
+        _fn = {"groq": _ai_groq, "gemini": _ai_gemini, "openrouter": _ai_openrouter}.get(_p)
+        if not _fn: continue
+        try:
+            _out = await _fn(system_msg, prompt, max_tokens, system_ctx)
+        except Exception as e:
+            logger.error(f"ai_ask {_p}: {e}")
+            continue
+        if _out:
+            _ai_provider_state["active"] = _p
+            return _out
     logger.error(f"ai_ask: ALL backends failed. Groq={bool(GROQ_API_KEY)} Gemini={bool(GEMINI_API_KEY)}")
     return fallback
 
@@ -4169,7 +4225,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v76*\n"
+        f"\U0001f4a0 *CIEL BRAIN v77*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4206,7 +4262,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v76 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v77 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5217,7 +5273,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v76 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v77 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -5613,7 +5669,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v76 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v77 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -9745,7 +9801,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"💠 Ciel Brain v76 ready — "
+        f"💠 Ciel Brain v77 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
