@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v72 — PRO REBUILD                     ║
+║                    CIEL BRAIN v73 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v72", 200
+def _root(): return "💠 Ciel Brain v73", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -753,13 +753,12 @@ async def get_live_market_context() -> str:
 # Groq primary → Gemini fallback
 # Every call is injected with LIVE market context so prices are always real
 # ═══════════════════════════════════════════════════════════════
-# Live Groq models as of June 2026 — dead models removed
-# llama3-8b-8192 + llama-3.1-70b-versatile are DECOMMISSIONED (HTTP 400)
+# Live Groq models as of Oct 2026 — all llama models shut for free/developer tier
+# llama-3.3-70b-versatile closed to Free/Developer Aug 16 2026 (Enterprise-only)
 GROQ_MODELS = [
-    "llama-3.3-70b-versatile",      # Primary — best quality
-    "llama-3.1-8b-instant",         # Fast fallback — good for rate limits
-    "llama3-70b-8192",              # Fallback — still live
-    "gemma2-9b-it",                 # Final Groq fallback
+    "openai/gpt-oss-120b",          # Primary — Groq production flagship, ~500 t/s
+    "openai/gpt-oss-20b",           # Fast fallback — ~1000 t/s, production
+    "qwen/qwen3.8-27b",             # Groq fallback — ~450 t/s
 ]
 
 
@@ -1312,11 +1311,10 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
     # Gemini fallback — try multiple models in case one hits quota
     if GEMINI_API_KEY:
         gemini_models = [
-            "gemini-2.5-flash",        # Newest — best quality + speed
-            "gemini-2.0-flash",        # Fast and capable
-            "gemini-2.0-flash-lite",   # Lightweight, lower quota usage
-            "gemini-1.5-flash",        # Different quota bucket
-            "gemini-1.5-flash-8b",     # Smallest, highest rate limits
+            "gemini-3.1-flash",        # Oct 2026 — documented 2.5 migration target
+            "gemini-3.8-flash",        # Newest flash flagship
+            "gemini-2.5-flash",        # Legacy — may still serve on AI Studio keys
+            "gemini-2.5-flash-lite",   # Legacy lightweight
         ]
         full_prompt = f"{system_ctx}\n\n{prompt}"
         async with aiohttp.ClientSession() as s:
@@ -1356,8 +1354,8 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
     if OPENROUTER_API_KEY:
         or_models = [
             "meta-llama/llama-3.3-70b-instruct:free",
-            "google/gemini-2.0-flash-exp:free",
-            "meta-llama/llama-3.1-8b-instruct:free",
+            "openai/gpt-oss-20b:free",
+            "google/gemma-3-27b-it:free",
         ]
         full_prompt = f"{system_ctx}\n\n{prompt}"
         async with aiohttp.ClientSession() as s:
@@ -4117,7 +4115,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v72*\n"
+        f"\U0001f4a0 *CIEL BRAIN v73*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4154,7 +4152,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v72 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v73 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5165,7 +5163,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v72 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v73 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -5561,7 +5559,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v72 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v73 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -9568,7 +9566,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"💠 Ciel Brain v72 ready — "
+        f"💠 Ciel Brain v73 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
