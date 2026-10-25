@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v77 — PRO REBUILD                     ║
+║                    CIEL BRAIN v78 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -14,7 +14,7 @@ import asyncio, logging, re, time, json, os, threading, hashlib
 from collections import defaultdict, OrderedDict
 import random
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Set
+from typing import Optional, List, Dict, Set, Tuple
 
 import aiohttp
 import redis.asyncio as aioredis
@@ -36,6 +36,11 @@ BIRDEYE_API_KEY = os.environ.get("BIRDEYE_API_KEY", "")
 GEMINI_API_KEY     = os.environ.get("GEMINI_API_KEY", "")
 GROQ_API_KEY       = os.environ.get("GROQ_API_KEY", "")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+
+# v78: toggles (persisted) — voice notes + macro commentary
+VOICE_ON = os.environ.get("CIEL_VOICE", "1") == "1"
+COMMENTARY_ON = os.environ.get("CIEL_COMMENTARY", "1") == "1"
+CIEL_VOICE_NAME = os.environ.get("CIEL_VOICE_NAME", "en-GB-SoniaNeural")  # calm, measured — closest free voice to Ciel
 # v49: free CoinGecko demo key (coingecko.com/en/developers) — beats the shared-IP limit
 CG_DEMO_API_KEY   = os.environ.get("CG_DEMO_API_KEY", "")
 REDIS_URL          = os.environ.get("REDIS_URL", "")
@@ -56,7 +61,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v77", 200
+def _root(): return "💠 Ciel Brain v78", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -274,6 +279,7 @@ async def _save():
             "volume_snapshots": dict(list(volume_snapshots.items())[-2000:]),
             "liq_snapshots":    dict(list(liq_snapshots.items())[-2000:]),
             "holder_snapshots": dict(list(holder_snapshots.items())[-2000:]),
+        "voice_on": VOICE_ON, "commentary_on": COMMENTARY_ON,
             "dev_snapshots":    dict(list(dev_snapshots.items())[-2000:]),
             "last_scan_ts": last_scan_ts,
         }
@@ -359,6 +365,9 @@ async def _load():
         dropped_calls   = d.get("dropped_calls", {})
         liq_snapshots    = d.get("liq_snapshots", {}) or {}
         holder_snapshots = d.get("holder_snapshots", {}) or {}
+        global VOICE_ON, COMMENTARY_ON
+        VOICE_ON = bool(d.get("voice_on", VOICE_ON))
+        COMMENTARY_ON = bool(d.get("commentary_on", COMMENTARY_ON))
         dev_snapshots = d.get("dev_snapshots", {}) or {}
         pattern_memory  = d.get("pattern_memory", {})
         scanner_cooldowns = d.get("scanner_cooldowns", {})
@@ -1063,6 +1072,81 @@ async def fetch_chain_trending(chain: str = "") -> str:
 
     return "\n".join(lines) if lines else ""
 
+
+
+async def _tts_ogg(text: str) -> Optional[bytes]:
+    """v78: Ciel voice note — edge-tts (free, no key) -> ffmpeg -> Telegram OGG/Opus."""
+    text = (text or "").strip()[:1200]
+    if not text: return None
+    mp3_path = f"/tmp/ciel_{int(time.time()*1000)}.mp3"
+    ogg_path = mp3_path[:-4] + ".ogg"
+    try:
+        import edge_tts
+        com = edge_tts.Communicate(text, CIEL_VOICE_NAME, rate="-8%")  # calm pace
+        await asyncio.wait_for(com.save(mp3_path), timeout=20)
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", mp3_path, "-c:a", "libopus", "-b:a", "48k",
+            "-application", "voip", ogg_path,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        await asyncio.wait_for(proc.wait(), timeout=20)
+        with open(ogg_path, "rb") as f: data = f.read()
+        return data or None
+    except Exception as e:
+        logger.debug(f"tts: {e}")
+        return None
+    finally:
+        try: os.remove(mp3_path)
+        except Exception: pass
+        try: os.remove(ogg_path)
+        except Exception: pass
+
+async def _cg_btc_sol() -> Optional[Tuple[float, float]]:
+    """v78: BTC/SOL prices for the macro move watcher (CoinGecko, budgeted)."""
+    try:
+        d = await _get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,solana&vs_currencies=usd")
+        b = (d or {}).get("bitcoin", {}).get("usd", 0)
+        s = (d or {}).get("solana", {}).get("usd", 0)
+        return (float(b), float(s)) if b and s else None
+    except Exception:
+        return None
+
+async def bg_macro_commentary(app):
+    """v78 #6: proactive commentary — BTC/SOL moves >=4% within 30 min, Ciel posts
+    an unsolicited 'Notice:' analysis. Toggle via /commentary."""
+    await asyncio.sleep(120)
+    snaps: Dict[str, Dict] = {}
+    last_alert = 0.0
+    while True:
+        try:
+            now = time.time()
+            if COMMENTARY_ON and GROUP_CHAT_ID:
+                px = await _cg_btc_sol()
+                if px:
+                    for coin, p in zip(("BTC", "SOL"), px):
+                        s = snaps.get(coin) or {}
+                        if not s or (now - s.get("anchor_ts", 0)) > 1800:
+                            s = {"anchor": p, "anchor_ts": now}
+                        chg = (p - s["anchor"]) / s["anchor"] * 100 if s["anchor"] else 0
+                        if abs(chg) >= 4 and (now - last_alert) > 1800 and (now - s["anchor_ts"]) > 300:
+                            cmt = await ai_ask(
+                                f"{coin} just moved {chg:+.1f}% in {int((now - s['anchor_ts'])/60)} minutes "
+                                f"(now ${p:,.0f}). Deliver a 'Notice:' analysis in Ciel voice: what this "
+                                "means for Solana memecoins right now — risk appetite, rotation, what to watch. "
+                                "2-3 sentences max.",
+                                fallback="", max_tokens=180)
+                            if cmt:
+                                try:
+                                    await app.bot.send_message(GROUP_CHAT_ID, cmt, parse_mode="Markdown",
+                                                               disable_web_page_preview=True)
+                                except Exception:
+                                    pass
+                                last_alert = now
+                            s = {"anchor": p, "anchor_ts": now}
+                        snaps[coin] = s
+            await asyncio.sleep(60)
+        except Exception as e:
+            logger.debug(f"macro commentary: {e}")
+            await asyncio.sleep(60)
 
 # ---- v77: sticky provider circuit breaker - ONE AI provider at a time ----
 # When a provider hits its limit (429) it goes on cooldown (70s, escalating
@@ -3533,8 +3617,10 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     h_spark = 120
     draw.rounded_rectangle([20, y_spark, W - 20, y_spark + h_spark], radius=10, fill=CARD_BG)
     # Generate fake sparkline data from changes
-    spark_data = []
-    base = 100
+    spark_data = t.get("candles") or []
+    if len(spark_data) < 6:
+      spark_data = []
+      base = 100
     for i in range(50):
         if i < 5 and ch5m: base *= (1 + ch5m/100/5)
         elif i < 12 and ch1h: base *= (1 + ch1h/100/12)
@@ -3741,6 +3827,18 @@ async def send_update_card(bot, chat_id: int, caption: str, addr: str, sym: str,
         return False
 
 
+
+async def _gt_pool_candles(pool_addr: str, hours: int = 24) -> List[float]:
+    """v78 #21: real hourly closes via GT OHLCV (budgeted + cached via _get)."""
+    if not pool_addr: return []
+    try:
+        d = await _get(f"{_GT}/networks/solana/pools/{pool_addr}/ohlcv/hour?aggregate=1&limit={hours}&currency=usd")
+        rows = ((d or {}).get("data", {}) or {}).get("attributes", {}).get("ohlcv_list") or []
+        return [float(r[4]) for r in rows if len(r) >= 5 and r[4]]
+    except Exception as e:
+        logger.debug(f"candles: {e}")
+        return []
+
 async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", reply_markup=None, alert_type: str = "", reply_to: int = 0, pro: bool = False):
     """Send a scan card as both image + text (Rick Bot style).
     v64: every stage is individually guarded — a failure in card text or
@@ -3750,6 +3848,12 @@ async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", re
     except Exception as e:
         logger.error(f"Card text build failed: {e}", exc_info=True)
         text_card = f"\u26a0\ufe0f Card error for `{t.get('address', '?')}` — raw scan data available via /diag"
+    # v78: real candles for the sparkline (synthetic shape kept as fallback)
+    try:
+        if len(t.get("candles") or []) < 6:
+            t["candles"] = await _gt_pool_candles(t.get("pair_addr", ""), 24)
+    except Exception:
+        pass
     img_buf = None
     try:
         img_buf = generate_scan_card_image(t, ai)
@@ -4225,7 +4329,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v77*\n"
+        f"\U0001f4a0 *CIEL BRAIN v78*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4262,7 +4366,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v77 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v78 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5273,7 +5377,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v77 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v78 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -5669,7 +5773,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v77 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v78 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -6162,6 +6266,60 @@ async def _scanner_pack_for(text: str) -> str:
     return "\n\n".join(blocks)
 
 
+
+async def backtest_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/backtest — simulate 'aping every call Ciel made' using measured multiples."""
+    rows = [(info.get("alert_type", "?"), info.get("sym", "?"), info.get("last_mult", 0), info.get("status", "open"))
+            for addr, info in dropped_calls.items() if info.get("last_mult")]
+    if not rows:
+        await u.effective_message.reply_text(
+            "Not enough measured history yet — the followup tracker records multiples as it polls called tokens. Check back in a few hours.")
+        return
+    n = len(rows)
+    avg = sum(m for _, _, m, _ in rows) / n
+    wins = sum(1 for _, _, m, _ in rows if m >= 1.2)
+    rugged = sum(1 for _, _, _, st in rows if st == "rugged")
+    card = ("📊 *BACKTEST — every call Ciel made (7-day window)*\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"· Calls measured: {n}\n"
+            f"· Avg multiple: *{avg:.2f}x*\n"
+            f"· Win rate (≥1.2x): {wins}/{n} ({100*wins//n}%)\n"
+            f"· Rugged: {rugged}\n"
+            "━━━━━━━━━━━━━━━━━━━━━━━\n"
+            "*Per alert type:*\n")
+    types: Dict[str, List[float]] = {}
+    for ty, _, m, _ in rows: types.setdefault(ty, []).append(m)
+    for ty, ms in sorted(types.items(), key=lambda kv: -sum(kv[1])/len(kv[1])):
+        card += f"· {ty}: {len(ms)} calls — avg {sum(ms)/len(ms):.2f}x · best {max(ms):.1f}x · worst {min(ms):.1f}x\n"
+    flat = sum(m - 1 for _, _, m, _ in rows)
+    card += ("━━━━━━━━━━━━━━━━━━━━━━━\n"
+             f"Equal-weight portfolio: *{(flat)*100:+.0f}%* (1 unit per call)\n"
+             f"_Measured live by the followup tracker — only tokens tracked within 7 days are included._")
+    await u.effective_message.reply_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+
+async def voice_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/voice on|off — toggle Ciel's voice notes."""
+    global VOICE_ON
+    arg = (u.effective_message.text or "").lower().split()[-1]
+    if arg in ("on", "off"):
+        VOICE_ON = (arg == "on")
+        asyncio.create_task(_save())
+    await u.effective_message.reply_text(
+        f"🎙️ Voice notes: *{'ON — ask for a voice reply anytime' if VOICE_ON else 'OFF'}*"
+        f"{' (say `voice on/off` to switch)' if arg not in ('on','off') else ''}",
+        parse_mode="Markdown")
+
+async def commentary_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/commentary on|off — toggle proactive macro commentary."""
+    global COMMENTARY_ON
+    arg = (u.effective_message.text or "").lower().split()[-1]
+    if arg in ("on", "off"):
+        COMMENTARY_ON = (arg == "on")
+        asyncio.create_task(_save())
+    await u.effective_message.reply_text(
+        f"📡 Macro commentary: *{'ON — I will post a Notice: when BTC/SOL moves ≥4%' if COMMENTARY_ON else 'OFF'}*",
+        parse_mode="Markdown")
+
 async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not u.message or not u.effective_message.text: return
     text = u.effective_message.text.strip()
@@ -6346,6 +6504,22 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                  "Give it a few seconds and ask again."
                  if _keys_ok else
                  "⚠️ AI brain offline — no AI keys set on Render. Free keys: console.groq.com or aistudio.google.com")
+    # v78: voice note request - Ciel speaks her reply (toggleable)
+    _vl = text.lower()
+    if VOICE_ON and any(k in _vl for k in ("voice note", "voice message", "voice reply",
+            "send a voice", "drop a voice", "as a voice", "voice please", "use your voice",
+            "talk to me", "say it out loud", "speak it", "voice it")):
+        _aud = await _tts_ogg(reply)
+        if _aud:
+            try:
+                await u.effective_message.reply_voice(_aud)
+                group_messages.append({"uid": 0, "name": "Ciel",
+                    "text": f"(voice note) {reply[:180]}", "time": time.time()})
+                if len(group_messages) > 300: group_messages.pop(0)
+                return
+            except Exception as e:
+                logger.debug(f"voice send failed: {e}")
+
     # Always try markdown (AI uses bold for crypto analysis), fall back to plain
     import re as _re
     try:
@@ -8316,6 +8490,9 @@ async def bg_followup_tracker(app: Application):
 
                 if cur_price <= 0: continue
                 mult = cur_price / entry  # how many X since drop
+                info["last_price"] = cur_price  # v78: backtest fuel
+                info["last_mult"] = round(mult, 3)
+                info["last_check"] = now
 
                 sym  = info.get("sym", "???")
                 name = info.get("name", "")
@@ -9685,6 +9862,9 @@ async def post_init(app: Application):
         # News & AI
         BotCommand("news",          "📰 Latest news + AI summary"),
         BotCommand("ask",           "🤖 Ask Ciel AI anything"),
+        BotCommand("voice",         "🎤 Toggle Ciel voice notes"),
+        BotCommand("commentary",    "📡 Toggle macro commentary"),
+        BotCommand("backtest",      "📊 Simulate aping every call"),
         BotCommand("sentiment",     "😤 Market mood & risk"),
         BotCommand("macro",         "🌍 Macro briefing"),
         BotCommand("markets",       "📈 Global market data"),
@@ -9774,6 +9954,8 @@ async def post_init(app: Application):
         BotCommand("trending",  "🔥 Trending metas"),
         BotCommand("news",      "📰 News + AI summary"),
         BotCommand("ask",       "🤖 Ask Ciel AI anything"),
+        BotCommand("voice",     "🎤 Toggle Ciel voice notes"),
+        BotCommand("commentary", "📡 Toggle macro commentary"),
         BotCommand("sentiment", "😤 Market mood"),
         BotCommand("call",      "📢 Make a public call"),
         BotCommand("leaderboard","🏆 Top callers"),
@@ -9801,7 +9983,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"💠 Ciel Brain v77 ready — "
+        f"💠 Ciel Brain v78 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -10373,6 +10555,9 @@ def main():
         ("ts", cmd_twitter_scan), ("burp", cmd_hourly_burp),
         ("ticker", cmd_ticker_search), ("summary", cmd_channel_summary),
         ("contract", cmd_contract_read), ("zeros", cmd_zeros),
+        # v78 batch
+        ("voice", voice_cmd), ("commentary", commentary_cmd),
+        ("backtest", backtest_cmd),
     ]
     for name, fn in CMDS:
         app.add_handler(CommandHandler(name, safe_command(fn)))
@@ -10402,6 +10587,7 @@ def main():
             asyncio.create_task(bg_wallet_tracker(app))
             asyncio.create_task(bg_migrate_monitor(app))
             asyncio.create_task(bg_weekly_leaderboard(app))
+            asyncio.create_task(bg_macro_commentary(app))  # v78: proactive macro commentary
             asyncio.create_task(get_recent_news_context())  # v74: warm news cache
             # v68: LIVE auto-updater DISABLED per user — cards only update via the refresh button
             logger.info("13 scanners started OK — v44")
