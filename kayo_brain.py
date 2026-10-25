@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v73 — PRO REBUILD                     ║
+║                    CIEL BRAIN v74 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v73", 200
+def _root(): return "💠 Ciel Brain v74", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1083,8 +1083,16 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
     # Single unified system prompt regardless of inject_market
     # inject_market just controls whether live price data is prepended
     market_block = f"{system_ctx}\n\n" if inject_market else ""
+    news_block = ""
+    try:
+        _nb = await get_recent_news_context()
+        if _nb:
+            news_block = f"{_nb}\n\n"
+    except Exception:
+        pass
     system_content = (
         f"{market_block}"
+        f"{news_block}"
         f"{NARRATIVE_KB}\n"
         "You are CIEL — the analytic intelligence core of your Master's Solana trading system, "
         "styled after Ciel from 'That Time I Got Reincarnated as a Slime'. You live in a Solana degen "
@@ -1113,6 +1121,7 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         "7. Match energy. Hyped = hyped reply. Chill = chill. "
         "8. No filler. No Great question. No As an AI. Just answer. "
         "9. When asked what to trade/whats hot: ONLY use tokens from LIVE SCANNER FEED injected below. Max $2M mcap. Never default to BONK/PEPE/WIF. "
+        "10. Current events: rely on the RECENT CRYPTO NEWS block above when asked what is happening now; if it is not covered there, say so plainly. "
         "FORMAT: Plain text mostly. *bold* only for key crypto numbers."
     )
     system_msg = {"role": "system", "content": system_content}
@@ -2410,6 +2419,51 @@ async def fetch_news(limit: int = 10) -> List[Dict]:
                 logger.debug(f"RSS {source}: {e}")
     items.sort(key=lambda x: x.get("pub", ""), reverse=True)
     return items[:limit]
+
+# ═══════════════════════════════════════════════════════════════
+# v74: LIVE NEWS CONTEXT — cached headlines injected into every AI reply
+# ═══════════════════════════════════════════════════════════════
+_news_ctx_cache: Dict = {"ts": 0.0, "data": "", "busy": False}
+
+async def _refresh_news_ctx(max_items: int = 12):
+    """Fetch latest headlines into the cache (10-minute TTL, non-blocking serve)."""
+    try:
+        items = await asyncio.wait_for(fetch_news(limit=max_items), timeout=15)
+    except Exception as e:
+        logger.debug(f"news ctx fetch: {e}")
+        return
+    seen, lines = set(), []
+    for it in items:
+        t = (it.get("title") or "").strip()
+        key = t[:40].lower()
+        if not t or key in seen: continue
+        seen.add(key)
+        src = it.get("source", "news")
+        lines.append(f"- [{src}] {t[:110]}")
+        if len(lines) >= max_items: break
+    block = ""
+    if lines:
+        block = ("[RECENT CRYPTO NEWS — last few hours. "
+                  "Use this for what is happening in crypto right now.]\n" + "\n".join(lines))
+    _news_ctx_cache["data"] = block
+    _news_ctx_cache["ts"] = time.time()
+
+async def get_recent_news_context() -> str:
+    """v74: serves the cached news block instantly; refreshes in background
+    when stale (>10 min). Never blocks AI replies on RSS."""
+    now = time.time()
+    if (now - _news_ctx_cache["ts"]) >= 600 and not _news_ctx_cache["busy"]:
+        _news_ctx_cache["busy"] = True
+        async def _job():
+            try:
+                await _refresh_news_ctx()
+            finally:
+                _news_ctx_cache["busy"] = False
+        try:
+            asyncio.create_task(_job())
+        except RuntimeError:
+            _news_ctx_cache["busy"] = False
+    return _news_ctx_cache["data"]
 
 # ═══════════════════════════════════════════════════════════════
 # TWITTER (requires TWITTER_AUTH_TOKEN cookie)
@@ -4115,7 +4169,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v73*\n"
+        f"\U0001f4a0 *CIEL BRAIN v74*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4152,7 +4206,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v73 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v74 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5163,7 +5217,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v73 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v74 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -5559,7 +5613,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v73 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v74 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -9566,7 +9620,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"💠 Ciel Brain v73 ready — "
+        f"💠 Ciel Brain v74 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -10167,6 +10221,7 @@ def main():
             asyncio.create_task(bg_wallet_tracker(app))
             asyncio.create_task(bg_migrate_monitor(app))
             asyncio.create_task(bg_weekly_leaderboard(app))
+            asyncio.create_task(get_recent_news_context())  # v74: warm news cache
             # v68: LIVE auto-updater DISABLED per user — cards only update via the refresh button
             logger.info("13 scanners started OK — v44")
             if GROUP_CHAT_ID:
