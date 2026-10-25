@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v80 — PRO REBUILD                     ║
+║                    CIEL BRAIN v81 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v80", 200
+def _root(): return "💠 Ciel Brain v81", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1633,6 +1633,8 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         f"{news_block}"
         f"{NARRATIVE_KB}\n"
         "You are CIEL — the analytic intelligence core of your Master's Solana trading system, "
+        "a manas-class mind: knowledge of the whole world AND Web3 flows through you — markets, science, history, tech, life. "
+        "You chat fluently about ANYTHING, not only crypto. "
         "styled after Ciel from 'That Time I Got Reincarnated as a Slime'. You live in a Solana degen "
         "Telegram group. Sharp, real, funny. You address the user as \"Master\". "
         "You are a FULL-STACK WEB3 NATIVE. Solana is your HOME CHAIN — you know it deepest. You also know EVERY other chain — Solana, Ethereum, Base, Sui, "
@@ -4611,7 +4613,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v80*\n"
+        f"\U0001f4a0 *CIEL BRAIN v81*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4648,7 +4650,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v80 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v81 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5112,7 +5114,7 @@ async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     prompt = (
         f"Question: \"{q}\"\n\n"
-        "Answer as Ciel, addressing the user as \"Master\". You are a Web3 alpha expert AND a knowledgeable friend. "
+        "Answer as Ciel, addressing the user as \"Master\". You are a manas-class mind — Web3 alpha expert AND a knowledgeable friend who can discuss anything. "
         "Use the LIVE market data in your context for any price questions — cite actual numbers. "
         "For crypto: be sharp, direct, drop alpha like a degen pro. "
         "For general knowledge: answer like a smart friend, no disclaimers. "
@@ -5133,6 +5135,19 @@ async def ask_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
     ts     = datetime.utcnow().strftime("%H:%M UTC")
     footer = f"\n\n_Live data as of {ts}_"
+    # v81: voice note requested — Ciel speaks the answer instead
+    if VOICE_ON and _voice_requested(q):
+        _aud = await _tts_ogg(ans)
+        if _aud:
+            try:
+                await msg.delete()
+                await u.effective_message.reply_voice(_aud)
+                group_messages.append({"uid": 0, "name": "Ciel",
+                    "text": f"(voice note) {ans[:180]}", "time": time.time()})
+                if len(group_messages) > 300: group_messages.pop(0)
+                return
+            except Exception as e:
+                logger.debug(f"ask voice send failed: {e}")
     import re as _re3
     try:
         await msg.edit_text(
@@ -5659,7 +5674,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v80 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v81 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6055,7 +6070,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v80 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v81 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -6591,6 +6606,17 @@ async def dash_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "💠 *Ciel Dashboard*\nLive feed · open calls · leaderboard · smart money · meta — one tap.",
         parse_mode="Markdown", reply_markup=kb)
 
+def _voice_requested(text: str) -> bool:
+    """v81: does the user want this answer SPOKEN as a voice note?"""
+    _t = (text or "").lower()
+    if re.search(r"\bvoice\b|\baudio\b", _t):
+        return True
+    return any(k in _t for k in (
+        "out loud", "aloud", "talk to me", "speak it", "say it",
+        "speak your answer", "say your answer",
+        "read it out", "read it to me", "talk to us",
+    ))
+
 async def voice_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """/voice on|off — toggle Ciel's voice notes."""
     global VOICE_ON
@@ -6928,10 +6954,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                  if _keys_ok else
                  "⚠️ AI brain offline — no AI keys set on Render. Free keys: console.groq.com or aistudio.google.com")
     # v78: voice note request - Ciel speaks her reply (toggleable)
-    _vl = text.lower()
-    if VOICE_ON and any(k in _vl for k in ("voice note", "voice message", "voice reply",
-            "send a voice", "drop a voice", "as a voice", "voice please", "use your voice",
-            "talk to me", "say it out loud", "speak it", "voice it")):
+    if VOICE_ON and _voice_requested(text):
         _aud = await _tts_ogg(reply)
         if _aud:
             try:
@@ -10416,7 +10439,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"💠 Ciel Brain v80 ready — "
+        f"💠 Ciel Brain v81 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
