@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v83 — PRO REBUILD                     ║
+║                    CIEL BRAIN v84 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v83", 200
+def _root(): return "💠 Ciel Brain v84", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1432,11 +1432,12 @@ async def bg_macro_commentary(app):
 # ---- v77: sticky provider circuit breaker - ONE AI provider at a time ----
 # When a provider hits its limit (429) it goes on cooldown (70s, escalating
 # to 600s on repeats) and the bot STAYS on the fallback until it recovers.
-_AI_PROVIDERS = ["groq", "gemini", "openrouter"]
+_AI_PROVIDERS = ["groq", "gemini", "zai", "openrouter"]
 _ai_provider_state: Dict = {"active": "groq", "cooldown": {}}
 
 def _ai_key_ok(p):
-    return {"groq": GROQ_API_KEY, "gemini": GEMINI_API_KEY, "openrouter": OPENROUTER_API_KEY}.get(p, "")
+    return {"groq": GROQ_API_KEY, "gemini": GEMINI_API_KEY,
+            "zai": os.environ.get("ZAI_API_KEY", ""), "openrouter": OPENROUTER_API_KEY}.get(p, "")
 
 def _ai_provider_ready(p):
     return bool(_ai_key_ok(p)) and _ai_provider_state["cooldown"].get(p, 0) <= time.time()
@@ -1600,6 +1601,51 @@ async def _ai_openrouter(system_msg, prompt, max_tokens, system_ctx=""):
                     logger.error(f"OpenRouter {or_model}: {e}")
                     continue
 
+
+
+async def _ai_zai(system_msg, prompt, max_tokens, system_ctx=""):
+    # v84: Z.ai GLM-4.7-Flash / GLM-4.5-Flash — verified FREE tier (Oct 2026),
+    # no card required, OpenAI-compatible endpoint
+    ZAI_API_KEY = os.environ.get("ZAI_API_KEY", "")
+    if ZAI_API_KEY:
+        zai_models = [
+            "glm-4.7-flash",   # Free — smartest free Flash
+            "glm-4.5-flash",   # Free — fallback
+        ]
+        async with aiohttp.ClientSession() as s:
+            for zai_model in zai_models:
+                try:
+                    async with s.post(
+                        "https://api.z.ai/api/paas/v4/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {ZAI_API_KEY}",
+                            "Content-Type": "application/json",
+                        },
+                        json={
+                            "model": zai_model,
+                            "messages": [system_msg, {"role": "user", "content": prompt}],
+                            "max_tokens": max_tokens,
+                        },
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as r:
+                        if r.status == 200:
+                            d = await r.json()
+                            text_out = d["choices"][0]["message"]["content"].strip()
+                            if text_out:
+                                logger.debug(f"ai_ask: Z.ai {zai_model} OK")
+                                _ai_provider_state["active"] = "zai"
+                                return text_out
+                        elif r.status == 429:
+                            _ai_mark_limited("zai")
+                            return ""
+                        else:
+                            err_body = await r.text()
+                            logger.error(f"Z.ai {zai_model} HTTP {r.status}: {err_body[:100]}")
+                            continue
+                except Exception as e:
+                    logger.error(f"Z.ai {zai_model}: {e}")
+                    continue
+    return ""
 
 
 async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
@@ -1814,7 +1860,7 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
     # Limited providers are skipped until cooldown expires; the active
     # provider is always tried first. A success keeps it sticky.
     for _p in _ai_provider_order():
-        _fn = {"groq": _ai_groq, "gemini": _ai_gemini, "openrouter": _ai_openrouter}.get(_p)
+        _fn = {"groq": _ai_groq, "gemini": _ai_gemini, "zai": _ai_zai, "openrouter": _ai_openrouter}.get(_p)
         if not _fn: continue
         try:
             _out = await _fn(system_msg, prompt, max_tokens, system_ctx)
@@ -1824,7 +1870,7 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         if _out:
             _ai_provider_state["active"] = _p
             return _out
-    logger.error(f"ai_ask: ALL backends failed. Groq={bool(GROQ_API_KEY)} Gemini={bool(GEMINI_API_KEY)}")
+    logger.error(f"ai_ask: ALL backends failed. Groq={bool(GROQ_API_KEY)} Gemini={bool(GEMINI_API_KEY)} Zai={bool(os.environ.get('ZAI_API_KEY', ''))}")
     return fallback
 
 # ═══════════════════════════════════════════════════════════════
@@ -4621,7 +4667,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             + [list(r) for r in markup.inline_keyboard]
         )
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v83*\n"
+        f"\U0001f4a0 *CIEL BRAIN v84*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4661,7 +4707,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v83 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v84 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5685,7 +5731,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v83 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v84 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6081,7 +6127,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v83 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v84 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -6971,11 +7017,11 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
     if not reply or not reply.strip():
-        _keys_ok = bool(GROQ_API_KEY or GEMINI_API_KEY or OPENROUTER_API_KEY)
+        _keys_ok = bool(GROQ_API_KEY or GEMINI_API_KEY or OPENROUTER_API_KEY or os.environ.get("ZAI_API_KEY", ""))
         reply = ("⚠️ AI at capacity right now, Master — all providers hit rate limits. "
                  "Give it a few seconds and ask again."
                  if _keys_ok else
-                 "⚠️ AI brain offline — no AI keys set on Render. Free keys: console.groq.com or aistudio.google.com")
+                 "⚠️ AI brain offline — no AI keys set on Render. Free keys: console.groq.com, aistudio.google.com or z.ai (no card)")
     # v78: voice note request - Ciel speaks her reply (toggleable)
     if VOICE_ON and _voice_requested(text):
         _aud = await _tts_ogg(reply)
@@ -10475,7 +10521,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_chat_menu_button: {e}")
     logger.info(
-        f"💠 Ciel Brain v83 ready — "
+        f"💠 Ciel Brain v84 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
