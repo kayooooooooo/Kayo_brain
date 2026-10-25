@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v74 — PRO REBUILD                     ║
+║                    CIEL BRAIN v75 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v74", 200
+def _root(): return "💠 Ciel Brain v75", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -2225,11 +2225,11 @@ async def cmd_channel_summary(u, c):
     msg = await u.effective_message.reply_text("📝 *Summarizing chat...*", parse_mode="Markdown")
     try:
         # Get recent messages from the chat
-        chat = u.effective_chat
         messages = []
-        async for m in c.bot.get_chat_history(chat.id, limit=50):
-            if m.text and not m.from_user.is_bot:
-                messages.append(f"[{m.from_user.first_name}]: {m.text[:100]}")
+        for m in group_messages[-50:]:
+            _nm = m.get("name") or ("Ciel" if m.get("uid") == 0 else f"User{str(m.get('uid','?'))[-4:]}")
+            if m.get("text"):
+                messages.append(f"[{_nm}]: {str(m.get('text'))[:100]}")
 
         if not messages:
             await msg.edit_text("❌ No recent messages to summarize.")
@@ -4169,7 +4169,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v74*\n"
+        f"\U0001f4a0 *CIEL BRAIN v75*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4206,7 +4206,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v74 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v75 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5217,7 +5217,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v74 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v75 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -5613,7 +5613,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v74 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v75 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -6026,7 +6026,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     chat = u.effective_chat
 
     # Always store for group summary
-    group_messages.append({"uid": uid, "text": text, "time": time.time()})
+    group_messages.append({"uid": uid, "name": u.effective_user.first_name or "", "text": text, "time": time.time()})
     if len(group_messages) > 300: group_messages.pop(0)
 
     # ── 1. CA / Link auto-scan — INSTANT, no AI blocking ────────────
@@ -6052,6 +6052,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                     alert_msg_ids.setdefault(ca, sent.message_id); _alert_ids_prune()
                     _live_cards[ca] = {"msg_id": sent.message_id, "chat_id": u.effective_chat.id,
                                        "until": time.time() + 3600, "photo": bool(getattr(sent, "photo", None))}
+                    group_messages.append({"uid": 0, "name": "Ciel", "text": f"Scanned ${t.get('sym','?')} — CA: {ca}", "time": time.time()})
                 add_xp(uid, 5)
                 # Fire AI verdict as NON-BLOCKING background task — edits message when ready
                 async def _ca_ai_verdict(msg_id, chat_id, token_data, ca_addr, btns):
@@ -6151,9 +6152,22 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     # Like ChatGPT/Grok: one smart prompt, live market context always injected.
     # The AI decides if the topic is crypto, casual, general — we don't pre-filter.
     name_str = u.effective_user.first_name or "fren"
+    # ── v75: conversation memory — resolve 'it/that coin' references ──
+    hist_lines = []
+    for m in group_messages[-14:]:
+        _nm = m.get("name") or ("Ciel" if m.get("uid") == 0 else f"User{str(m.get('uid','?'))[-4:]}")
+        if m.get("text"):
+            hist_lines.append(f"{_nm}: {str(m.get('text'))[:180]}")
+    hist_block = ""
+    if len(hist_lines) >= 2:
+        hist_block = ("[RECENT GROUP CHAT — your conversation memory. Use it to resolve what the user "
+                      "refers to: 'it', 'that coin', 'the one you scanned'.]\n" + "\n".join(hist_lines) + "\n\n")
     prompt = (
+        f"{hist_block}"
         f"{name_str}: \"{text}\"\n\n"
         "Reply as Ciel, addressing the user as \"Master\". Be real, sharp, direct. "
+        "Resolve references using the RECENT GROUP CHAT above. "
+        "NEVER invent token names, CAs, or prices — if a token isn't in the chat history, live feed, or news, say honestly that you don't have its data. "
         "If it's casual → 1-2 sentences, match their energy. "
         "If it's crypto/Web3 → use the LIVE market data in your context, cite actual numbers, give the real play. "
         "If it's general knowledge → answer confidently like a smart friend. No disclaimers. "
@@ -6176,6 +6190,9 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     except Exception:
         plain = _re.sub(r'[*_`\[\]()~>#+=|{}.!\\]', '', reply)
         await u.effective_message.reply_text(plain.strip() or reply)
+    # v75: record Ciel's reply in conversation memory
+    group_messages.append({"uid": 0, "name": "Ciel", "text": reply[:250], "time": time.time()})
+    if len(group_messages) > 300: group_messages.pop(0)
 
 # ═══════════════════════════════════════════════════════════════
 # BACKGROUND SCANNERS
@@ -9620,7 +9637,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"💠 Ciel Brain v74 ready — "
+        f"💠 Ciel Brain v75 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
