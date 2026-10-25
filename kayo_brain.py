@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v78 — PRO REBUILD                     ║
+║                    CIEL BRAIN v79 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -22,7 +22,7 @@ import xml.etree.ElementTree as ET
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
 from telegram.ext import (
     Application, CommandHandler, ContextTypes,
-    CallbackQueryHandler, MessageHandler, filters,
+    CallbackQueryHandler, MessageHandler, MessageReactionHandler, filters,
 )
 from flask import Flask
 
@@ -61,7 +61,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v78", 200
+def _root(): return "💠 Ciel Brain v79", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -179,7 +179,11 @@ ath_tracker:     Dict[str, dict]         = {}  # addr -> {sym, first_mcap, ath_m
 scanner_cooldowns: Dict[str, Dict[str, float]] = {}  # scanner_name -> {addr: last_alert_ts}
 volume_snapshots:  Dict[str, Dict] = {}  # addr -> {vol_1h, vol_24h, ts, mcap, sym, age_days}
 liq_snapshots:     Dict[str, Dict] = {}  # v63: addr -> {liq, ts} — liquidity-drain early warning
-holder_snapshots:  Dict[str, Dict] = {}  # v63: addr -> {h, ts, h_prev, ts_prev} — holder trend
+holder_snapshots:  Dict[str, Dict] = {}
+caller_registry:   Dict[str, Dict] = {}  # v79: uid -> {"name", "calls": [(addr, sym, ts)]}
+crowd_votes:       Dict[str, Dict] = {}  # v79: addr -> {"up": set, "down": set}
+personal_filters:  Dict[str, Dict] = {}  # v79: uid -> {mcap_min, mcap_max, liq_min, types}
+user_mirror:       Set[str] = set()      # v79: uids receiving DM mirrors  # v63: addr -> {h, ts, h_prev, ts_prev} — holder trend
 dev_snapshots:     Dict[str, Dict] = {}  # v71: addr -> {pct, ts} dev supply % for DEV-SELLING watch
 _live_cards:       Dict[str, Dict] = {}  # v67: addr -> {msg_id, chat_id, until, photo} — LIVE self-updating cards
 last_scan_ts:      float = 0  # last successful scan timestamp (for resume)
@@ -280,6 +284,10 @@ async def _save():
             "liq_snapshots":    dict(list(liq_snapshots.items())[-2000:]),
             "holder_snapshots": dict(list(holder_snapshots.items())[-2000:]),
         "voice_on": VOICE_ON, "commentary_on": COMMENTARY_ON,
+        "caller_registry": dict(list(caller_registry.items())[-200:]),
+        "crowd_votes": {a: {"up": list(v["up"])[:50], "down": list(v["down"])[:50]} for a, v in list(crowd_votes.items())[-500:]},
+        "personal_filters": dict(list(personal_filters.items())[-200:]),
+        "user_mirror": list(user_mirror)[:100],
             "dev_snapshots":    dict(list(dev_snapshots.items())[-2000:]),
             "last_scan_ts": last_scan_ts,
         }
@@ -368,6 +376,11 @@ async def _load():
         global VOICE_ON, COMMENTARY_ON
         VOICE_ON = bool(d.get("voice_on", VOICE_ON))
         COMMENTARY_ON = bool(d.get("commentary_on", COMMENTARY_ON))
+        global caller_registry, crowd_votes, personal_filters, user_mirror
+        caller_registry = d.get("caller_registry", {}) or {}
+        crowd_votes = {a: {"up": set(v.get("up", [])), "down": set(v.get("down", []))} for a, v in (d.get("crowd_votes", {}) or {}).items()}
+        personal_filters = d.get("personal_filters", {}) or {}
+        user_mirror = set(d.get("user_mirror", []) or [])
         dev_snapshots = d.get("dev_snapshots", {}) or {}
         pattern_memory  = d.get("pattern_memory", {})
         scanner_cooldowns = d.get("scanner_cooldowns", {})
@@ -4329,7 +4342,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v78*\n"
+        f"\U0001f4a0 *CIEL BRAIN v79*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4366,7 +4379,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v78 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v79 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5377,7 +5390,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v78 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v79 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -5773,7 +5786,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v78 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v79 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -6320,6 +6333,130 @@ async def commentary_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         f"📡 Macro commentary: *{'ON — I will post a Notice: when BTC/SOL moves ≥4%' if COMMENTARY_ON else 'OFF'}*",
         parse_mode="Markdown")
 
+
+async def handle_reaction(update: Update, context):
+    """v79: card reactions -> crowd sentiment. 🦍 = bullish, 🗑️ = bearish."""
+    try:
+        r = getattr(update, "message_reaction", None)
+        if not r: return
+        addr = None
+        for a, mid in alert_msg_ids.items():
+            if mid == r.message_id: addr = a; break
+        if not addr: return
+        uid = str(r.user.id)
+        cv = crowd_votes.setdefault(addr, {"up": set(), "down": set()})
+        for em in (r.new_reaction or []):
+            e = getattr(em, "emoji", "")
+            if e == "\U0001F98D":      # gorilla — bullish
+                cv["up"].add(uid); cv["down"].discard(uid)
+            elif e == "\U0001F5D1":   # wastebasket — bearish
+                cv["down"].add(uid); cv["up"].discard(uid)
+        asyncio.create_task(_save())
+    except Exception as e:
+        logger.debug(f"reaction: {e}")
+
+async def _mirror_alert(bot, t: Dict, alert_type: str):
+    """v79: DM mirror — push alerts matching personal filters to opted-in users."""
+    if not user_mirror or not alert_type: return
+    for uid in list(user_mirror)[:20]:
+        try:
+            f = personal_filters.get(str(uid), {})
+            mc = float(t.get("mcap") or 0); lq = float(t.get("liq") or 0)
+            if f.get("mcap_max") and mc > float(f["mcap_max"]): continue
+            if f.get("mcap_min") and mc < float(f["mcap_min"]): continue
+            if f.get("liq_min") and lq < float(f["liq_min"]): continue
+            if f.get("types") and alert_type not in f["types"]: continue
+            txt = build_alert_card(t, alert_type, "")
+            await bot.send_message(int(uid), txt[:4000], parse_mode="Markdown",
+                                   disable_web_page_preview=True)
+            await asyncio.sleep(0.4)
+        except Exception:
+            pass
+
+async def callers_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/callers — leaderboard: whose CA drops performed best (measured)."""
+    stats = []
+    for uid, cr in caller_registry.items():
+        mults, rug = [], 0
+        for addr, sym, ts in (cr.get("calls") or [])[-60:]:
+            dc = dropped_calls.get(addr) or {}
+            m = dc.get("last_mult")
+            if m: mults.append((sym, m))
+            if dc.get("status") == "rugged": rug += 1
+        if mults:
+            stats.append((cr.get("name") or f"User{str(uid)[-4:]}", len(cr.get("calls") or []),
+                          sum(m for _, m in mults)/len(mults), len(mults), rug))
+    if not stats:
+        await u.effective_message.reply_text("No measured caller history yet — drop CAs in chat and Ciel will grade them by real milestones.")
+        return
+    stats.sort(key=lambda s: -s[2])
+    card = "🏆 *CALLER LEADERBOARD — graded by real outcomes*\n━━━━━━━━━━━━━━━━━━━━━━━\n"
+    for name, total, avg, meas, rug in stats[:10]:
+        card += f"· *{_md(name)}* — {total} drops · avg *{avg:.2f}x* ({meas} measured) · 🪦 {rug} rugs\n"
+    await u.effective_message.reply_text(card, parse_mode="Markdown")
+
+async def crowd_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/crowd — group sentiment on Ciel's called tokens (reactions)."""
+    rows = []
+    for addr, cv in crowd_votes.items():
+        up, down = len(cv.get("up", [])), len(cv.get("down", []))
+        if up + down >= 1:
+            sym = (dropped_calls.get(addr) or {}).get("sym", addr[:4] + "...")
+            rows.append((up - down, up, down, sym))
+    if not rows:
+        await u.effective_message.reply_text("No reactions yet — react 🦍 (bullish) or 🗑️ (bearish) on my alert cards.")
+        return
+    rows.sort(reverse=True)
+    card = "🐒 *CROWD SENTIMENT — reactions on my calls*\n━━━━━━━━━━━━━━━━━━━━━━━\n"
+    for net, up, down, sym in rows[:12]:
+        card += f"· *${_md(str(sym))}* — 🦍 {up} · 🗑️ {down}\n"
+    await u.effective_message.reply_text(card, parse_mode="Markdown")
+
+async def setfilters_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/setfilters — personal alert filters for DM mirror. Usage: /setfilters mcap_max=1000000 liq_min=5000 types=pump,gem"""
+    uid = str(u.effective_user.id)
+    parts = (u.effective_message.text or "").split()[1:]
+    if not parts:
+        f = personal_filters.get(uid, {})
+        await u.effective_message.reply_text(
+            f"⚙️ Your filters: `{f or 'none (defaults)'}`\n"
+            "Set: `/setfilters mcap_max=1000000 liq_min=5000 types=pump,gem`\n"
+            "Clear: `/setfilters clear`",
+            parse_mode="Markdown")
+        return
+    if parts[0].lower() == "clear":
+        personal_filters.pop(uid, None)
+        asyncio.create_task(_save())
+        await u.effective_message.reply_text("⚙️ Filters cleared.")
+        return
+    f = personal_filters.setdefault(uid, {})
+    for p in parts:
+        if "=" not in p: continue
+        k, v = p.split("=", 1)
+        k = k.strip().lower()
+        if k == "types":
+            f["types"] = [t.strip().lower() for t in v.split(",") if t.strip()]
+        elif k in ("mcap_max", "mcap_min", "liq_min"):
+            try: f[k] = float(v)
+            except ValueError: pass
+    asyncio.create_task(_save())
+    await u.effective_message.reply_text(f"⚙️ Filters set: `{f}`\nUse /mirror on to receive matching alerts in DM.", parse_mode="Markdown")
+
+async def mirror_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/mirror on|off — receive matching alerts in your DM."""
+    uid = str(u.effective_user.id)
+    arg = (u.effective_message.text or "").lower().split()[-1]
+    if arg == "on":
+        user_mirror.add(uid)
+        asyncio.create_task(_save())
+        await u.effective_message.reply_text("📬 DM mirror ON — alerts matching your filters arrive here. (If none arrive, /start me first and check /setfilters)")
+    elif arg == "off":
+        user_mirror.discard(uid)
+        asyncio.create_task(_save())
+        await u.effective_message.reply_text("📬 DM mirror OFF.")
+    else:
+        await u.effective_message.reply_text(f"📬 DM mirror: *{'ON' if uid in user_mirror else 'OFF'}* — `/mirror on` or `/mirror off`", parse_mode="Markdown")
+
 async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not u.message or not u.effective_message.text: return
     text = u.effective_message.text.strip()
@@ -6354,6 +6491,11 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                     _live_cards[ca] = {"msg_id": sent.message_id, "chat_id": u.effective_chat.id,
                                        "until": time.time() + 3600, "photo": bool(getattr(sent, "photo", None))}
                     group_messages.append({"uid": 0, "name": "Ciel", "text": f"Scanned ${t.get('sym','?')} — CA: {ca}", "time": time.time()})
+                    try:  # v79: caller reputation
+                        _cr = caller_registry.setdefault(str(uid), {"name": u.effective_user.first_name or "?", "calls": []})
+                        _cr["calls"].append((ca, (t.get("sym") or "?").lstrip("$"), time.time()))
+                        if len(_cr["calls"]) > 120: _cr["calls"] = _cr["calls"][-100:]
+                    except Exception: pass
                 add_xp(uid, 5)
                 # Fire AI verdict as NON-BLOCKING background task — edits message when ready
                 async def _ca_ai_verdict(msg_id, chat_id, token_data, ca_addr, btns):
@@ -8332,7 +8474,8 @@ async def bg_main_scanner(app: Application):
                     )
                     if getattr(sent_msg, "message_id", None):
                         alert_msg_ids.setdefault(addr, sent_msg.message_id)
-                        _alert_ids_prune()
+                    _alert_ids_prune()
+                    asyncio.create_task(_mirror_alert(app.bot, tok_dict, alert_type))  # v79 DM mirror
                     alert_count += 1
                     dropped_calls[addr] = {
                         "sym": sym, "name": name,
@@ -8860,7 +9003,8 @@ async def bg_new_launch_scanner(app: Application):
                     )
                     if getattr(msg_sent_nl, "message_id", None):
                         alert_msg_ids.setdefault(addr, msg_sent_nl.message_id)
-                        _alert_ids_prune()
+                    _alert_ids_prune()
+                    asyncio.create_task(_mirror_alert(app.bot, tok_nl, nl_type))  # v79 DM mirror
                     dropped_calls[addr] = {
                         "sym": sym, "name": name,
                         "entry_price": cur_price_nl,
@@ -9138,7 +9282,8 @@ async def bg_established_scanner(app: Application):
                     )
                     if getattr(sent_msg, "message_id", None):
                         alert_msg_ids.setdefault(addr, sent_msg.message_id)
-                        _alert_ids_prune()
+                    _alert_ids_prune()
+                    asyncio.create_task(_mirror_alert(app.bot, tok_est, est_type))  # v79 DM mirror
                     dropped_calls[addr] = {
                         "sym": sym, "name": name,
                         "entry_price": tok_est["price"],
@@ -9374,7 +9519,8 @@ async def bg_heat_scanner(app: Application):
                     )
                     if getattr(sent_msg, "message_id", None):
                         alert_msg_ids.setdefault(addr, sent_msg.message_id)
-                        _alert_ids_prune()
+                    _alert_ids_prune()
+                    asyncio.create_task(_mirror_alert(app.bot, tok_heat, _h_type))  # v79 DM mirror
                     dropped_calls[addr] = {
                         "sym": sym, "name": name,
                         "entry_price": price,
@@ -9865,6 +10011,10 @@ async def post_init(app: Application):
         BotCommand("voice",         "🎤 Toggle Ciel voice notes"),
         BotCommand("commentary",    "📡 Toggle macro commentary"),
         BotCommand("backtest",      "📊 Simulate aping every call"),
+        BotCommand("callers",       "🏆 Caller leaderboard"),
+        BotCommand("crowd",         "🦍 Crowd sentiment"),
+        BotCommand("setfilters",    "⚙️ Personal alert filters"),
+        BotCommand("mirror",        "📬 Mirror alerts to DM"),
         BotCommand("sentiment",     "😤 Market mood & risk"),
         BotCommand("macro",         "🌍 Macro briefing"),
         BotCommand("markets",       "📈 Global market data"),
@@ -9983,7 +10133,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"💠 Ciel Brain v78 ready — "
+        f"💠 Ciel Brain v79 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -10558,6 +10708,8 @@ def main():
         # v78 batch
         ("voice", voice_cmd), ("commentary", commentary_cmd),
         ("backtest", backtest_cmd),
+        ("callers", callers_cmd), ("crowd", crowd_cmd),
+        ("setfilters", setfilters_cmd), ("mirror", mirror_cmd),
     ]
     for name, fn in CMDS:
         app.add_handler(CommandHandler(name, safe_command(fn)))
@@ -10567,12 +10719,13 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_help_callback, pattern=r"^help:"))
     app.add_handler(CallbackQueryHandler(handle_chart_callback, pattern=r"^chart:"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageReactionHandler(handle_reaction))  # v79: 🦍/🗑️ crowd sentiment
     app.add_error_handler(global_error_handler)
 
     async def run():
         async with app:
             await app.start()
-            await app.updater.start_polling(drop_pending_updates=True)
+            await app.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_UPDATES)
             asyncio.create_task(bg_state_saver(app))
             asyncio.create_task(bg_main_scanner(app))
             asyncio.create_task(bg_followup_tracker(app))
