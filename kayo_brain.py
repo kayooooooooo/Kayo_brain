@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v82 — PRO REBUILD                     ║
+║                    CIEL BRAIN v83 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v82", 200
+def _root(): return "💠 Ciel Brain v83", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1045,9 +1045,8 @@ async def get_live_market_context() -> str:
 # Live Groq models as of Oct 2026 — all llama models shut for free/developer tier
 # llama-3.3-70b-versatile closed to Free/Developer Aug 16 2026 (Enterprise-only)
 GROQ_MODELS = [
-    "openai/gpt-oss-120b",          # Primary — Groq production flagship, ~500 t/s
-    "openai/gpt-oss-20b",           # Fast fallback — ~1000 t/s, production
-    "qwen/qwen3.8-27b",             # Groq fallback — ~450 t/s
+    "openai/gpt-oss-120b",          # Primary — Groq production flagship, ~500 t/s (per-token billed)
+    "openai/gpt-oss-20b",           # Fast fallback — ~1000 t/s (per-token billed)
 ]
 
 
@@ -1513,9 +1512,10 @@ async def _ai_gemini(system_msg, prompt, max_tokens, system_ctx=""):
     # Gemini fallback — try multiple models in case one hits quota
     if GEMINI_API_KEY:
         gemini_models = [
-            "gemini-3.1-flash",        # Oct 2026 — documented 2.5 migration target
-            "gemini-3.8-flash",        # Newest flash flagship
-            "gemini-2.5-flash",        # Legacy — may still serve on AI Studio keys
+            "gemini-3.8-flash",        # Oct 2026 — current flagship Flash (stable)
+            "gemini-3.5-flash-lite",   # Current fast Flash-Lite (stable)
+            "gemini-3.1-flash-lite",   # Frontier-class lite (stable)
+            "gemini-2.5-flash",        # Legacy — served only to keys that used 2.5 before
             "gemini-2.5-flash-lite",   # Legacy lightweight
         ]
         full_prompt = f"{system_ctx}\n\n{prompt}"
@@ -1560,9 +1560,9 @@ async def _ai_openrouter(system_msg, prompt, max_tokens, system_ctx=""):
     OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
     if OPENROUTER_API_KEY:
         or_models = [
-            "meta-llama/llama-3.3-70b-instruct:free",
-            "openai/gpt-oss-20b:free",
-            "google/gemma-3-27b-it:free",
+            "nvidia/nemotron-3-super-120b-a12b:free",
+            "google/gemma-4-31b-it:free",
+            "nvidia/nemotron-3.5-lightning:free",
         ]
         full_prompt = f"{system_ctx}\n\n{prompt}"
         async with aiohttp.ClientSession() as s:
@@ -3901,15 +3901,18 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     h_spark = 120
     draw.rounded_rectangle([20, y_spark, W - 20, y_spark + h_spark], radius=10, fill=CARD_BG)
     # Generate fake sparkline data from changes
-    spark_data = t.get("candles") or []
+    try:
+        spark_data = [float(x) for x in (t.get("candles") or []) if isinstance(x, (int, float))]
+    except Exception:
+        spark_data = []
     if len(spark_data) < 6:
-      spark_data = []
-      base = 100
-    for i in range(50):
-        if i < 5 and ch5m: base *= (1 + ch5m/100/5)
-        elif i < 12 and ch1h: base *= (1 + ch1h/100/12)
-        elif i < 50 and ch24h: base *= (1 + ch24h/100/50)
-        spark_data.append(base + (i % 7) * base * 0.005)
+        spark_data = []
+        base = 100.0
+        for i in range(50):
+            if i < 5 and ch5m: base *= (1 + ch5m/100/5)
+            elif i < 12 and ch1h: base *= (1 + ch1h/100/12)
+            elif i < 50 and ch24h: base *= (1 + ch24h/100/50)
+            spark_data.append(base + (i % 7) * base * 0.005)
     _draw_sparkline(draw, spark_data, 35, y_spark + 10, W - 70, h_spark - 20, GREEN, RED)
     y += h_spark + 20
 
@@ -4092,7 +4095,6 @@ async def send_update_card(bot, chat_id: int, caption: str, addr: str, sym: str,
         try:
             sent = await bot.send_photo(chat_id=chat_id, photo=buf, caption=caption[:1024],
                                         parse_mode="Markdown", reply_markup=reply_markup,
-                                        disable_web_page_preview=True,
                                         reply_to_message_id=reply_to or None)
             buf.close()
             return sent
@@ -4151,7 +4153,6 @@ async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", re
                 caption=text_card[:1024],  # Telegram caption limit
                 parse_mode="Markdown",
                 reply_markup=reply_markup,
-                disable_web_page_preview=True,
                 reply_to_message_id=reply_to or None,
             )
             return sent
@@ -4620,7 +4621,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             + [list(r) for r in markup.inline_keyboard]
         )
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v82*\n"
+        f"\U0001f4a0 *CIEL BRAIN v83*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4660,7 +4661,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v82 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v83 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5684,7 +5685,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v82 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v83 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6080,7 +6081,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v82 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v83 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -10474,7 +10475,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_chat_menu_button: {e}")
     logger.info(
-        f"💠 Ciel Brain v82 ready — "
+        f"💠 Ciel Brain v83 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -11452,7 +11453,7 @@ async def cmd_deep(update, context):
     
     # Try Gemini models directly
     response = ""
-    for gem_model in ["gemini-2.5-flash", "gemini-2.0-flash"]:
+    for gem_model in ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"]:
         if not GEMINI_API_KEY: break
         try:
             payload = {"contents": [{"parts": [{"text": prompt}]}],
