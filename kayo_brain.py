@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v79 — PRO REBUILD                     ║
+║                    CIEL BRAIN v80 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -20,11 +20,12 @@ import aiohttp
 import redis.asyncio as aioredis
 import xml.etree.ElementTree as ET
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand
+from telegram import WebAppInfo
 from telegram.ext import (
     Application, CommandHandler, ContextTypes,
     CallbackQueryHandler, MessageHandler, MessageReactionHandler, filters,
 )
-from flask import Flask
+from flask import Flask, request, send_file
 
 # ═══════════════════════════════════════════════════════════════
 # ENV + CONFIG
@@ -61,10 +62,276 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v79", 200
+def _root(): return "💠 Ciel Brain v80", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
+
+_DASH_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>Ciel — Solana Intelligence</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#040b1c;--bg2:#0a1730;--card:rgba(255,255,255,.045);--card2:rgba(255,255,255,.08);--line:rgba(140,180,255,.14);--txt:#e8f1ff;--dim:#8fa8c9;--cyan:#4cc9f0;--blue:#3a86ff;--green:#2ee6a8;--red:#ff5d73;--gold:#ffd166}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{background:linear-gradient(180deg,var(--bg) 0%,var(--bg2) 60%,var(--bg) 100%);color:var(--txt);font-family:Inter,-apple-system,sans-serif;min-height:100vh;padding-bottom:76px}
+.mono{font-family:'JetBrains Mono',monospace}
+header{position:relative;height:172px;overflow:hidden}
+header img{width:100%;height:100%;object-fit:cover;object-position:center 28%}
+header .ov{position:absolute;inset:0;background:linear-gradient(90deg,rgba(4,11,28,.92) 0%,rgba(4,11,28,.55) 45%,rgba(4,11,28,.15) 100%),linear-gradient(0deg,var(--bg) 0%,transparent 55%)}
+.hcontent{position:absolute;left:18px;bottom:14px}
+.hcontent h1{font-size:34px;font-weight:800;letter-spacing:.12em;background:linear-gradient(90deg,#fff 30%,var(--cyan));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.hcontent .sub{font-size:11px;color:var(--dim);letter-spacing:.24em;text-transform:uppercase;margin-top:2px}
+.live{display:inline-flex;align-items:center;gap:6px;margin-left:10px;vertical-align:middle;font-size:10px;color:var(--cyan)}
+.live i{width:7px;height:7px;border-radius:50%;background:var(--cyan);box-shadow:0 0 8px var(--cyan);animation:p 2s infinite}
+@keyframes p{50%{opacity:.4}}
+.strip{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;padding:0 14px;margin-top:-8px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:10px 8px;text-align:center;backdrop-filter:blur(8px)}
+.stat b{display:block;font-size:15px;font-weight:700}
+.stat span{font-size:9px;color:var(--dim);letter-spacing:.08em;text-transform:uppercase}
+main{padding:16px 14px 0}
+.tabs{display:none}
+.tab{display:none;animation:in .25s}
+.tab.on{display:block}
+@keyframes in{from{opacity:0;transform:translateY(8px)}}
+h2.sect{font-size:12px;color:var(--dim);letter-spacing:.16em;text-transform:uppercase;margin:2px 2px 10px}
+.row{background:var(--card);border:1px solid var(--line);border-radius:15px;padding:13px 14px;margin-bottom:9px;display:flex;align-items:center;gap:10px;transition:background .15s}
+.row:active{background:var(--card2)}
+.row .grow{flex:1;min-width:0}
+.sym{font-weight:700;font-size:15px;display:flex;align-items:center;gap:7px}
+.sym .pill{font-size:9px;padding:2px 7px;border-radius:20px;background:rgba(76,201,240,.14);color:var(--cyan);font-weight:600;letter-spacing:.04em}
+.sub2{font-size:11px;color:var(--dim);margin-top:3px}
+.num{font-size:14px;font-weight:700;text-align:right}
+.up{color:var(--green)}.dn{color:var(--red)}.gold{color:var(--gold)}
+.big{font-size:20px}
+.bar{display:flex;gap:4px;margin-top:6px}
+.bar i{height:4px;border-radius:3px;flex:1;background:rgba(255,255,255,.07)}
+.bar i.f{background:var(--green)}
+.league{display:flex;align-items:center;gap:12px}
+.rank{width:26px;height:26px;border-radius:9px;background:var(--card2);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--cyan)}
+.badge{font-size:9px;padding:3px 8px;border-radius:20px;font-weight:600;letter-spacing:.05em}
+.b-win{background:rgba(46,230,168,.13);color:var(--green)}
+.b-loss{background:rgba(255,93,115,.13);color:var(--red)}
+.b-open{background:rgba(58,134,255,.15);color:var(--blue)}
+.b-god{background:rgba(255,209,102,.15);color:var(--gold)}
+footer{position:fixed;bottom:0;left:0;right:0;background:rgba(6,14,32,.88);backdrop-filter:blur(14px);border-top:1px solid var(--line);display:flex;padding:8px 6px calc(8px + env(safe-area-inset-bottom))}
+footer button{flex:1;background:none;border:none;color:var(--dim);font-family:Inter;font-size:10px;padding:6px 2px;letter-spacing:.02em}
+footer button .ic{font-size:19px;display:block;margin-bottom:3px;filter:grayscale(1) opacity(.75)}
+footer button.on{color:var(--cyan)}
+footer button.on .ic{filter:none}
+.toast{position:fixed;left:50%;bottom:92px;transform:translateX(-50%);background:rgba(10,23,48,.95);border:1px solid var(--line);color:var(--txt);font-size:12px;padding:9px 16px;border-radius:12px;opacity:0;transition:opacity .2s;pointer-events:none;z-index:9}
+.toast.on{opacity:1}
+.refbar{display:flex;align-items:center;justify-content:space-between;margin:0 2px 12px}
+.refbar .cd{font-size:11px;color:var(--dim)}
+.empty{ text-align:center;color:var(--dim);font-size:12px;padding:34px 0;line-height:1.8}
+</style>
+</head>
+<body>
+<header>
+  <img src="/assets/ciel.jpg" alt="Ciel">
+  <div class="ov"></div>
+  <div class="hcontent">
+    <h1>CIEL<span class="live"><i></i>ONLINE</span></h1>
+    <div class="sub">Solana Intelligence · Master's Dashboard</div>
+  </div>
+</header>
+<div class="strip">
+  <div class="stat"><b class="mono" id="s-sol">—</b><span>SOL</span></div>
+  <div class="stat"><b class="mono" id="s-btc">—</b><span>BTC</span></div>
+  <div class="stat"><b id="s-calls">—</b><span>Open calls</span></div>
+  <div class="stat"><b id="s-mult">—</b><span>Best mult</span></div>
+</div>
+<main>
+  <div class="refbar"><h2 class="sect" style="margin:0" id="tabtitle">Live Feed</h2><span class="cd" id="cd">refresh 30s</span></div>
+  <div class="tab on" id="t-feed"></div>
+  <div class="tab" id="t-calls"></div>
+  <div class="tab" id="t-board"></div>
+  <div class="tab" id="t-money"></div>
+  <div class="tab" id="t-meta"></div>
+</main>
+<footer>
+  <button data-t="feed" class="on"><span class="ic">📡</span>Feed</button>
+  <button data-t="calls"><span class="ic">📈</span>Calls</button>
+  <button data-t="board"><span class="ic">🏆</span>Board</button>
+  <button data-t="money"><span class="ic">🎯</span>Money</button>
+  <button data-t="meta"><span class="ic">📊</span>Meta</button>
+</footer>
+<div class="toast" id="toast"></div>
+<script>
+const tg=window.Telegram.WebApp;tg.ready();tg.expand();
+const $=id=>document.getElementById(id);
+const esc=s=>(s??'').toString().replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+const fmt=n=>{n=+n||0;if(n>=1e9)return'$'+(n/1e9).toFixed(2)+'B';if(n>=1e6)return'$'+(n/1e6).toFixed(2)+'M';if(n>=1e3)return'$'+(n/1e3).toFixed(1)+'K';return'$'+n.toFixed(2)};
+const pct=n=>{n=+n||0;return(n>=0?'+':'')+n.toFixed(1)+'%'};
+const cls=n=>(+n||0)>=0?'up':'dn';
+const age=h=>{h=+h||0;if(h<1)return Math.max(1,(h*60).toFixed(0))+'m';if(h<48)return h.toFixed(0)+'h';return(h/24).toFixed(0)+'d'};
+function toast(m){const t=$('toast');t.textContent=m;t.classList.add('on');setTimeout(()=>t.classList.remove('on'),1600)}
+let D={feed:[],calls:[],leaders:{best:[],worst:[],callers:[]},smart:[],crowd:[],meta:{narratives:[],news:[]},macro:{}};
+function feedRow(t){
+  return `<div class="row" onclick="copy('${esc(t.address)}')">
+    <div class="grow"><div class="sym">${esc(t.sym)}${t.narrative?`<span class="pill">${esc(t.narrative)}</span>`:''}</div>
+    <div class="sub2 mono">MC ${fmt(t.mcap)} · LIQ ${fmt(t.liq)} · ${age(t.age_h)} old</div></div>
+    <div class="num mono ${cls(t.ch1h)}">${pct(t.ch1h)}<div class="sub2" style="text-align:right">1h</div></div></div>`;
+}
+function callRow(c){
+  const st=c.status==='rugged'?'<span class="badge b-loss">RUGGED</span>':(c.mult>=10?'<span class="badge b-god">GOD TIER</span>':'<span class="badge b-open">OPEN</span>');
+  return `<div class="row" onclick="copy('${esc(c.address)}')">
+    <div class="grow"><div class="sym">${esc(c.sym)} ${st}</div>
+    <div class="sub2 mono">${esc(c.type||'call')} · ${age(c.age_h)} ago · in ${fmt(c.entry)}</div></div>
+    <div class="num mono ${cls(c.mult-1)}" style="font-size:18px">${(+c.mult||0).toFixed(2)}x</div></div>`;
+}
+function boardRow(b,i){return `<div class="row"><div class="rank">${i+1}</div>
+  <div class="grow"><div class="sym">${esc(b.sym)}</div><div class="sub2 mono">${esc(b.type||'')} · ${age(b.age_h)} ago</div></div>
+  <div class="num mono ${cls(b.mult-1)}">${(+b.mult||0).toFixed(2)}x</div></div>`}
+function moneyRow(w){return `<div class="row"><div class="grow">
+  <div class="sym mono" style="font-size:13px">${esc(w.wallet)}</div>
+  <div class="sub2">${w.tokens} tokens seen</div></div>
+  <div class="num"><span class="badge b-win">${w.wins}W</span> <span class="badge b-loss">${w.losses}L</span></div></div>`}
+function crowdRow(c){return `<div class="row"><div class="grow"><div class="sym">${esc(c.sym)}</div></div>
+  <div class="num"><span class="up">🦍 ${c.up}</span> <span class="dn">🗑️ ${c.down}</span></div></div>`}
+function metaRow(m){return `<div class="row"><div class="grow"><div class="sym">#${esc(m.name)}</div>
+  <div class="sub2">${m.total} calls measured</div></div>
+  <div class="num"><span class="up">${m.wins}W</span>/<span class="dn">${m.losses}L</span></div></div>`}
+function newsRow(h){return `<div class="row"><div class="grow" style="font-size:12px;line-height:1.45">${esc(h)}</div></div>`}
+const TITLES={feed:'Live Feed',calls:'My Calls',board:'Leaderboard',money:'Smart Money',meta:'Meta & Stats'};
+function render(){
+  $('s-sol').textContent=fmt(D.macro.sol);$('s-btc').textContent=fmt(D.macro.btc);
+  $('s-calls').textContent=D.calls.filter(c=>c.status!=='rugged').length;
+  const bm=Math.max(0,...D.calls.map(c=>+c.mult||0));$('s-mult').textContent=bm?bm.toFixed(1)+'x':'—';
+  $('t-feed').innerHTML=D.feed.length?D.feed.map(feedRow).join(''):'<div class="empty">Scanners warming up.<br>Feed appears as tokens are watched.</div>';
+  $('t-calls').innerHTML=D.calls.length?D.calls.map(callRow).join(''):'<div class="empty">No measured calls yet.<br>Drops get tracked for 7 days.</div>';
+  $('t-board').innerHTML=(D.leaders.best||[]).map(boardRow).join('')+
+    '<h2 class="sect" style="margin-top:16px">Worst calls</h2>'+(D.leaders.worst||[]).map(boardRow).join('')+
+    ((D.leaders.callers||[]).length?'<h2 class="sect" style="margin-top:16px">Top callers</h2>'+
+    D.leaders.callers.map((c,i)=>`<div class="row"><div class="rank">${i+1}</div><div class="grow"><div class="sym">${esc(c.name)}</div><div class="sub2">${c.n} measured calls · ${c.rug} rugged</div></div><div class="num mono ${cls(c.avg-1)}">${c.avg.toFixed(2)}x</div></div>`).join(''):'');
+  $('t-money').innerHTML=(D.smart.length?D.smart.map(moneyRow).join(''):'<div class="empty">No proven winners yet.<br>The registry learns from milestones & rugs.</div>')+
+    (D.crowd.length?'<h2 class="sect" style="margin-top:16px">Crowd sentiment</h2>'+D.crowd.map(crowdRow).join(''):'');
+  $('t-meta').innerHTML=(D.meta.narratives.length?'<h2 class="sect">Narrative performance</h2>'+D.meta.narratives.map(metaRow).join(''):'')+
+    (D.meta.news.length?'<h2 class="sect" style="margin-top:16px">Live news</h2>'+D.meta.news.map(newsRow).join(''):'<div class="empty">Awaiting news cycle.</div>');
+}
+async function refresh(){
+  try{
+    let id='';try{id=tg.initData}catch(e){}
+    const r=await fetch('/api/dash',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'init='+encodeURIComponent(id)});
+    const j=await r.json();
+    if(j.ok){D=j;render()}
+  }catch(e){}
+}
+let secs=30;
+setInterval(()=>{secs--;if(secs<=0){secs=30;refresh()}$('cd').textContent='refresh in '+secs+'s'},1000);
+document.querySelectorAll('footer button').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('footer button').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on');document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));
+  $('t-'+b.dataset.t).classList.add('on');$('tabtitle').textContent=TITLES[b.dataset.t];
+});
+function copy(a){if(navigator.clipboard)navigator.clipboard.writeText(a).then(()=>toast('CA copied — '+a.slice(0,4)+'...'+a.slice(-4)));else toast(a)}
+refresh();
+</script>
+</body>
+</html>
+"""
+
+# ── v80: TELEGRAM MINI APP DASHBOARD ────────────────────────────
+_dash_macro: Dict = {"btc": 0, "sol": 0, "ts": 0}  # updated by the macro watcher
+
+def _verify_init_data(init_data: str) -> bool:
+    """v80: Telegram WebApp initData HMAC verification."""
+    try:
+        from urllib.parse import parse_qsl
+        import hmac as _hmac
+        if not init_data or not BOT_TOKEN:
+            return True  # no auth when opened outside Telegram (read-only data)
+        pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+        recv = pairs.pop("hash", "")
+        if not recv:
+            return False
+        dcs = "\n".join(f"{k}={v}" for k, v in sorted(pairs.items()))
+        secret = _hmac.new(b"WebAppData", BOT_TOKEN.encode(), "sha256").digest()
+        calc = _hmac.new(secret, dcs.encode(), "sha256").hexdigest()
+        return _hmac.compare_digest(calc, recv)
+    except Exception:
+        return False
+
+def _dash_payload() -> Dict:
+    """v80: assemble the dashboard JSON from live bot state."""
+    now = time.time()
+    feed = []
+    for t in list(_live_feed)[:20]:
+        feed.append({"sym": t.get("sym", "?"), "address": t.get("address", ""),
+                     "mcap": t.get("mcap", 0), "liq": t.get("liq", 0),
+                     "ch1h": t.get("ch1h", 0), "narrative": t.get("narrative", ""),
+                     "age_h": max(0, (now - (t.get("created") or 0) / 1000) / 3600) if t.get("created") else 24})
+    calls, mults = [], []
+    for addr, v in dropped_calls.items():
+        m = float(v.get("last_mult") or 0)
+        if not m:
+            continue
+        mults.append((m, v.get("sym", "?")))
+        calls.append({"sym": v.get("sym", "?"), "address": addr, "mult": m,
+                      "status": v.get("status", "open"), "type": v.get("alert_type", ""),
+                      "age_h": max(0, (now - v.get("time", now)) / 3600),
+                      "entry": v.get("entry_price", 0)})
+    calls.sort(key=lambda x: -x["mult"])
+    best = calls[:10]
+    worst = sorted(calls, key=lambda x: x["mult"])[:5]
+    callers = []
+    for uid, cr in caller_registry.items():
+        ms = []
+        for a, s, ts in cr.get("calls", [])[-40:]:
+            dc = dropped_calls.get(a) or {}
+            if dc.get("last_mult"):
+                ms.append(float(dc["last_mult"]))
+        if len(ms) >= 2:
+            callers.append({"name": cr.get("name", "?"), "n": len(ms),
+                            "avg": sum(ms) / len(ms),
+                            "rug": sum(1 for a, s, ts in cr.get("calls", [])[-40:] if (dropped_calls.get(a) or {}).get("status") == "rugged")})
+    callers.sort(key=lambda x: -x["avg"])
+    smart = [{"wallet": w[:6] + "..." + w[-4:], "wins": int(v.get("wins", 0)), "losses": int(v.get("losses", 0)),
+              "tokens": len(v.get("tokens", []))}
+             for w, v in wallet_registry.items()
+             if v.get("wins", 0) >= 2 and v.get("losses", 0) < v.get("wins", 0)]
+    smart.sort(key=lambda x: -x["wins"])
+    crowd = [{"sym": (dropped_calls.get(a) or {}).get("sym", "?"), "up": len(v.get("up", [])), "down": len(v.get("down", []))}
+             for a, v in crowd_votes.items() if v.get("up") or v.get("down")]
+    crowd.sort(key=lambda x: -x["up"])
+    narratives = [{"name": k, "wins": int(v.get("wins", 0)), "losses": int(v.get("losses", 0)), "total": int(v.get("total", 0))}
+                  for k, v in pattern_memory.items() if v.get("total", 0) >= 2]
+    narratives.sort(key=lambda x: -(x["wins"] / max(1, x["total"])))
+    news = [ln.strip("- [").strip() for ln in (get_recent_news_context_cache() or "").split("\n") if ln.strip().startswith("- [")][:8]
+    return {"ok": True, "v": "v80",
+            "macro": {"btc": _dash_macro.get("btc", 0), "sol": _dash_macro.get("sol", 0)},
+            "feed": feed, "calls": calls[:24],
+            "leaders": {"best": best, "worst": worst, "callers": callers[:6]},
+            "smart": smart[:12], "crowd": crowd[:8],
+            "meta": {"narratives": narratives[:12], "news": news}}
+
+def get_recent_news_context_cache() -> str:
+    """v80: dash-safe read of the news cache (sync)."""
+    return _news_ctx_cache.get("data", "") or ""
+
+@flask_app.route("/app")
+def _dash_page():
+    return _DASH_HTML, 200
+
+@flask_app.route("/assets/ciel.jpg")
+def _dash_img():
+    try:
+        return send_file("ciel_banner.jpg", mimetype="image/jpeg")
+    except Exception:
+        return "no image", 404
+
+@flask_app.route("/api/dash", methods=["POST"])
+def _dash_api():
+    if not _verify_init_data(request.form.get("init", "")):
+        return {"ok": False, "error": "auth"}, 403
+    return _dash_payload(), 200
+
+
 
 threading.Thread(
     target=lambda: flask_app.run(
@@ -1134,6 +1401,8 @@ async def bg_macro_commentary(app):
             now = time.time()
             if COMMENTARY_ON and GROUP_CHAT_ID:
                 px = await _cg_btc_sol()
+                if px:
+                    _dash_macro.update({"btc": px[0], "sol": px[1], "ts": time.time()})
                 if px:
                     for coin, p in zip(("BTC", "SOL"), px):
                         s = snaps.get(coin) or {}
@@ -4342,7 +4611,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v79*\n"
+        f"\U0001f4a0 *CIEL BRAIN v80*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4379,7 +4648,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v79 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v80 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5390,7 +5659,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v79 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v80 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -5786,7 +6055,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v79 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v80 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -6309,6 +6578,18 @@ async def backtest_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
              f"Equal-weight portfolio: *{(flat)*100:+.0f}%* (1 unit per call)\n"
              f"_Measured live by the followup tracker — only tokens tracked within 7 days are included._")
     await u.effective_message.reply_text(card, parse_mode="Markdown", disable_web_page_preview=True)
+
+async def dash_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """v80: open the Ciel Mini App dashboard."""
+    host = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "")
+    if not host:
+        await u.effective_message.reply_text("⚠️ Dashboard needs RENDER_EXTERNAL_HOSTNAME (auto-set on Render).")
+        return
+    url = f"https://{host}/app"
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("📊 Open Dashboard", web_app=WebAppInfo(url=url))]])
+    await u.effective_message.reply_text(
+        "💠 *Ciel Dashboard*\nLive feed · open calls · leaderboard · smart money · meta — one tap.",
+        parse_mode="Markdown", reply_markup=kb)
 
 async def voice_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """/voice on|off — toggle Ciel's voice notes."""
@@ -10008,6 +10289,7 @@ async def post_init(app: Application):
         # News & AI
         BotCommand("news",          "📰 Latest news + AI summary"),
         BotCommand("ask",           "🤖 Ask Ciel AI anything"),
+    BotCommand("dash",          "📊 Dashboard (Mini App)"),
         BotCommand("voice",         "🎤 Toggle Ciel voice notes"),
         BotCommand("commentary",    "📡 Toggle macro commentary"),
         BotCommand("backtest",      "📊 Simulate aping every call"),
@@ -10104,6 +10386,7 @@ async def post_init(app: Application):
         BotCommand("trending",  "🔥 Trending metas"),
         BotCommand("news",      "📰 News + AI summary"),
         BotCommand("ask",       "🤖 Ask Ciel AI anything"),
+    BotCommand("dash",      "📊 Dashboard (Mini App)"),
         BotCommand("voice",     "🎤 Toggle Ciel voice notes"),
         BotCommand("commentary", "📡 Toggle macro commentary"),
         BotCommand("sentiment", "😤 Market mood"),
@@ -10133,7 +10416,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"💠 Ciel Brain v79 ready — "
+        f"💠 Ciel Brain v80 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -10708,6 +10991,7 @@ def main():
         # v78 batch
         ("voice", voice_cmd), ("commentary", commentary_cmd),
         ("backtest", backtest_cmd),
+        ("dash", dash_cmd),
         ("callers", callers_cmd), ("crowd", crowd_cmd),
         ("setfilters", setfilters_cmd), ("mirror", mirror_cmd),
     ]
