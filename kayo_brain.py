@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v75 — PRO REBUILD                     ║
+║                    CIEL BRAIN v76 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v75", 200
+def _root(): return "💠 Ciel Brain v76", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -4169,7 +4169,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v75*\n"
+        f"\U0001f4a0 *CIEL BRAIN v76*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4206,7 +4206,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v75 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v76 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5217,7 +5217,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v75 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v76 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -5613,7 +5613,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v75 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v76 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -6019,6 +6019,93 @@ _WEB3_TERMS = {
     "jup","wen","bome","slerf","popcat","pnut","goat","ai16z","arc","virtual"
 }
 
+
+# ═══ v76: SCANNER DATA PACK — chat AI gets real scanner answers ═══
+async def _chat_runners_block() -> str:
+    """Today's runners — the real /runners scanner data, formatted for AI context."""
+    try:
+        pools_new, pools_trend = await asyncio.gather(
+            gt_new_pools(page=1), gt_trending_pools(page=1))
+        all_toks: Dict[str, Dict] = {}
+        for pool in (pools_new + pools_trend):
+            tok = gt_parse_pool(pool)
+            if tok and tok["address"] not in all_toks:
+                all_toks[tok["address"]] = tok
+        runners = [t for t in all_toks.values() if t["address"] not in blacklist
+                   and 0 < t["fdv"] <= 300_000 and t["liq"] >= 500 and t["ch1h"] > 5
+                   and t["buy_pct"] >= 48]
+        runners.sort(key=lambda t: t["ch1h"], reverse=True)
+        if not runners: return ""
+        lines = [f"- ${t['sym']} — 1h {t['ch1h']:+.1f}%, MCap {_usd(t['fdv'])}, liq {_usd(t['liq'])}, CA `{t['address']}`"
+                 for t in runners[:8]]
+        return "[TODAY'S RUNNERS — live scanner data. Answer with THESE tokens when asked about runners/gainers.]\n" + "\n".join(lines)
+    except Exception as e:
+        logger.debug(f"chat runners: {e}")
+        return ""
+
+def _chat_calls_block() -> str:
+    """Ciel's open called tokens — from the same data the followup tracker uses."""
+    try:
+        now = time.time()
+        open_calls = [(a, v) for a, v in dropped_calls.items()
+                      if v.get("status", "open") == "open" and (now - v.get("time", 0)) < 604800]
+        if not open_calls: return ""
+        open_calls.sort(key=lambda x: x[1].get("time", 0), reverse=True)
+        lines = [f"- ${v.get('sym','?')} — called {_age(int(v.get('time',0))*1000)} ago @ {_price(v.get('entry_price',0) or 0)} ({v.get('alert_type','call')} alert), CA `{a}`"
+                 for a, v in open_calls[:10]]
+        return "[CIEL'S OPEN CALLS — tokens I alerted recently]\n" + "\n".join(lines)
+    except Exception as e:
+        logger.debug(f"chat calls: {e}")
+        return ""
+
+def _chat_metas_block() -> str:
+    """Narrative meta performance — from pattern memory."""
+    try:
+        if not pattern_memory: return ""
+        top = sorted(pattern_memory.items(),
+                      key=lambda kv: kv[1].get("wins", 0) + kv[1].get("total", 0), reverse=True)[:8]
+        lines = [f"- #{k}: {v.get('wins',0)}W/{v.get('losses',0)}L across {v.get('total',0)} calls"
+                 for k, v in top if v.get("total", 0) >= 2]
+        if not lines: return ""
+        return "[NARRATIVE META STATS — my tracked narrative performance]\n" + "\n".join(lines)
+    except Exception as e:
+        logger.debug(f"chat metas: {e}")
+        return ""
+
+def _chat_smart_block() -> str:
+    """Proven smart wallets (auto-KOLs) — from the outcome registry."""
+    try:
+        prov = [(w, v) for w, v in wallet_registry.items()
+                if v.get("wins", 0) >= 2 and v.get("losses", 0) < v.get("wins", 0)]
+        if not prov: return ""
+        prov.sort(key=lambda x: x[1].get("wins", 0), reverse=True)
+        lines = [f"- `{w[:6]}...{w[-4:]}` — {v.get('wins',0)}W/{v.get('losses',0)}L, {len(v.get('tokens',[]))} tokens seen"
+                 for w, v in prov[:8]]
+        return "[PROVEN SMART WALLETS — auto-detected winners]\n" + "\n".join(lines)
+    except Exception as e:
+        logger.debug(f"chat smart: {e}")
+        return ""
+
+async def _scanner_pack_for(text: str) -> str:
+    """v76: intent-routed live scanner data for chat replies."""
+    t = (text or "").lower()
+    blocks: List[str] = []
+    if any(k in t for k in ("runner", "gainer", "mover", "what's up", "whats up", "what's hot",
+                            "whats hot", "market doing", "pumping now", "wagmi", "degen")):
+        b = await _chat_runners_block()
+        if b: blocks.append(b)
+    if any(k in t for k in ("my call", "my calls", "position", "called ", "open call", "my bags")):
+        b = _chat_calls_block()
+        if b: blocks.append(b)
+    if any(k in t for k in ("meta", "narrative", "trending")):
+        b = _chat_metas_block()
+        if b: blocks.append(b)
+    if any(k in t for k in ("smart", "wallet", "kol")):
+        b = _chat_smart_block()
+        if b: blocks.append(b)
+    return "\n\n".join(blocks)
+
+
 async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if not u.message or not u.effective_message.text: return
     text = u.effective_message.text.strip()
@@ -6162,10 +6249,20 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if len(hist_lines) >= 2:
         hist_block = ("[RECENT GROUP CHAT — your conversation memory. Use it to resolve what the user "
                       "refers to: 'it', 'that coin', 'the one you scanned'.]\n" + "\n".join(hist_lines) + "\n\n")
+    # ── v76: real scanner data for data questions ──
+    scanner_pack = ""
+    try:
+        scanner_pack = await _scanner_pack_for(text)
+    except Exception:
+        scanner_pack = ""
+    if scanner_pack:
+        scanner_pack = scanner_pack + "\n\n"
     prompt = (
+        f"{scanner_pack}"
         f"{hist_block}"
         f"{name_str}: \"{text}\"\n\n"
         "Reply as Ciel, addressing the user as \"Master\". Be real, sharp, direct. "
+        "If a SCANNER DATA block is present (TODAY'S RUNNERS / OPEN CALLS / NARRATIVE STATS / SMART WALLETS), answer with those exact tokens and numbers — that IS the live scanner data, never say you lack it. "
         "Resolve references using the RECENT GROUP CHAT above. "
         "NEVER invent token names, CAs, or prices — if a token isn't in the chat history, live feed, or news, say honestly that you don't have its data. "
         "If it's casual → 1-2 sentences, match their energy. "
@@ -6181,7 +6278,18 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     )
 
     if not reply or not reply.strip():
-        reply = "⚠️ AI brain offline — GROQ_API_KEY may not be set on Render. Get a free key at console.groq.com/keys"
+        # v76: one retry — intermittent provider rate limits clear in seconds
+        try:
+            await asyncio.sleep(2)
+            reply = await ai_ask(prompt, fallback="", max_tokens=450, inject_market=True)
+        except Exception:
+            pass
+    if not reply or not reply.strip():
+        _keys_ok = bool(GROQ_API_KEY or GEMINI_API_KEY or OPENROUTER_API_KEY)
+        reply = ("⚠️ AI at capacity right now, Master — all providers hit rate limits. "
+                 "Give it a few seconds and ask again."
+                 if _keys_ok else
+                 "⚠️ AI brain offline — no AI keys set on Render. Free keys: console.groq.com or aistudio.google.com")
     # Always try markdown (AI uses bold for crypto analysis), fall back to plain
     import re as _re
     try:
@@ -9637,7 +9745,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"💠 Ciel Brain v75 ready — "
+        f"💠 Ciel Brain v76 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
