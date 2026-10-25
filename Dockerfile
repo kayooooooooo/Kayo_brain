@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy app code + state file
 COPY kayo_brain.py .
+COPY ciel_banner.jpg .
 COPY kayo_state.json .
 
 # Ciel starts her own Flask health server on $PORT (Render injects this)
