@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    KAYO BRAIN v70 — PRO REBUILD                     ║
+║                    KAYO BRAIN v71 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -56,7 +56,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "🦅 Kayo Brain v70", 200
+def _root(): return "🦅 Kayo Brain v71", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -175,6 +175,7 @@ scanner_cooldowns: Dict[str, Dict[str, float]] = {}  # scanner_name -> {addr: la
 volume_snapshots:  Dict[str, Dict] = {}  # addr -> {vol_1h, vol_24h, ts, mcap, sym, age_days}
 liq_snapshots:     Dict[str, Dict] = {}  # v63: addr -> {liq, ts} — liquidity-drain early warning
 holder_snapshots:  Dict[str, Dict] = {}  # v63: addr -> {h, ts, h_prev, ts_prev} — holder trend
+dev_snapshots:     Dict[str, Dict] = {}  # v71: addr -> {pct, ts} dev supply % for DEV-SELLING watch
 _live_cards:       Dict[str, Dict] = {}  # v67: addr -> {msg_id, chat_id, until, photo} — LIVE self-updating cards
 last_scan_ts:      float = 0  # last successful scan timestamp (for resume)
 watchlist_seen:  "OrderedDict[str, int]" = OrderedDict()
@@ -273,6 +274,7 @@ async def _save():
             "volume_snapshots": dict(list(volume_snapshots.items())[-2000:]),
             "liq_snapshots":    dict(list(liq_snapshots.items())[-2000:]),
             "holder_snapshots": dict(list(holder_snapshots.items())[-2000:]),
+            "dev_snapshots":    dict(list(dev_snapshots.items())[-2000:]),
             "last_scan_ts": last_scan_ts,
         }
         raw = json.dumps(data)
@@ -353,10 +355,11 @@ async def _load():
             _sorted_ath = sorted(_saved_ath.items(), key=lambda kv: (kv[1] or {}).get("first_seen", 0))
             _saved_ath = dict(_sorted_ath[-2000:])
         ath_tracker = _saved_ath
-        global dropped_calls, pattern_memory, scanner_cooldowns, volume_snapshots, last_scan_ts, liq_snapshots, holder_snapshots
+        global dropped_calls, pattern_memory, scanner_cooldowns, volume_snapshots, last_scan_ts, liq_snapshots, holder_snapshots, dev_snapshots
         dropped_calls   = d.get("dropped_calls", {})
         liq_snapshots    = d.get("liq_snapshots", {}) or {}
         holder_snapshots = d.get("holder_snapshots", {}) or {}
+        dev_snapshots = d.get("dev_snapshots", {}) or {}
         pattern_memory  = d.get("pattern_memory", {})
         scanner_cooldowns = d.get("scanner_cooldowns", {})
         volume_snapshots  = d.get("volume_snapshots", {})
@@ -2854,6 +2857,7 @@ async def _enrich_with_rugcheck(result: Dict) -> Dict:
                 _sg, _rg = _wallet_signals(sw)
                 if _sg:
                     result["smart_money_in"] = True
+                    result["smart_count"] = len(_sg)
                 if _rg:
                     result["rug_wallet_in"] = True
                     _rf = result.setdefault("red_flags", [])
@@ -2987,6 +2991,7 @@ def _apply_rc_enrichment(tok):
         _sg, _rg = _wallet_signals(sw)
         if _sg:
             tok["smart_money_in"] = True
+            tok["smart_count"] = len(_sg)
         if _rg:
             tok["rug_wallet_in"] = True
             _rf = tok.setdefault("red_flags", [])
@@ -3256,7 +3261,8 @@ def _build_rick_card(t: Dict, ai: str = "", is_first_alert: bool = False, watche
     _wf = _wallet_flag_line(sw)
     sw_l = ("\n" + _wf) if _wf else ""
     if t.get("smart_money_in"):
-        sw_l += "\n\U0001f7e2 SMART MONEY IN \u2014 proven winner wallet holding"
+        _sm_n = int(t.get("smart_count") or 1)
+        sw_l += f"\n\U0001f7e2 SMART MONEY IN \u2014 {_sm_n} proven winner wallet{'s' if _sm_n > 1 else ''} holding"
     if t.get("rug_wallet_in"):
         sw_l += "\n\U0001f6a8 SERIAL RUG WALLET in top holders \u2014 caution"
     return "\n".join([hdr,f"{plat_e} {plat_t}",f"\U0001f4b0 USD: {ps}",fdv_l,liq_l,vol_l,txn_l,"",th_l,tot_l,bd_l,fr_l,ch_l,mo_l,"",f"`{addr}`",tags.strip(),fa,sw_l,ai_l]).strip()
@@ -3488,7 +3494,9 @@ def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     if t.get("boost_active", 0) > 0: badges.append(("Boosted", YELLOW))
     if t.get("has_profile"): badges.append(("Verified", BLUE))
     if t.get("is_honeypot"): badges.append(("Honeypot", RED))
-    if t.get("smart_money_in"): badges.append(("Smart Money", PURPLE))
+    if t.get("smart_money_in"):
+        _sm_n = int(t.get("smart_count") or 1)
+        badges.append((f"Smart Money ×{_sm_n}" if _sm_n > 1 else "Smart Money", PURPLE))
     if t.get("rug_wallet_in"): badges.append(("Rug Wallet", RED))
     bx = 30
     for badge_text, badge_color in badges[:5]:
@@ -3558,6 +3566,7 @@ def generate_update_card_image(kind: str, sym: str, data: Dict) -> "_io.BytesIO"
         "god":   ((255, 196, 0),  "GOD TIER"),
         "rug":   ((248, 81, 73),  "RUGGED"),
         "drain": ((255, 159, 70), "LIQ DRAINING"),
+        "devsell": ((255, 120, 0), "DEV SELLING"),
     }
     color, label = KINDS.get(kind, ((88, 166, 255), "UPDATE"))
     mult = data.get("mult")
@@ -3984,7 +3993,8 @@ def build_ca_card(t: Dict, ai: str = "") -> str:
     if _wf:
         L.append(_wf)
     if t.get("smart_money_in"):
-        L.append("\U0001f7e2 SMART MONEY IN \u2014 proven winner wallet holding")
+        _sm_n = int(t.get("smart_count") or 1)
+        L.append(f"\U0001f7e2 SMART MONEY IN \u2014 {_sm_n} proven winner wallet{'s' if _sm_n > 1 else ''} holding")
     if t.get("rug_wallet_in"):
         L.append("\U0001f6a8 SERIAL RUG WALLET in top holders \u2014 caution")
     if t.get("lp_locked"):
@@ -5149,7 +5159,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v70 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Kayo Brain v71 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6949,10 +6959,16 @@ async def bg_wallet_tracker(app):
 
     while True:
         try:
-            if not tracked_wallets or not GROUP_CHAT_ID:
+            _auto_kols_t = [w for w, v in wallet_registry.items()
+                           if v.get("wins", 0) >= 2 and v.get("losses", 0) < v.get("wins", 0)][:8]
+            if (not tracked_wallets and not _auto_kols_t) or not GROUP_CHAT_ID:
                 await asyncio.sleep(180); continue
 
-            for addr, info in list(tracked_wallets.items()):
+            _watch_list = dict(tracked_wallets)
+            for w in _auto_kols_t:
+                if w not in _watch_list:
+                    _watch_list[w] = {"label": "Auto-KOL (proven winner)"}
+            for addr, info in list(_watch_list.items()):
                 try:
                     txns = await asyncio.wait_for(
                         solanafm_wallet_txns(addr, limit=3), timeout=10
@@ -7261,7 +7277,12 @@ KOL_WALLETS: Dict[str, str] = {
 
 async def kol_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """/kol — show recent moves from known KOL wallets."""
-    if not KOL_WALLETS and not tracked_wallets:
+    _auto_kols = sorted(
+        (w for w, v in wallet_registry.items()
+         if v.get("wins", 0) >= 2 and v.get("losses", 0) < v.get("wins", 0)),
+        key=lambda w: wallet_registry[w].get("wins", 0), reverse=True
+    )[:10]
+    if not KOL_WALLETS and not tracked_wallets and not _auto_kols:
         await u.effective_message.reply_text(
             "No KOL wallets tracked yet.\n"
             "Add one: `/trackwallet <address> KOL: <name>`",
@@ -7278,7 +7299,7 @@ async def kol_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         if "kol" in label.lower() or "alpha" in label.lower():
             all_kols[label] = addr
 
-    if not all_kols:
+    if not all_kols and not _auto_kols:
         await msg.edit_text(
             "No KOL wallets found.\n"
             "Track a wallet as KOL: `/trackwallet <address> KOL:<name>`",
@@ -7309,6 +7330,13 @@ async def kol_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         except Exception:
             card += f"🎯 *{_md(label)}* — ⏳ fetching...\n"
 
+    if _auto_kols:
+        card += (
+            f"\n\n🏆 *AUTO-KOLS — proven winners (self-detected)*\n"
+        )
+        for w in _auto_kols[:8]:
+            v = wallet_registry.get(w, {})
+            card += f"\U00002B50 `{w[:6]}...{w[-4:]}` — {v.get('wins',0)}W/{v.get('losses',0)}L · {len(v.get('tokens',[]))} tokens\n"
     card += (
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"_Add KOL: `/trackwallet <address> KOL:<name>`_"
@@ -8026,6 +8054,7 @@ async def bg_followup_tracker(app: Application):
     while True:
         try:
             now = time.time()
+            _dev_checked = 0  # v71: cap RugCheck dev-watch calls per cycle
             expired = []
             for addr, info in list(dropped_calls.items()):
                 # Expire after 7 days
@@ -8075,6 +8104,37 @@ async def bg_followup_tracker(app: Application):
                     except Exception as e:
                         logger.debug(f"liq drain alert: {e}")
                 liq_snapshots[addr] = {"liq": liq_now, "ts": now}
+
+                # ── v71: DEV SELLING watch (RugCheck creatorBalance) ──
+                _dev_checked += 1
+                if _dev_checked <= 12 and (now - int(info.get("time", now))) < 86400 and not info.get("alerted_devsell"):
+                    try:
+                        rc = await rugcheck_report(addr)
+                        cb = float((rc or {}).get("creatorBalance") or 0)
+                        supply = float(((rc or {}).get("token") or {}).get("supply") or 0)
+                        if cb > 0 and supply > 0:
+                            dev_pct_now = min(100.0, cb / supply * 100)
+                            _ds = dev_snapshots.get(addr) or {}
+                            prev_pct = _ds.get("pct", 0)
+                            if prev_pct > 0:
+                                drop_abs = prev_pct - dev_pct_now
+                                if drop_abs >= 0.5 and drop_abs / prev_pct >= 0.25:
+                                    _dev_msg = (
+                                        f"\U0001F6A8 *DEV SELLING — ${sym}*\n"
+                                        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                                        f"Dev supply: {prev_pct:.1f}% → {dev_pct_now:.1f}% — dev is dumping\n"
+                                        f"Price: `{_price(cur_price)}` · {mult:.2f}x from call\n"
+                                        f"`{addr}`"
+                                    )
+                                    await send_update_card(app.bot, chat, _dev_msg, addr, sym, "devsell",
+                                        {"mult": mult, "rows": [("Dev supply", f"{prev_pct:.1f}% → {dev_pct_now:.1f}%"),
+                                                                 ("Price now", _price(cur_price)), ("From call", _price(entry))]},
+                                        reply_markup=scan_buttons(addr, sym), reply_to=_reply_to(addr))
+                                    dropped_calls[addr]["alerted_devsell"] = True
+                                    asyncio.create_task(_save())
+                            dev_snapshots[addr] = {"pct": dev_pct_now, "ts": now}
+                    except Exception as e:
+                        logger.debug(f"dev watch {addr}: {e}")
 
                 # ── v46: MEGA milestones — 25x / 50x / 100x ─────────────
                 _mega = 0
@@ -9502,7 +9562,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_my_commands: {e}")
     logger.info(
-        f"🦅 Kayo Brain v70 ready — "
+        f"🦅 Kayo Brain v71 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
