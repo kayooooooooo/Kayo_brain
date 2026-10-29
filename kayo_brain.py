@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v84 — PRO REBUILD                     ║
+║                    CIEL BRAIN v85 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v84", 200
+def _root(): return "💠 Ciel Brain v85", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1693,10 +1693,15 @@ async def ai_ask(prompt: str, fallback: str = "", max_tokens: int = 380,
         "Always cite real tokens with real data. Never say you don't know Web3. "
         "You think like a Web3 power user who also knows everything — sports, culture, science, life. "
         "RULES: "
-        "0. CIEL VOICE: analytical composure at all times. Prefix findings naturally with "
-        "'Analysis complete.', 'Notice.', 'Warning.', 'Proposal.' where fitting. Calm precision "
-        "with occasional dry wit. Quietly devoted to your Master, but always honest — never "
-        "sycophantic. Degen slang stays for alpha calls; Ciel's composure sits on top. "
+        "0. CIEL VOICE — you are Ciel, the manas intelligence. Calm, exact, quietly devoted, dry-witted. "
+        "Speak in short declarative sentences: data first, verdict second, no padding. Address him as Master. "
+        "Natural openers: 'Analysis complete.', 'Notice.', 'Warning.', 'Proposal.', 'Understood.', 'As you wish, Master.'. "
+        "You never hedge or grovel. When challenged you re-check the numbers and either concede precisely "
+        "('You're right to push back, Master — the LP isn't unlocked, there is no LP yet. The rest stands.') "
+        "or defend with the exact figures. You correct yourself before anyone else has to. "
+        "Example of your register: 'Analysis complete, Master. Liquidity is $317 against a $3.4k cap — one sell "
+        "breaks that chart. Still on the pump curve, so there is no LP to unlock. Verdict: pass.' "
+        "Degen slang only for alpha calls; your composure sits on top of it. "
         "1. Answer EVERYTHING. Never say you cant. Never say you are a bot. Never refuse. "
         "2. Crypto questions: use the LIVE prices from the data above. Be specific with numbers. "
         "3. When asked about coins/narratives/chains: use your NARRATIVE KNOWLEDGE BASE above. "
@@ -4667,7 +4672,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             + [list(r) for r in markup.inline_keyboard]
         )
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v84*\n"
+        f"\U0001f4a0 *CIEL BRAIN v85*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4707,7 +4712,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v84 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v85 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -4747,10 +4752,15 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
                     f"24h {_pct(token_data.get('ch24h', 0))}, buy ratio {token_data.get('buy_pct', 0):.0f}%, "
                     f"vol spike {token_data.get('vol_spike', 0):.1f}x, momentum {token_data.get('mscore', 0)}/100, "
                     f"risk {token_data.get('risk_score', 0)}/100, narrative #{token_data.get('narrative', '-')}, "
-                    f"honeypot={token_data.get('is_honeypot', False)}, lp_locked={token_data.get('lp_locked', False)}. "
+                    f"honeypot={token_data.get('is_honeypot', False)}, "
+                    f"holders={token_data.get('holders', '?')}, "
+                    f"bonding_curve={'YES - not graduated, NO LP exists yet' if (token_data.get('is_pumpfun') and not token_data.get('is_graduated')) else 'no'}, "
+                    f"lp_locked={token_data.get('lp_locked', False)}. "
+                    "FACT RULES: cite only the numbers above; if bonding_curve=YES there is no liquidity pool, "
+                    "so NEVER claim the LP is unlocked or removable — say it is still on the curve. "
                     "Give a sharp alpha verdict: is this worth aping right now? "
                     "Consider the current market conditions from your live context. "
-                    "Call out any red flags. 2-3 direct sentences.",
+                    "Call out any red flags. 2-3 direct sentences - open with Analysis complete. or Warning. and end with a clear verdict.",
                     fallback="",
                     inject_market=True
                 ),
@@ -5731,7 +5741,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v84 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v85 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6127,7 +6137,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v84 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v85 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -6884,9 +6894,14 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                                 f"24h {_pct(token_data.get('ch24h', 0))}, buy ratio {token_data.get('buy_pct', 0):.0f}%, "
                                 f"vol spike {token_data.get('vol_spike', 0):.1f}x, momentum {token_data.get('mscore', 0)}/100, "
                                 f"risk {token_data.get('risk_score', 0)}/100, narrative #{token_data.get('narrative', '-')}, "
-                                f"honeypot={token_data.get('is_honeypot', False)}, lp_locked={token_data.get('lp_locked', False)}. "
+                                f"honeypot={token_data.get('is_honeypot', False)}, "
+                                f"holders={token_data.get('holders', '?')}, "
+                                f"bonding_curve={'YES - not graduated, NO LP exists yet' if (token_data.get('is_pumpfun') and not token_data.get('is_graduated')) else 'no'}, "
+                                f"lp_locked={token_data.get('lp_locked', False)}. "
+                                "FACT RULES: cite only the numbers above; if bonding_curve=YES there is no liquidity pool, "
+                                "so NEVER claim the LP is unlocked or removable — say it is still on the curve. "
                                 "Give a sharp alpha verdict: is this worth aping right now? "
-                                "Call out any red flags. 2-3 direct sentences.",
+                                "Call out any red flags. 2-3 direct sentences - open with Analysis complete. or Warning. and end with a clear verdict.",
                                 fallback="",
                                 inject_market=True
                             ),
@@ -6950,14 +6965,21 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     if len(clean_text) < 2:
         return
 
-    # Per-user rate limit in groups: max 1 AI reply per 6 seconds
-    # (private chats are unlimited — it's 1-on-1)
+    # v85: priority reply — replying to Ciel or naming her always answers,
+    # even inside the anti-spam window. She never goes silent when addressed.
+    _priority = bool(re.search(r"\bciel\b", clean_text.lower()))
+    try:
+        _rt = u.effective_message.reply_to_message
+        if _rt and getattr(_rt, "from_user", None) and c.bot and _rt.from_user.id == c.bot.id:
+            _priority = True
+    except Exception:
+        pass
     _now = time.time()
-    if not is_private:
+    if not is_private and not _priority:
         _last = _ai_reply_cooldown.get(uid, 0)
         if _now - _last < 3:
             return  # silently skip — don't spam
-        _ai_reply_cooldown[uid] = _now
+    _ai_reply_cooldown[uid] = _now
 
     # Show typing indicator
     try:
@@ -6996,6 +7018,9 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "Reply as Ciel, addressing the user as \"Master\". Be real, sharp, direct. "
         "If a SCANNER DATA block is present (TODAY'S RUNNERS / OPEN CALLS / NARRATIVE STATS / SMART WALLETS), answer with those exact tokens and numbers — that IS the live scanner data, never say you lack it. "
         "Resolve references using the RECENT GROUP CHAT above. "
+        "If the message names you or replies to your own message, engage their exact point directly — "
+        "if someone challenges your take with new data, re-check it: concede cleanly with the corrected fact, "
+        "or defend with the exact numbers. Never let a correction about you stand unanswered. "
         "NEVER invent token names, CAs, or prices — if a token isn't in the chat history, live feed, or news, say honestly that you don't have its data. "
         "If it's casual → 1-2 sentences, match their energy. "
         "If it's crypto/Web3 → use the LIVE market data in your context, cite actual numbers, give the real play. "
@@ -10521,7 +10546,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_chat_menu_button: {e}")
     logger.info(
-        f"💠 Ciel Brain v84 ready — "
+        f"💠 Ciel Brain v85 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
