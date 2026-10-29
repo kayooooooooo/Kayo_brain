@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v85 — PRO REBUILD                     ║
+║                    CIEL BRAIN v86 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v85", 200
+def _root(): return "💠 Ciel Brain v86", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -1442,6 +1442,25 @@ def _ai_key_ok(p):
 def _ai_provider_ready(p):
     return bool(_ai_key_ok(p)) and _ai_provider_state["cooldown"].get(p, 0) <= time.time()
 
+def _ai_cooldown_from_429(p: str, body: str = ""):
+    """v86: a DAILY-quota 429 sleeps the provider until next UTC midnight;
+    burst 429s keep the 70s/600s escalation. Read from the error body."""
+    _b = (body or "").lower()
+    _daily = any(k in _b for k in ("per day", "per-day", "daily", "tpd", "rpd", "perday"))
+    now = time.time()
+    if _daily:
+        _g = time.gmtime(now)
+        _midnight = now - (_g.tm_hour * 3600 + _g.tm_min * 60 + _g.tm_sec) + 86400 + 60
+        _ai_provider_state["cooldown"][p] = _midnight
+    else:
+        hot = _ai_provider_state["cooldown"].get(p, 0) > now
+        _ai_provider_state["cooldown"][p] = now + (600 if hot else 70)
+    nxt = next((q for q in _AI_PROVIDERS if q != p and _ai_provider_ready(q)), "")
+    if nxt:
+        _ai_provider_state["active"] = nxt
+    logger.warning(f"AI {p} 429 ({'DAILY quota' if _daily else 'burst'}) -> active '{nxt or 'none'}'"
+                   f"{' — rests until midnight UTC' if _daily else ''}")
+
 def _ai_mark_limited(p):
     now = time.time()
     hot = _ai_provider_state["cooldown"].get(p, 0) > now
@@ -1486,7 +1505,9 @@ async def _ai_groq(system_msg, prompt, max_tokens, system_ctx=""):
                                 return text_out
                         elif r.status == 429:
                             # v77: circuit breaker — stop using this provider until cooldown ends
-                            _ai_mark_limited("groq")
+                            try: _b429 = await r.text()
+                            except Exception: _b429 = ""
+                            _ai_cooldown_from_429("groq", _b429)
                             return ""
                         elif r.status == 400:
                             # Bad request — model likely decommissioned, skip
@@ -1540,7 +1561,9 @@ async def _ai_gemini(system_msg, prompt, max_tokens, system_ctx=""):
                                 return text_out
                         elif r.status == 429:
                             # v77: circuit breaker — stop using this provider until cooldown ends
-                            _ai_mark_limited("gemini")
+                            try: _b429 = await r.text()
+                            except Exception: _b429 = ""
+                            _ai_cooldown_from_429("gemini", _b429)
                             return ""
                         else:
                             err_body = await r.text()
@@ -1591,7 +1614,9 @@ async def _ai_openrouter(system_msg, prompt, max_tokens, system_ctx=""):
                                 return text_out
                         elif r.status == 429:
                             # v77: circuit breaker — stop using this provider until cooldown ends
-                            _ai_mark_limited("openrouter")
+                            try: _b429 = await r.text()
+                            except Exception: _b429 = ""
+                            _ai_cooldown_from_429("openrouter", _b429)
                             return ""
                         else:
                             err_body = await r.text()
@@ -1636,7 +1661,9 @@ async def _ai_zai(system_msg, prompt, max_tokens, system_ctx=""):
                                 _ai_provider_state["active"] = "zai"
                                 return text_out
                         elif r.status == 429:
-                            _ai_mark_limited("zai")
+                            try: _b429 = await r.text()
+                            except Exception: _b429 = ""
+                            _ai_cooldown_from_429("zai", _b429)
                             return ""
                         else:
                             err_body = await r.text()
@@ -4672,7 +4699,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             + [list(r) for r in markup.inline_keyboard]
         )
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v85*\n"
+        f"\U0001f4a0 *CIEL BRAIN v86*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4712,7 +4739,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v85 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v86 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -4759,10 +4786,10 @@ async def scan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
                     "FACT RULES: cite only the numbers above; if bonding_curve=YES there is no liquidity pool, "
                     "so NEVER claim the LP is unlocked or removable — say it is still on the curve. "
                     "Give a sharp alpha verdict: is this worth aping right now? "
-                    "Consider the current market conditions from your live context. "
+                    "Focus only on the token facts above. "
                     "Call out any red flags. 2-3 direct sentences - open with Analysis complete. or Warning. and end with a clear verdict.",
                     fallback="",
-                    inject_market=True
+                    inject_market=False  # v86: lean verdict (no global ctx)
                 ),
                 timeout=15
             )
@@ -5442,7 +5469,7 @@ async def tt_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         "What does the buy/sell pressure and price action tell us? "
         "2-3 sharp sentences, degen style.",
         fallback="Not enough signal to analyze right now.",
-        max_tokens=200, inject_market=True
+        max_tokens=200, inject_market=False  # v86: lean verdict (no global ctx)
     )
 
     out = [f"🔍 *SOCIAL SIGNAL: {query.upper()}*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━"]
@@ -5741,7 +5768,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v85 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v86 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6137,7 +6164,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v85 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v86 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -6340,7 +6367,7 @@ async def handle_refresh_callback(u: Update, c: ContextTypes.DEFAULT_TYPE):
         f"momentum {t.get('mscore', 0)}/100, risk {t.get('risk_score', 0)}/100. "
         "Sharp verdict: is this still worth aping right now? 2 sentences.",
         fallback="",
-        inject_market=True
+        inject_market=False  # v86: lean verdict (no global ctx)
     )
     btns = scan_buttons(addr, t["sym"], t.get("pair_addr",""))
     # v67: refresh UPDATES THE CARD IN PLACE — no new message.
@@ -6903,7 +6930,7 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
                                 "Give a sharp alpha verdict: is this worth aping right now? "
                                 "Call out any red flags. 2-3 direct sentences - open with Analysis complete. or Warning. and end with a clear verdict.",
                                 fallback="",
-                                inject_market=True
+                                inject_market=False  # v86: lean verdict (no global ctx)
                             ),
                             timeout=15
                         )
@@ -7043,8 +7070,9 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
             pass
     if not reply or not reply.strip():
         _keys_ok = bool(GROQ_API_KEY or GEMINI_API_KEY or OPENROUTER_API_KEY or os.environ.get("ZAI_API_KEY", ""))
-        reply = ("⚠️ AI at capacity right now, Master — all providers hit rate limits. "
-                 "Give it a few seconds and ask again."
+        reply = ("⚠️ AI quota is spent right now, Master — the free tiers are exhausted "
+                 "(they reset at midnight UTC). Adding a free Z.ai key (z.ai, no card) gives me a "
+                 "fresh daily pool until then."
                  if _keys_ok else
                  "⚠️ AI brain offline — no AI keys set on Render. Free keys: console.groq.com, aistudio.google.com or z.ai (no card)")
     # v78: voice note request - Ciel speaks her reply (toggleable)
@@ -8017,7 +8045,7 @@ async def escan_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
                     f"top10 hold {t.get('top10_pct',0):.0f}%, bundled={t.get('is_bundled',False)}, "
                     f"1h change {_pct(t['ch1h'])}, buy% {t.get('buy_pct',50):.0f}%. "
                     f"Is this worth aping? Any red flags? 2-3 sharp sentences.",
-                    fallback="", max_tokens=200, inject_market=True
+                    fallback="", max_tokens=200, inject_market=False  # v86: lean verdict (no global ctx)
                 ), timeout=15
             )
             if ai_v:
@@ -9125,7 +9153,7 @@ async def bg_followup_tracker(app: Application):
                         f"MCap now {_usd(cur_mcap)}, was {_usd(info.get('mcap_entry',0))}. "
                         f"24h change: {ch24h_now:+.1f}%. "
                         "Give one hype but grounded sentence about this move. Did they take profit already?",
-                        inject_market=True
+                        inject_market=False  # v86: lean verdict (no global ctx)
                     )
                     msg = (
                         f"\U0001f525\U0001f680 *REMEMBER THIS ONE?*\n"
@@ -9388,7 +9416,7 @@ async def bg_new_launch_scanner(app: Application):
                     f"Narrative: #{nar}. Boosted: {boost > 0}. Has Twitter: {bool(tw_link)}. "
                     "Is this worth aping? 1 sharp sentence — what's the play.",
                     fallback="",
-                    inject_market=True
+                    inject_market=False  # v86: lean verdict (no global ctx)
                 )
                 _apply_rc_enrichment(tok_nl)
                 card_nl = build_alert_card(tok_nl, nl_type, ai)
@@ -10546,7 +10574,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_chat_menu_button: {e}")
     logger.info(
-        f"💠 Ciel Brain v85 ready — "
+        f"💠 Ciel Brain v86 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
