@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v88 — PRO REBUILD                     ║
+║                    CIEL BRAIN v90 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v88", 200
+def _root(): return "💠 Ciel Brain v90", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -3924,6 +3924,17 @@ async def _resolve_token_image(t: Dict) -> str:
     _token_img_cache[addr] = url
     return url
 
+async def _gt_token_image(addr: str) -> str:
+    """v90: stable token image from GT/CoinGecko (DexScreener CDN links 404 over time)."""
+    if not addr: return ""
+    try:
+        d = await _get(f"{_GT}/networks/solana/tokens/{addr}")
+        a = ((d or {}).get("data", {}) or {}).get("attributes", {}) or {}
+        return (a.get("image_url") or "").strip()
+    except Exception as e:
+        logger.debug(f"gt token img: {e}")
+        return ""
+
 async def _fetch_token_pfp(url: str):
     """v87: download the token pfp once, cache as PIL image."""
     if not url: return None
@@ -3976,6 +3987,7 @@ def generate_chart_card_image(t: Dict, alert_type: str = ""):
     W, H = 900, 1120
     BG, PANEL, GRID = (11, 16, 22), (15, 21, 28), (26, 37, 48)
     TEAL, RED, TEXT, MUTED = (61, 213, 171), (255, 105, 97), (255, 255, 255), (128, 140, 150)
+    CANDLE_UP, CANDLE_DN = (46, 204, 113), (255, 82, 82)  # v89: green bull / red bear
     img = Image.new("RGB", (W, H), BG)
     draw = ImageDraw.Draw(img)
 
@@ -4055,7 +4067,7 @@ def generate_chart_card_image(t: Dict, alert_type: str = ""):
     for i, v in enumerate(vols):
         bh = (vy1 - vy0) * (v / vmax)
         up = (i == 0) or closes[i] >= closes[i - 1]
-        col = (34, 120, 100) if up else (120, 62, 68)
+        col = (32, 118, 78) if up else (122, 52, 56)  # v89: green/red volume
         if bh >= 1:
             draw.rectangle([X(i) - bw / 2, vy1 - bh, X(i) - bw / 2 + bw, vy1], fill=col)
     for frac in (1.0, 0.66, 0.33):
@@ -4070,7 +4082,7 @@ def generate_chart_card_image(t: Dict, alert_type: str = ""):
         except Exception:
             continue
         cx = X(i)
-        col = TEAL if cl >= o else RED
+        col = CANDLE_UP if cl >= o else CANDLE_DN
         draw.line([cx, Y(h), cx, Y(l)], fill=col, width=2)      # wick
         y1, y2 = Y(max(o, cl)), Y(min(o, cl))                    # body
         if y2 - y1 < 2: y2 = y1 + 2
@@ -4438,6 +4450,15 @@ async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", re
         if len(t.get("min_candles") or []) < 6:
             t["min_candles"] = await _gt_minute_ohlcv(t.get("pair_addr", ""), 60)
         t["pfp_img"] = await _fetch_token_pfp(t.get("image_url", ""))
+        if not t["pfp_img"]:
+            # v90: DexScreener CDN URLs expire — fall back to GT/CoinGecko image
+            _alt = await _gt_token_image(t.get("address") or t.get("addr") or "")
+            if _alt:
+                t["image_url"] = _alt
+                t["pfp_img"] = await _fetch_token_pfp(_alt)
+                _a2 = t.get("address") or t.get("addr") or ""
+                if _a2 and t["pfp_img"]:
+                    _token_img_cache[_a2] = _alt
         img_buf = generate_chart_card_image(t, alert_type)
     except Exception as e:
         logger.debug(f"chart card: {e}")
@@ -4928,7 +4949,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             + [list(r) for r in markup.inline_keyboard]
         )
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v88*\n"
+        f"\U0001f4a0 *CIEL BRAIN v90*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4968,7 +4989,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v88 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v90 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5997,7 +6018,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v88 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v90 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6393,7 +6414,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v88 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v90 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -10803,7 +10824,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_chat_menu_button: {e}")
     logger.info(
-        f"💠 Ciel Brain v88 ready — "
+        f"💠 Ciel Brain v90 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
