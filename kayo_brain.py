@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v86 — PRO REBUILD                     ║
+║                    CIEL BRAIN v87 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v86", 200
+def _root(): return "💠 Ciel Brain v87", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -3894,6 +3894,214 @@ def _card_fonts():
     }
 
 
+
+# ═══ v87: PIRB-STYLE LIVE CHART CARD ═══
+def _short_mc(n) -> str:
+    try: n = float(n)
+    except Exception: return "?"
+    if n >= 1e9: return f"{n/1e9:.1f}B"
+    if n >= 1e6: return f"{n/1e6:.1f}M"
+    if n >= 1e3: return f"{n/1e3:.1f}K"
+    return f"{n:.0f}" if n >= 10 else f"{n:.2f}"
+
+_token_img_cache: Dict[str, str] = {}
+_pfp_cache: Dict[str, object] = {}
+
+async def _resolve_token_image(t: Dict) -> str:
+    """v87: real pump.fun/pair pfp URL via DexScreener token info."""
+    addr = t.get("address") or t.get("addr") or ""
+    if not addr: return ""
+    if addr in _token_img_cache: return _token_img_cache[addr]
+    url = ""
+    try:
+        pairs = await dex_pairs_by_token(addr)
+        for p in (pairs or [])[:3]:
+            u = ((p.get("info") or {}).get("imageUrl") or "").strip()
+            if u: url = u; break
+    except Exception:
+        pass
+    if len(_token_img_cache) > 600: _token_img_cache.clear()
+    _token_img_cache[addr] = url
+    return url
+
+async def _fetch_token_pfp(url: str):
+    """v87: download the token pfp once, cache as PIL image."""
+    if not url: return None
+    if url in _pfp_cache: return _pfp_cache[url]
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                if r.status != 200: return None
+                data = await r.content.read(3_000_000)
+        from PIL import Image
+        im = Image.open(_io.BytesIO(data)).convert("RGB")
+        im.thumbnail((512, 512))
+        if len(_pfp_cache) > 200: _pfp_cache.clear()
+        _pfp_cache[url] = im
+        return im
+    except Exception:
+        return None
+
+async def _gt_minute_ohlcv(pool_addr: str, limit: int = 60) -> List[Dict]:
+    """v87: real minute candles (ts,o,h,l,c,v) for the chart card."""
+    if not pool_addr: return []
+    for tf in ("minute", "hour"):
+        try:
+            d = await _get(f"{_GT}/networks/solana/pools/{pool_addr}/ohlcv/{tf}?aggregate=1&limit={limit}&currency=usd")
+            rows = ((d or {}).get("data", {}) or {}).get("attributes", {}).get("ohlcv_list") or []
+            out = []
+            for r in rows:
+                if len(r) < 5: continue
+                try:
+                    out.append({"ts": int(r[0]), "o": float(r[1]), "h": float(r[2]),
+                                "l": float(r[3]), "c": float(r[4]),
+                                "v": float(r[5]) if len(r) > 5 else 0.0})
+                except Exception:
+                    continue
+            if len(out) >= 6:
+                return out[-limit:]
+        except Exception as e:
+            logger.debug(f"min candles {tf}: {e}")
+    return []
+
+def generate_chart_card_image(t: Dict, alert_type: str = ""):
+    """v87: PIRB-style live chart card — real candles, real pfp watermark, volume bars."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return None
+    candles = t.get("min_candles") or []
+    if len(candles) < 6:
+        return None
+    W, H = 900, 1120
+    BG, PANEL, GRID = (11, 16, 22), (15, 21, 28), (26, 37, 48)
+    TEAL, RED, TEXT, MUTED = (61, 213, 171), (255, 105, 97), (255, 255, 255), (128, 140, 150)
+    img = Image.new("RGB", (W, H), BG)
+    draw = ImageDraw.Draw(img)
+
+    import os as _os
+    inter = next((p for p in ("fonts/Inter.ttf", "/app/fonts/Inter.ttf") if _os.path.exists(p)),
+                 "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+    mono = next((p for p in ("fonts/JetBrainsMono.ttf", "/app/fonts/JetBrainsMono.ttf") if _os.path.exists(p)),
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
+    def FN(path, size, wght=None):
+        try:
+            f = ImageFont.truetype(path, size)
+            if wght:
+                try: f.set_variation_by_axes([wght])
+                except Exception: pass
+            return f
+        except Exception:
+            try: return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size)
+            except Exception: return ImageFont.load_default()
+    f_sym, f_tag = FN(inter, 44, 800), FN(inter, 22, 700)
+    f_lab, f_ax = FN(inter, 17, 500), FN(mono, 15, 500)
+    f_ann, f_brand = FN(mono, 17, 700), FN(mono, 14, 600)
+
+    # ── header ──
+    pfp = t.get("pfp_img")
+    hx = 28
+    if pfp is not None:
+        icon = pfp.copy(); icon.thumbnail((72, 72))
+        mask = Image.new("L", icon.size, 0)
+        ImageDraw.Draw(mask).rounded_rectangle([0, 0, icon.size[0], icon.size[1]], radius=14, fill=255)
+        img.paste(icon, (hx, 20), mask)
+    else:
+        draw.rounded_rectangle([hx, 20, hx + 72, 92], radius=14, fill=PANEL)
+        draw.text((hx + 26, 38), "$", font=FN(inter, 40, 700), fill=MUTED)
+    hx += 88
+    sym = (t.get("sym") or "?").lstrip("$")
+    draw.text((hx, 28), "$" + sym, font=f_sym, fill=TEXT)
+    _ty = "CIEL " + (alert_type.upper()[:12] if alert_type else "SCAN")
+    draw.text((W - 28 - draw.textlength(_ty, font=f_tag), 46), _ty, font=f_tag, fill=TEAL)
+
+    # ── geometry ──
+    px0, px1 = 96, W - 76
+    py0, py1 = 120, 760
+    vy0, vy1 = 792, 952
+    closes = [c["c"] for c in candles]
+    vols = [max(0.0, c.get("v") or 0.0) for c in candles]
+    n = len(closes)
+    lo, hi = min(closes), max(closes)
+    if hi <= lo: hi = lo * 1.01 + 1e-12
+    pad = (hi - lo) * 0.08
+    lo, hi = lo - pad, hi + pad
+
+    def X(i): return px0 + (px1 - px0) * (i / max(1, n - 1))
+    def Y(p): return py1 - (py1 - py0) * ((p - lo) / (hi - lo))
+
+    # ── pfp watermark behind the chart ──
+    if pfp is not None:
+        wm = pfp.copy(); wm.thumbnail((540, 540))
+        base = img.crop((px0, py0, px1, py1)).convert("RGB")
+        ov = Image.new("RGB", base.size, BG)
+        ov.paste(wm, (max(0, (base.size[0] - wm.size[0]) // 2), max(0, (base.size[1] - wm.size[1]) // 2)))
+        img.paste(Image.blend(base, ov, 0.14), (px0, py0))
+
+    # ── grid + left axis (mcap scale) ──
+    price_now = float(t.get("price") or closes[-1] or 0)
+    mcap_now = float(t.get("mcap") or 0)
+    mc_ratio = (mcap_now / price_now) if price_now and mcap_now else 0
+    for k in range(5):
+        gy = py0 + (py1 - py0) * k / 4
+        draw.line([px0, gy, px1, gy], fill=GRID, width=1)
+        _p = hi - (hi - lo) * k / 4
+        _label = _short_mc(_p * mc_ratio) if mc_ratio else _short_mc(_p)
+        draw.text((px0 - 8 - draw.textlength(_label, font=f_ax), gy - 9), _label, font=f_ax, fill=MUTED)
+
+    # ── volume bars ──
+    vmax = max(vols) or 1.0
+    bw = max(2, int((px1 - px0) / n) - 2)
+    for i, v in enumerate(vols):
+        bh = (vy1 - vy0) * (v / vmax)
+        up = (i == 0) or closes[i] >= closes[i - 1]
+        col = (34, 120, 100) if up else (120, 62, 68)
+        if bh >= 1:
+            draw.rectangle([X(i) - bw / 2, vy1 - bh, X(i) - bw / 2 + bw, vy1], fill=col)
+    for frac in (1.0, 0.66, 0.33):
+        draw.text((px1 + 10, vy1 - (vy1 - vy0) * frac - 9), _short_mc(vmax * frac), font=f_ax, fill=MUTED)
+
+    # ── two-tone price line ──
+    for i in range(1, n):
+        col = TEAL if closes[i] >= closes[i - 1] else RED
+        draw.line([X(i - 1), Y(closes[i - 1]), X(i), Y(closes[i])], fill=col, width=3)
+
+    # ── annotations: start (red, up) + peak (teal, down) ──
+    def ann(i, price, col, up=True):
+        cx, cy = X(i), Y(price)
+        txt = _short_mc(price * mc_ratio) if mc_ratio else _short_mc(price)
+        tw = draw.textlength(txt, font=f_ann)
+        tx = min(max(cx - tw / 2, px0 + 4), px1 - tw - 4)
+        draw.text((tx, cy + (16 if up else -34)), txt, font=f_ann, fill=col)
+        ay = cy + (34 if up else -10)
+        draw.polygon([(cx, cy + (4 if up else -4)), (cx - 6, ay), (cx + 6, ay)], fill=col)
+    if n >= 2:
+        ann(0, closes[0], RED, up=True)
+        pi = max(range(n), key=lambda i: closes[i])
+        if pi > n // 3:
+            ann(pi, closes[pi], TEAL, up=False)
+
+    # ── x axis times (lagos = UTC+1) ──
+    step = max(1, n // 6)
+    for i in range(0, n, step):
+        ts = candles[i].get("ts")
+        if not ts: continue
+        _lab = time.strftime("%H:%M", time.gmtime(ts + 3600))
+        lx = min(max(X(i) - draw.textlength(_lab, font=f_ax) / 2, px0), px1 - 40)
+        draw.text((lx, vy1 + 18), _lab, font=f_ax, fill=MUTED)
+
+    draw.text((px0, vy1 + 52), f"MC {_short_mc(mcap_now)}   ·   LIQ {_short_mc(float(t.get('liq') or 0))}",
+              font=f_lab, fill=MUTED)
+    _br = "CIEL BRAIN"
+    draw.text((W - 28 - draw.textlength(_br, font=f_brand), vy1 + 52), _br, font=f_brand, fill=(52, 68, 84))
+    draw.rounded_rectangle([10, 10, W - 10, H - 10], radius=18, outline=(30, 42, 54), width=2)
+
+    buf = _io.BytesIO()
+    img.save(buf, "PNG", optimize=True)
+    buf.seek(0)
+    return buf
+
+
 def generate_scan_card_image(t: Dict, ai: str = "") -> _io.BytesIO:
     """Generate a Rick Bot-style visual scan card as a PNG image."""
     try:
@@ -4212,17 +4420,28 @@ async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", re
     except Exception as e:
         logger.error(f"Card text build failed: {e}", exc_info=True)
         text_card = f"\u26a0\ufe0f Card error for `{t.get('address', '?')}` — raw scan data available via /diag"
-    # v78: real candles for the sparkline (synthetic shape kept as fallback)
-    try:
-        if len(t.get("candles") or []) < 6:
-            t["candles"] = await _gt_pool_candles(t.get("pair_addr", ""), 24)
-    except Exception:
-        pass
+    # v87: PIRB-style chart card first — real minute candles + real pfp
     img_buf = None
     try:
-        img_buf = generate_scan_card_image(t, ai)
+        if not t.get("image_url"):
+            t["image_url"] = await _resolve_token_image(t)
+        if len(t.get("min_candles") or []) < 6:
+            t["min_candles"] = await _gt_minute_ohlcv(t.get("pair_addr", ""), 60)
+        t["pfp_img"] = await _fetch_token_pfp(t.get("image_url", ""))
+        img_buf = generate_chart_card_image(t, alert_type)
     except Exception as e:
-        logger.error(f"Card image generation failed: {e}", exc_info=True)
+        logger.debug(f"chart card: {e}")
+    if not img_buf:
+        # legacy card fallback (v78 sparkline path)
+        try:
+            if len(t.get("candles") or []) < 6:
+                t["candles"] = await _gt_pool_candles(t.get("pair_addr", ""), 24)
+        except Exception:
+            pass
+        try:
+            img_buf = generate_scan_card_image(t, ai)
+        except Exception as e:
+            logger.error(f"Card image generation failed: {e}", exc_info=True)
     if img_buf:
         try:
             sent = await bot.send_photo(
@@ -4699,7 +4918,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             + [list(r) for r in markup.inline_keyboard]
         )
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v86*\n"
+        f"\U0001f4a0 *CIEL BRAIN v87*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4739,7 +4958,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v86 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v87 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5768,7 +5987,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v86 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v87 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6164,7 +6383,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v86 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v87 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -10574,7 +10793,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_chat_menu_button: {e}")
     logger.info(
-        f"💠 Ciel Brain v86 ready — "
+        f"💠 Ciel Brain v87 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
