@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v92 — PRO REBUILD                     ║
+║                    CIEL BRAIN v93 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v92", 200
+def _root(): return "💠 Ciel Brain v93", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -4440,33 +4440,25 @@ def generate_update_card_image(kind: str, sym: str, data: Dict) -> "_io.BytesIO"
 
 async def send_update_card(bot, chat_id: int, caption: str, addr: str, sym: str,
                            kind: str, data: Dict, reply_markup=None, reply_to: int = 0):
-    """v67: styled banner for followup updates (milestones/rug/drain).
-    Falls back to the existing text message if the image fails."""
-    buf = None
-    try:
-        buf = generate_update_card_image(kind, sym, data)
-    except Exception as e:
-        logger.debug(f"update card gen: {e}")
-    if buf:
-        try:
-            sent = await bot.send_photo(chat_id=chat_id, photo=buf, caption=caption[:1024],
-                                        parse_mode="Markdown", reply_markup=reply_markup,
-                                        reply_to_message_id=reply_to or None)
-            buf.close()
-            return sent
-        except Exception as e:
-            logger.warning(f"update card send failed: {e} — text fallback")
-            try:
-                buf.close()
-            except Exception:
-                pass
+    """v93: followup UPDATES are TEXT ONLY (no image card, no pfp).
+    User rule: images are reserved for (a) bot alerts = pfp + candle chart card,
+    (b) user CA drops/links = raw pfp only. Milestone / rug / drain / dev-sell
+    updates on an already-dropped token must be plain text (threaded as before)."""
     try:
         return await bot.send_message(chat_id=chat_id, text=caption, parse_mode="Markdown",
                                       reply_markup=reply_markup, disable_web_page_preview=True,
                                       reply_to_message_id=reply_to or None)
     except Exception as e:
         logger.error(f"update text send failed: {e}")
-        return False
+        try:
+            plain = re.sub(r'[*_`\[\]()~>#+=|{}.!]', '', caption)
+            return await bot.send_message(chat_id=chat_id, text=plain or caption,
+                                          reply_markup=reply_markup,
+                                          disable_web_page_preview=True,
+                                          reply_to_message_id=reply_to or None)
+        except Exception as e2:
+            logger.error(f"update plain send failed: {e2}")
+            return False
 
 
 
@@ -5010,7 +5002,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             + [list(r) for r in markup.inline_keyboard]
         )
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v92*\n"
+        f"\U0001f4a0 *CIEL BRAIN v93*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -5050,7 +5042,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v92 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v93 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -6079,7 +6071,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v92 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v93 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6475,7 +6467,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v92 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v93 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -10894,7 +10886,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_chat_menu_button: {e}")
     logger.info(
-        f"💠 Ciel Brain v92 ready — "
+        f"💠 Ciel Brain v93 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
