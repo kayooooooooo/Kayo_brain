@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v91 — PRO REBUILD                     ║
+║                    CIEL BRAIN v92 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v91", 200
+def _root(): return "💠 Ciel Brain v92", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -3580,12 +3580,31 @@ def _apply_rc_enrichment(tok):
     _rugcheck_authority_flags(rc, tok)
 
 
+_scan_cache: Dict[str, tuple] = {}
+
 async def full_token_scan(address: str) -> Dict:
+    """v92: 45s result cache — a re-dropped CA answers instantly."""
+    _now = time.time()
+    _ent = _scan_cache.get(address)
+    if _ent and _now - _ent[0] < 45:
+        return dict(_ent[1])
+    _r = await _full_token_scan_impl(address)
+    if _r and not _r.get("error"):
+        _scan_cache[address] = (_now, dict(_r))
+        if len(_scan_cache) > 400:
+            _scan_cache.clear()
+    return _r
+
+async def _full_token_scan_impl(address: str) -> Dict:
     """v43: Try unified multi-source scan first, fallback to DexScreener-only."""
     try:
-        result = await asyncio.wait_for(unified_token_scan(address), timeout=20)
+        result = await asyncio.wait_for(unified_token_scan(address), timeout=10)
         if result and not result.get("error"):
-            return await _enrich_with_rugcheck(result)
+            try:
+                return await asyncio.wait_for(_enrich_with_rugcheck(result), timeout=3)
+            except asyncio.TimeoutError:
+                logger.warning("[FAST SCAN] rugcheck enrichment >3s — sending without it")
+                return result
     except asyncio.TimeoutError:
         logger.warning("unified_token_scan timed out — falling back to DexScreener")
     except Exception as e:
@@ -3974,9 +3993,14 @@ async def _fetch_token_pfp(url: str):
     except Exception:
         return None
 
+_candle_cache: Dict[str, tuple] = {}
+
 async def _gt_minute_ohlcv(pool_addr: str, limit: int = 60) -> List[Dict]:
     """v87: real minute candles (ts,o,h,l,c,v) for the chart card."""
     if not pool_addr: return []
+    _ent = _candle_cache.get(pool_addr)
+    if _ent and time.time() - _ent[0] < 30:
+        return list(_ent[1])
     for tf in ("minute", "hour"):
         try:
             d = await _get(f"{_GT}/networks/solana/pools/{pool_addr}/ohlcv/{tf}?aggregate=1&limit={limit}&currency=usd")
@@ -3991,7 +4015,10 @@ async def _gt_minute_ohlcv(pool_addr: str, limit: int = 60) -> List[Dict]:
                 except Exception:
                     continue
             if len(out) >= 6:
-                return out[-limit:]
+                _out = out[-limit:]
+                _candle_cache[pool_addr] = (time.time(), list(_out))
+                if len(_candle_cache) > 300: _candle_cache.clear()
+                return _out
         except Exception as e:
             logger.debug(f"min candles {tf}: {e}")
     return []
@@ -4479,11 +4506,20 @@ async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", re
                 _a2 = t.get("address") or t.get("addr") or ""
                 if _a2 and t["pfp_img"]:
                     _token_img_cache[_a2] = _alt
+        async def _need_candles():
+            if len(t.get("min_candles") or []) < 6:
+                try:
+                    t["min_candles"] = await asyncio.wait_for(
+                        _gt_minute_ohlcv(t.get("pair_addr", ""), 60), timeout=3)
+                except Exception:
+                    t["min_candles"] = []
+            return True
         if pro:
+            # v92: pfp + candles prefetched above (concurrent), card is pure pfp
+            await _need_candles() if not t.get("pfp_img") else None
             img_buf = _pfp_square_buffer(t.get("pfp_img"))   # pfp only, nothing on it
         if not img_buf:
-            if len(t.get("min_candles") or []) < 6:
-                t["min_candles"] = await _gt_minute_ohlcv(t.get("pair_addr", ""), 60)
+            await _need_candles()
             img_buf = generate_chart_card_image(t, alert_type)
     except Exception as e:
         logger.debug(f"card image: {e}")
@@ -4974,7 +5010,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             + [list(r) for r in markup.inline_keyboard]
         )
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v91*\n"
+        f"\U0001f4a0 *CIEL BRAIN v92*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -5014,7 +5050,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v91 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v92 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -6043,7 +6079,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v91 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v92 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6439,7 +6475,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v91 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v92 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -7160,6 +7196,15 @@ async def handle_message(u: Update, c: ContextTypes.DEFAULT_TYPE):
     # Card appears in <3 seconds. AI verdict edits in later as a background task.
     for ca in extract_cas(text)[:1]:
             try:
+                # v92: warm pfp + candles WHILE the scan runs (parallel with the scan)
+                async def _warm(addr: str):
+                    try:
+                        _u = await _resolve_token_image({"address": addr})
+                        if _u:
+                            await _fetch_token_pfp(_u)
+                    except Exception:
+                        pass
+                _warm_task = asyncio.create_task(_warm(ca))
                 scanning_msg = await u.effective_message.reply_text(
                     "\U0001f50d *Scanning...*", parse_mode="Markdown"
                 )
@@ -10849,7 +10894,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_chat_menu_button: {e}")
     logger.info(
-        f"💠 Ciel Brain v91 ready — "
+        f"💠 Ciel Brain v92 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
