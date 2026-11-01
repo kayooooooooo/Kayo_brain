@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v90 — PRO REBUILD                     ║
+║                    CIEL BRAIN v91 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v90", 200
+def _root(): return "💠 Ciel Brain v91", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -3924,6 +3924,26 @@ async def _resolve_token_image(t: Dict) -> str:
     _token_img_cache[addr] = url
     return url
 
+def _pfp_square_buffer(pfp, size: int = 720):
+    """v91: scan card = ONLY the token pfp — clean square, nothing drawn on it."""
+    if pfp is None:
+        return None
+    try:
+        from PIL import Image
+        im = pfp.convert("RGB")
+        w, h = im.size
+        s = min(w, h)
+        im = im.crop(((w - s) // 2, (h - s) // 2, (w + s) // 2, (h + s) // 2))
+        target = min(size, s)   # never upscale — keep the pfp crisp
+        if target != s:
+            im = im.resize((target, target), Image.LANCZOS)
+        buf = _io.BytesIO()
+        im.save(buf, "JPEG", quality=88, optimize=True)
+        buf.seek(0)
+        return buf
+    except Exception:
+        return None
+
 async def _gt_token_image(addr: str) -> str:
     """v90: stable token image from GT/CoinGecko (DexScreener CDN links 404 over time)."""
     if not addr: return ""
@@ -3943,8 +3963,9 @@ async def _fetch_token_pfp(url: str):
         async with aiohttp.ClientSession() as s:
             async with s.get(url, timeout=aiohttp.ClientTimeout(total=8)) as r:
                 if r.status != 200: return None
-                data = await r.content.read(3_000_000)
-        from PIL import Image
+                data = await r.read()   # v91: full body — content.read(n) returned partial chunks
+        from PIL import Image, ImageFile
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
         im = Image.open(_io.BytesIO(data)).convert("RGB")
         im.thumbnail((512, 512))
         if len(_pfp_cache) > 200: _pfp_cache.clear()
@@ -4442,14 +4463,13 @@ async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", re
     except Exception as e:
         logger.error(f"Card text build failed: {e}", exc_info=True)
         text_card = f"\u26a0\ufe0f Card error for `{t.get('address', '?')}` — raw scan data available via /diag"
-    # v87: PIRB-style chart card first — real minute candles + real pfp
+    # v91: SCANS (pro) = just the pfp; ALERTS = PIRB-style chart card
     img_buf = None
     try:
         if not t.get("image_url"):
             t["image_url"] = await _resolve_token_image(t)
-        if len(t.get("min_candles") or []) < 6:
-            t["min_candles"] = await _gt_minute_ohlcv(t.get("pair_addr", ""), 60)
-        t["pfp_img"] = await _fetch_token_pfp(t.get("image_url", ""))
+        if not t.get("pfp_img"):
+            t["pfp_img"] = await _fetch_token_pfp(t.get("image_url", ""))
         if not t["pfp_img"]:
             # v90: DexScreener CDN URLs expire — fall back to GT/CoinGecko image
             _alt = await _gt_token_image(t.get("address") or t.get("addr") or "")
@@ -4459,9 +4479,14 @@ async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", re
                 _a2 = t.get("address") or t.get("addr") or ""
                 if _a2 and t["pfp_img"]:
                     _token_img_cache[_a2] = _alt
-        img_buf = generate_chart_card_image(t, alert_type)
+        if pro:
+            img_buf = _pfp_square_buffer(t.get("pfp_img"))   # pfp only, nothing on it
+        if not img_buf:
+            if len(t.get("min_candles") or []) < 6:
+                t["min_candles"] = await _gt_minute_ohlcv(t.get("pair_addr", ""), 60)
+            img_buf = generate_chart_card_image(t, alert_type)
     except Exception as e:
-        logger.debug(f"chart card: {e}")
+        logger.debug(f"card image: {e}")
     if not img_buf:
         # legacy card fallback (v78 sparkline path)
         try:
@@ -4949,7 +4974,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             + [list(r) for r in markup.inline_keyboard]
         )
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v90*\n"
+        f"\U0001f4a0 *CIEL BRAIN v91*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4989,7 +5014,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v90 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v91 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -6018,7 +6043,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v90 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v91 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6414,7 +6439,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v90 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v91 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -10824,7 +10849,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_chat_menu_button: {e}")
     logger.info(
-        f"💠 Ciel Brain v90 ready — "
+        f"💠 Ciel Brain v91 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
