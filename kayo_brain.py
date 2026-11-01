@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v87 — PRO REBUILD                     ║
+║                    CIEL BRAIN v88 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v87", 200
+def _root(): return "💠 Ciel Brain v88", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -4061,10 +4061,20 @@ def generate_chart_card_image(t: Dict, alert_type: str = ""):
     for frac in (1.0, 0.66, 0.33):
         draw.text((px1 + 10, vy1 - (vy1 - vy0) * frac - 9), _short_mc(vmax * frac), font=f_ax, fill=MUTED)
 
-    # ── two-tone price line ──
-    for i in range(1, n):
-        col = TEAL if closes[i] >= closes[i - 1] else RED
-        draw.line([X(i - 1), Y(closes[i - 1]), X(i), Y(closes[i])], fill=col, width=3)
+    # ── real OHLC candlesticks ──
+    slot = (px1 - px0) / max(1, n)
+    body_w = max(3, int(slot * 0.62))
+    for i, cd in enumerate(candles):
+        try:
+            o, h, l, cl = float(cd["o"]), float(cd["h"]), float(cd["l"]), float(cd["c"])
+        except Exception:
+            continue
+        cx = X(i)
+        col = TEAL if cl >= o else RED
+        draw.line([cx, Y(h), cx, Y(l)], fill=col, width=2)      # wick
+        y1, y2 = Y(max(o, cl)), Y(min(o, cl))                    # body
+        if y2 - y1 < 2: y2 = y1 + 2
+        draw.rectangle([cx - body_w / 2, y1, cx + body_w / 2, y2], fill=col)
 
     # ── annotations: start (red, up) + peak (teal, down) ──
     def ann(i, price, col, up=True):
@@ -4918,7 +4928,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             + [list(r) for r in markup.inline_keyboard]
         )
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v87*\n"
+        f"\U0001f4a0 *CIEL BRAIN v88*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -4958,7 +4968,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v87 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v88 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -5987,7 +5997,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v87 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v88 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6383,7 +6393,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v87 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v88 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -10793,7 +10803,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_chat_menu_button: {e}")
     logger.info(
-        f"💠 Ciel Brain v87 ready — "
+        f"💠 Ciel Brain v88 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
