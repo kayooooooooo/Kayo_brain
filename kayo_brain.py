@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v93 — PRO REBUILD                     ║
+║                    CIEL BRAIN v94 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v93", 200
+def _root(): return "💠 Ciel Brain v94", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -4023,6 +4023,36 @@ async def _gt_minute_ohlcv(pool_addr: str, limit: int = 60) -> List[Dict]:
             logger.debug(f"min candles {tf}: {e}")
     return []
 
+def _synth_candles(t: Dict, n: int = 60) -> List[Dict]:
+    """v94: shape-based candles when real OHLCV is unavailable (fresh launches).
+    Built from the token's real 5m/1h/24h change so the curve still tells the truth."""
+    try:
+        ch5m = float(t.get("ch5m", 0) or 0)
+        ch1h = float(t.get("ch1h", 0) or 0)
+        ch24h = float(t.get("ch24h", 0) or 0)
+        base = 100.0
+        pts = [base]
+        for i in range(n):
+            if i < 5 and ch5m:
+                base *= (1 + ch5m / 100 / 5)
+            elif i < 15 and ch1h:
+                base *= (1 + ch1h / 100 / 15)
+            elif ch24h:
+                base *= (1 + ch24h / 100 / n)
+            wobble = 1 + ((i * 37) % 11 - 5) / 900.0
+            pts.append(base * wobble)
+        now = int(time.time())
+        out = []
+        for i in range(1, len(pts)):
+            o, cl = pts[i - 1], pts[i]
+            out.append({"ts": now - (n - i) * 60, "o": o,
+                        "h": max(o, cl) * 1.002, "l": min(o, cl) * 0.998,
+                        "c": cl, "v": 400 + ((i * 53) % 600)})
+        t["_est_chart"] = True
+        return out
+    except Exception:
+        return []
+
 def generate_chart_card_image(t: Dict, alert_type: str = ""):
     """v87: PIRB-style live chart card — real candles, real pfp watermark, volume bars."""
     try:
@@ -4030,6 +4060,8 @@ def generate_chart_card_image(t: Dict, alert_type: str = ""):
     except ImportError:
         return None
     candles = t.get("min_candles") or []
+    if len(candles) < 6:
+        candles = _synth_candles(t)   # v94: never fall back to the old card
     if len(candles) < 6:
         return None
     W, H = 900, 1120
@@ -4160,7 +4192,8 @@ def generate_chart_card_image(t: Dict, alert_type: str = ""):
         lx = min(max(X(i) - draw.textlength(_lab, font=f_ax) / 2, px0), px1 - 40)
         draw.text((lx, vy1 + 18), _lab, font=f_ax, fill=MUTED)
 
-    draw.text((px0, vy1 + 52), f"MC {_short_mc(mcap_now)}   ·   LIQ {_short_mc(float(t.get('liq') or 0))}",
+    _est = "   ·   est curve" if t.get("_est_chart") else ""
+    draw.text((px0, vy1 + 52), f"MC {_short_mc(mcap_now)}   ·   LIQ {_short_mc(float(t.get('liq') or 0))}{_est}",
               font=f_lab, fill=MUTED)
     _br = "CIEL BRAIN"
     draw.text((W - 28 - draw.textlength(_br, font=f_brand), vy1 + 52), _br, font=f_brand, fill=(52, 68, 84))
@@ -5002,7 +5035,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             + [list(r) for r in markup.inline_keyboard]
         )
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v93*\n"
+        f"\U0001f4a0 *CIEL BRAIN v94*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -5042,7 +5075,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v93 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v94 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -6071,7 +6104,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v93 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v94 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6467,7 +6500,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v93 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v94 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -8080,6 +8113,47 @@ async def pnl_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     await msg.edit_text(card, parse_mode="Markdown", disable_web_page_preview=True)
 
 
+async def copytrade_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
+    """/copytrade [wallet] — proven winners with one-tap copy-trade links, or track a wallet."""
+    if c.args:
+        w = c.args[0].strip()
+        if len(w) < 32:
+            await u.effective_message.reply_text(
+                "Usage: `/copytrade <wallet>` — or `/copytrade` to see proven winners.",
+                parse_mode="Markdown")
+            return
+        tracked_wallets[w] = {"label": "copy-trade", "by": u.effective_user.id, "added": time.time()}
+        await _save()
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("⚡ Copy on GMGN", url=f"https://gmgn.ai/sol/address/{w}"),
+            InlineKeyboardButton("👛 Explorer", url=f"https://solscan.io/account/{w}"),
+        ]])
+        await u.effective_message.reply_text(
+            f"⚡ *WALLET TRACKED — copy-trade ready*\n\n`{w}`\n\n"
+            f"She alerts you the moment this wallet moves, with one-tap trade buttons.",
+            parse_mode="Markdown", reply_markup=kb)
+        return
+    winners = [(w, v) for w, v in wallet_registry.items()
+               if int(v.get("wins", 0) or 0) >= 2 and int(v.get("losses", 0) or 0) < int(v.get("wins", 0) or 0)]
+    winners.sort(key=lambda kv: -int(kv[1].get("wins", 0) or 0))
+    if not winners:
+        await u.effective_message.reply_text(
+            "🎯 No proven winners yet, Master — the registry needs a few calls to mature.\n"
+            "Add a wallet directly: `/copytrade <wallet>`", parse_mode="Markdown")
+        return
+    txt = "⚡ *COPY-TRADE SHORTLIST*\n━━━━━━━━━━━━━━━━━━━\n"
+    rows = []
+    for i, (w, v) in enumerate(winners[:5], 1):
+        txt += (f"{i}. `{w}`\n   {int(v.get('wins', 0) or 0)}W/{int(v.get('losses', 0) or 0)}L"
+                f" · {len(v.get('tokens', []) or [])} tokens\n")
+        rows.append([InlineKeyboardButton(f"⚡ Copy #{i}", url=f"https://gmgn.ai/sol/address/{w}")])
+        if w not in tracked_wallets:
+            tracked_wallets[w] = {"label": "copy-trade (auto)", "by": 0, "added": time.time()}
+    await _save()
+    txt += "\n_All of them are now tracked — you get an alert with trade buttons when they move._"
+    await u.effective_message.reply_text(txt, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows))
+
+
 async def smart_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """/smart — tokens being accumulated by smart money right now."""
     msg = await u.effective_message.reply_text("🧠 *Scanning smart money signals...*", parse_mode="Markdown")
@@ -8098,7 +8172,7 @@ async def smart_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     )
     for i, t in enumerate(smart_tokens[:8], 1):
         addr = t.get("address", "")
-        card += f"  {i}. `{addr[:12]}...`  — `/scan {addr[:12]}...`\n"
+        card += f"  {i}. `{addr}`\n"
     card += (
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"_Tap a CA or use `/scan <CA>` for full analysis_"
@@ -8242,6 +8316,22 @@ async def snipe_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
 
 # ── LIVE BACKGROUND: WALLET TRACKER ──────────────────────────────────
 
+def _extract_txn_mint(txn) -> str:
+    """v94: best-effort token mint from a transaction payload (defensive)."""
+    try:
+        import json as _json
+        _s = _json.dumps(txn)
+        cands = set(re.findall(r'"mint"\s*:\s*"([1-9A-HJ-NP-Za-km-z]{32,44})"', _s))
+        cands |= set(re.findall(r'"(?:tokenAddress|token_address|mint_address)"\s*:\s*"([1-9A-HJ-NP-Za-km-z]{32,44})"', _s))
+        _skip = {"So11111111111111111111111111111111111111112",
+                 "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+                 "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"}
+        cands -= _skip
+        return next(iter(cands), "")
+    except Exception:
+        return ""
+
+
 async def bg_wallet_tracker(app):
     """
     Every 3 min: polls tracked wallets for new activity using SolanaFM.
@@ -8291,22 +8381,44 @@ async def bg_wallet_tracker(app):
                     t_ms  = int(latest.get("blockTime", latest.get("timestamp", 0)) or 0)
                     t_str = datetime.fromtimestamp(t_ms).strftime("%H:%M:%S") if t_ms > 1e9 else "just now"
 
+                    # v94: COPY-TRADE alert — full copyable address + wallet stats + trade buttons
+                    _wr = wallet_registry.get(addr) or {}
+                    _w_wins = int(_wr.get("wins", 0) or 0)
+                    _w_losses = int(_wr.get("losses", 0) or 0)
+                    _w_tokens = len(_wr.get("tokens", []) or [])
+                    _mint = _extract_txn_mint(latest)
+                    _sym_hint = (dropped_calls.get(_mint) or {}).get("sym", "") if _mint else ""
+                    _stat = f"{_w_wins}W / {_w_losses}L · {_w_tokens} tokens" if (_w_wins or _w_losses) else "unproven so far"
                     alert_text = (
-                        f"👛 *WALLET MOVE*\n"
+                        f"👛 *SMART MONEY MOVE* — copy-trade signal\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"🏷️ Label: *{_md(label)}*\n"
-                        f"📋 `{short}`\n"
-                        f"⏰ Time: {t_str}\n"
-                        f"🔗 [View Txn](https://solscan.io/tx/{sig})\n"
+                        f"🏷️ *{_md(label)}*  ·  {_stat}\n"
+                        f"📋 `{addr}`\n"
+                        f"⏰ {t_str}\n"
+                        + (f"🪙 Token: `{_mint}`\n" if _mint else "")
+                        + f"🔗 [Wallet](https://solscan.io/account/{addr}) · [Txn](https://solscan.io/tx/{sig})\n"
                         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                        f"Use `/wallet {addr}` for full analysis"
+                        f"_Tap the address to copy it · trade straight from the buttons_"
                     )
+                    _kb = None
+                    try:
+                        _rows = []
+                        if _mint:
+                            _rows += [list(r) for r in _rick_buttons(_mint, _sym_hint).inline_keyboard]
+                        _rows.append([
+                            InlineKeyboardButton("⚡ Copy on GMGN", url=f"https://gmgn.ai/sol/address/{addr}"),
+                            InlineKeyboardButton("👛 Explorer", url=f"https://solscan.io/account/{addr}"),
+                        ])
+                        _kb = InlineKeyboardMarkup(_rows)
+                    except Exception:
+                        _kb = None
                     try:
                         await app.bot.send_message(
                             chat_id=GROUP_CHAT_ID,
                             text=alert_text,
                             parse_mode="Markdown",
                             disable_web_page_preview=True,
+                            reply_markup=_kb,
                         )
                     except Exception:
                         pass
@@ -10747,6 +10859,7 @@ async def post_init(app: Application):
         BotCommand("news",          "📰 Latest news + AI summary"),
         BotCommand("ask",           "🤖 Ask Ciel AI anything"),
     BotCommand("dash",          "📊 Dashboard (Mini App)"),
+    BotCommand("copytrade",     "⚡ Copy-trade proven wallets"),
         BotCommand("voice",         "🎤 Toggle Ciel voice notes"),
         BotCommand("commentary",    "📡 Toggle macro commentary"),
         BotCommand("backtest",      "📊 Simulate aping every call"),
@@ -10844,6 +10957,7 @@ async def post_init(app: Application):
         BotCommand("news",      "📰 News + AI summary"),
         BotCommand("ask",       "🤖 Ask Ciel AI anything"),
     BotCommand("dash",      "📊 Dashboard (Mini App)"),
+    BotCommand("copytrade", "⚡ Copy-trade proven wallets"),
         BotCommand("voice",     "🎤 Toggle Ciel voice notes"),
         BotCommand("commentary", "📡 Toggle macro commentary"),
         BotCommand("sentiment", "😤 Market mood"),
@@ -10886,7 +11000,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_chat_menu_button: {e}")
     logger.info(
-        f"💠 Ciel Brain v93 ready — "
+        f"💠 Ciel Brain v94 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -11462,6 +11576,7 @@ def main():
         ("voice", voice_cmd), ("commentary", commentary_cmd),
         ("backtest", backtest_cmd),
         ("dash", dash_cmd),
+        ("copytrade", copytrade_cmd),
         ("callers", callers_cmd), ("crowd", crowd_cmd),
         ("setfilters", setfilters_cmd), ("mirror", mirror_cmd),
     ]
