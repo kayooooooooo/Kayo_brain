@@ -1,6 +1,6 @@
 """
 ╔══════════════════════════════════════════════════════════════════════╗
-║                    CIEL BRAIN v94 — PRO REBUILD                     ║
+║                    CIEL BRAIN v95 — PRO REBUILD                     ║
 ║  AI:      Groq REST (primary) → Gemini REST (fallback) — NO SDK     ║
 ║           AI always injected with LIVE price data before answering  ║
 ║  Data:    DexScreener ALL endpoints + CoinGecko + GoPlus            ║
@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def _root(): return "💠 Ciel Brain v94", 200
+def _root(): return "💠 Ciel Brain v95", 200
 
 @flask_app.route("/health")
 def _health(): return "OK", 200
@@ -188,10 +188,17 @@ function callRow(c){
 function boardRow(b,i){return `<div class="row"><div class="rank">${i+1}</div>
   <div class="grow"><div class="sym">${esc(b.sym)}</div><div class="sub2 mono">${esc(b.type||'')} · ${age(b.age_h)} ago</div></div>
   <div class="num mono ${cls(b.mult-1)}">${(+b.mult||0).toFixed(2)}x</div></div>`}
-function moneyRow(w){return `<div class="row"><div class="grow">
-  <div class="sym mono" style="font-size:13px">${esc(w.wallet)}</div>
-  <div class="sub2">${w.tokens} tokens seen</div></div>
-  <div class="num"><span class="badge b-win">${w.wins}W</span> <span class="badge b-loss">${w.losses}L</span></div></div>`}
+function moneyRow(w){
+  const t=w.trades||[];
+  const tr=t.length?`<details style="margin-top:6px"><summary class="sub2" style="cursor:pointer;outline:none">${t.length} tracked trades</summary>${
+    t.map(x=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-top:1px solid rgba(255,255,255,.05)" onclick="event.stopPropagation();copy('${esc(x.addr)}')" title="tap to copy CA">
+      <span class="mono" style="font-size:12px">${esc(x.sym)}</span>
+      <span class="mono" style="font-size:12px;color:${x.outcome==='win'?'#3dd5ab':x.outcome==='rug'?'#ff6961':x.outcome==='open'?'#808c96':'#ff9f6b'}">${x.outcome}${x.mult?` ${x.mult.toFixed(1)}x`:''}</span></div>`).join('')
+  }</details>`:'<div class="sub2">No tracked trades yet</div>';
+  return `<div class="row"><div class="grow">
+    <div class="sym mono" style="font-size:11.5px;word-break:break-all" onclick="copy('${esc(w.wallet)}')" title="tap to copy wallet">${esc(w.wallet)} <span style="opacity:.45">⧉</span></div>
+    <div class="sub2">${w.tokens} tokens · tap wallet to copy</div>${tr}</div>
+    <div class="num"><span class="badge b-win">${w.wins}W</span> <span class="badge b-loss">${w.losses}L</span></div></div>`}
 function crowdRow(c){return `<div class="row"><div class="grow"><div class="sym">${esc(c.sym)}</div></div>
   <div class="num"><span class="up">🦍 ${c.up}</span> <span class="dn">🗑️ ${c.down}</span></div></div>`}
 function metaRow(m){return `<div class="row"><div class="grow"><div class="sym">#${esc(m.name)}</div>
@@ -291,10 +298,32 @@ def _dash_payload() -> Dict:
                             "avg": sum(ms) / len(ms),
                             "rug": sum(1 for a, s, ts in cr.get("calls", [])[-40:] if (dropped_calls.get(a) or {}).get("status") == "rugged")})
     callers.sort(key=lambda x: -x["avg"])
-    smart = [{"wallet": w[:6] + "..." + w[-4:], "wins": int(v.get("wins", 0)), "losses": int(v.get("losses", 0)),
-              "tokens": len(v.get("tokens", []))}
-             for w, v in wallet_registry.items()
-             if v.get("wins", 0) >= 2 and v.get("losses", 0) < v.get("wins", 0)]
+    # v95: full address + the actual trades behind the W/L, not just the score
+    smart = []
+    for _w, _v in wallet_registry.items():
+        if not (int(_v.get("wins", 0) or 0) >= 2 and int(_v.get("losses", 0) or 0) < int(_v.get("wins", 0) or 0)):
+            continue
+        _trades = []
+        for _a in (_v.get("tokens") or [])[-14:]:
+            _dc = dropped_calls.get(_a) or {}
+            if not _dc:
+                continue
+            _lm = _dc.get("last_mult")
+            _st = _dc.get("status")
+            if _st == "rugged":
+                _out = "rug"
+            elif _lm is None:
+                _out = "open"
+            elif float(_lm) >= 2:
+                _out = "win"
+            else:
+                _out = "loss"
+            _trades.append({"sym": _dc.get("sym", "?"), "addr": _a,
+                            "mult": round(float(_lm), 2) if _lm else 0,
+                            "outcome": _out})
+        smart.append({"wallet": _w, "wins": int(_v.get("wins", 0) or 0),
+                      "losses": int(_v.get("losses", 0) or 0),
+                      "tokens": len(_v.get("tokens", [])), "trades": _trades})
     smart.sort(key=lambda x: -x["wins"])
     crowd = [{"sym": (dropped_calls.get(a) or {}).get("sym", "?"), "up": len(v.get("up", [])), "down": len(v.get("down", []))}
              for a, v in crowd_votes.items() if v.get("up") or v.get("down")]
@@ -524,6 +553,7 @@ async def _save():
     """Async-safe state save — runs without blocking the event loop."""
     async with _save_lock:
         data = {
+            "saved_at": time.time(),
             "watchlist": watchlist,
             "user_alerts": user_alerts,
             "portfolios": portfolios,
@@ -575,6 +605,73 @@ async def _save():
                 await loop.run_in_executor(None, lambda: open(STATE_FILE, "w").write(raw))
         except Exception as e:
             logger.warning(f"save_state: {e}")
+
+async def _cloud_state_pull() -> bool:
+    """v95: restore state from the GitHub mirror when it is newer than the local copy.
+    Fixes the 'redeploy wipes everything' problem (container disk is ephemeral)."""
+    try:
+        repo = os.environ.get("GITHUB_STATE_REPO", "kayooooooooo/Kayo_brain")
+        url = f"https://raw.githubusercontent.com/{repo}/main/{STATE_FILE}"
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=12)) as r:
+                if r.status != 200:
+                    return False
+                raw = await r.text()
+        remote = json.loads(raw)
+        r_ts = float(remote.get("saved_at", 0) or 0)
+        local = {}
+        try:
+            if os.path.exists(STATE_FILE):
+                local = json.loads(open(STATE_FILE).read())
+        except Exception:
+            local = {}
+        l_ts = float(local.get("saved_at", 0) or 0)
+        if r_ts <= l_ts:
+            return False
+        with open(STATE_FILE, "w") as f:
+            f.write(raw)
+        logger.info(f"☁️ state restored from GitHub mirror (remote {int(r_ts)} > local {int(l_ts)})")
+        return True
+    except Exception as e:
+        logger.debug(f"cloud state pull: {e}")
+        return False
+
+
+async def bg_state_backup(app):
+    """v95: every 5 min mirror kayo_state.json to GitHub (needs GITHUB_STATE_TOKEN env)."""
+    await asyncio.sleep(120)
+    tok = os.environ.get("GITHUB_STATE_TOKEN", "")
+    if not tok:
+        logger.info("☁️ state backup idle — set GITHUB_STATE_TOKEN to sync across redeploys")
+        return
+    import base64 as _b64
+    repo = os.environ.get("GITHUB_STATE_REPO", "kayooooooooo/Kayo_brain")
+    api = f"https://api.github.com/repos/{repo}/contents/{STATE_FILE}"
+    hdr = {"Authorization": f"Bearer {tok}", "Accept": "application/vnd.github+json"}
+    while True:
+        try:
+            if os.path.exists(STATE_FILE):
+                raw = open(STATE_FILE, "rb").read()
+                async with aiohttp.ClientSession() as s:
+                    sha = ""
+                    async with s.get(api, headers=hdr, timeout=aiohttp.ClientTimeout(total=12)) as r:
+                        if r.status == 200:
+                            sha = (await r.json()).get("sha", "")
+                    body = {"message": "state: auto-sync", "content": _b64.b64encode(raw).decode()}
+                    if sha:
+                        body["sha"] = sha
+                    async with s.put(api, headers=hdr, json=body, timeout=aiohttp.ClientTimeout(total=25)) as r:
+                        if r.status in (200, 201):
+                            logger.info("☁️ state mirrored to GitHub")
+                        elif r.status == 401:
+                            logger.warning("state mirror: token rejected (401) — check GITHUB_STATE_TOKEN")
+                            return
+                        else:
+                            logger.warning(f"state mirror HTTP {r.status}")
+        except Exception as e:
+            logger.warning(f"state mirror: {e}")
+        await asyncio.sleep(300)
+
 
 async def _load():
     global watchlist, user_alerts, portfolios, active_calls, blacklist
@@ -3995,6 +4092,68 @@ async def _fetch_token_pfp(url: str):
 
 _candle_cache: Dict[str, tuple] = {}
 
+def _short_price(p) -> str:
+    """v95: price-axis label formatter (tiny prices keep precision, no bogus B suffixes)."""
+    try:
+        p = float(p)
+    except Exception:
+        return "?"
+    if p >= 1000: return f"{p:,.0f}"
+    if p >= 1: return f"{p:.2f}"
+    if p >= 0.01: return f"{p:.4f}"
+    if p >= 0.0001: return f"{p:.6f}"
+    return f"{p:.2e}"
+
+
+_CHART_TF_CACHE: Dict[tuple, tuple] = {}
+
+
+def _chart_tf_for_age(created_ms: int) -> tuple:
+    """v95: candle timeframe scales with how long the coin has existed."""
+    now_ms = time.time() * 1000
+    age_s = max(600.0, (now_ms - (created_ms or (now_ms - 3600 * 1000))) / 1000)
+    if age_s < 3 * 3600:
+        return ("minute", 1, 60, "1m")
+    if age_s < 26 * 3600:
+        return ("minute", 15, 96, "15m")
+    if age_s < 7 * 86400:
+        return ("hour", 1, 96, "1h")
+    return ("hour", 4, 90, "4h")
+
+
+async def _gt_chart_candles(pool_addr: str, created_ms: int = 0):
+    """v95: real candles at a timeframe matched to the token age. Returns (candles, tf_label)."""
+    if not pool_addr:
+        return [], "1m"
+    tf, agg, limit, label = _chart_tf_for_age(created_ms)
+    key = (pool_addr, tf, agg, limit)
+    now = time.time()
+    ent = _CHART_TF_CACHE.get(key)
+    if ent and now - ent[0] < 30:
+        return ent[1], label
+    out: List[Dict] = []
+    try:
+        d = await _get(f"{_GT}/networks/solana/pools/{pool_addr}/ohlcv/{tf}?aggregate={agg}&limit={limit}&currency=usd")
+        rows = ((d or {}).get("data", {}) or {}).get("attributes", {}).get("ohlcv_list") or []
+        for r in rows:
+            if len(r) < 5:
+                continue
+            try:
+                out.append({"ts": int(r[0]), "o": float(r[1]), "h": float(r[2]),
+                            "l": float(r[3]), "c": float(r[4]),
+                            "v": float(r[5]) if len(r) > 5 else 0.0})
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"chart candles {tf}/{agg}: {e}")
+    if len(out) < 6 and (tf, agg) != ("minute", 1):
+        out = await _gt_minute_ohlcv(pool_addr, 60)
+        label = "1m"
+    if len(out) >= 6 and len(_CHART_TF_CACHE) < 400:
+        _CHART_TF_CACHE[key] = (now, out)
+    return out, label
+
+
 async def _gt_minute_ohlcv(pool_addr: str, limit: int = 60) -> List[Dict]:
     """v87: real minute candles (ts,o,h,l,c,v) for the chart card."""
     if not pool_addr: return []
@@ -4133,12 +4292,24 @@ def generate_chart_card_image(t: Dict, alert_type: str = ""):
     # ── grid + left axis (mcap scale) ──
     price_now = float(t.get("price") or closes[-1] or 0)
     mcap_now = float(t.get("mcap") or 0)
-    mc_ratio = (mcap_now / price_now) if price_now and mcap_now else 0
+    # v95: only trust an mcap ratio that lands in a sane memecoin band —
+    # raw-supply mcap errors used to print absurd "20000.0B" axis labels
+    mc_ratio = 0.0
+    for _pref in (price_now, closes[-1]):
+        try:
+            if _pref and mcap_now:
+                _r = mcap_now / _pref
+                if 1e3 <= _r * min(closes) <= 2e10:
+                    mc_ratio = _r
+                    break
+        except Exception:
+            continue
+    mcap_sane = 1e3 <= mcap_now <= 2e10
     for k in range(5):
         gy = py0 + (py1 - py0) * k / 4
         draw.line([px0, gy, px1, gy], fill=GRID, width=1)
         _p = hi - (hi - lo) * k / 4
-        _label = _short_mc(_p * mc_ratio) if mc_ratio else _short_mc(_p)
+        _label = _short_mc(_p * mc_ratio) if mc_ratio else _short_price(_p)
         draw.text((px0 - 8 - draw.textlength(_label, font=f_ax), gy - 9), _label, font=f_ax, fill=MUTED)
 
     # ── volume bars ──
@@ -4171,7 +4342,7 @@ def generate_chart_card_image(t: Dict, alert_type: str = ""):
     # ── annotations: start (red, up) + peak (teal, down) ──
     def ann(i, price, col, up=True):
         cx, cy = X(i), Y(price)
-        txt = _short_mc(price * mc_ratio) if mc_ratio else _short_mc(price)
+        txt = _short_mc(price * mc_ratio) if mc_ratio else _short_price(price)
         tw = draw.textlength(txt, font=f_ann)
         tx = min(max(cx - tw / 2, px0 + 4), px1 - tw - 4)
         draw.text((tx, cy + (16 if up else -34)), txt, font=f_ann, fill=col)
@@ -4188,12 +4359,16 @@ def generate_chart_card_image(t: Dict, alert_type: str = ""):
     for i in range(0, n, step):
         ts = candles[i].get("ts")
         if not ts: continue
-        _lab = time.strftime("%H:%M", time.gmtime(ts + 3600))
+        if t.get("chart_tf") in ("1h", "4h") and n > 40:
+            _lab = time.strftime("%d/%m", time.gmtime(ts + 3600))
+        else:
+            _lab = time.strftime("%H:%M", time.gmtime(ts + 3600))
         lx = min(max(X(i) - draw.textlength(_lab, font=f_ax) / 2, px0), px1 - 40)
         draw.text((lx, vy1 + 18), _lab, font=f_ax, fill=MUTED)
 
     _est = "   ·   est curve" if t.get("_est_chart") else ""
-    draw.text((px0, vy1 + 52), f"MC {_short_mc(mcap_now)}   ·   LIQ {_short_mc(float(t.get('liq') or 0))}{_est}",
+    _mc_txt = _short_mc(mcap_now) if mcap_sane else "—"
+    draw.text((px0, vy1 + 52), f"MC {_mc_txt}   ·   LIQ {_short_mc(float(t.get('liq') or 0))}   ·   {t.get('chart_tf', '1m')}{_est}",
               font=f_lab, fill=MUTED)
     _br = "CIEL BRAIN"
     draw.text((W - 28 - draw.textlength(_br, font=f_brand), vy1 + 52), _br, font=f_brand, fill=(52, 68, 84))
@@ -4534,8 +4709,10 @@ async def send_scan_card_with_image(bot, chat_id: int, t: Dict, ai: str = "", re
         async def _need_candles():
             if len(t.get("min_candles") or []) < 6:
                 try:
-                    t["min_candles"] = await asyncio.wait_for(
-                        _gt_minute_ohlcv(t.get("pair_addr", ""), 60), timeout=3)
+                    _c, _tf = await asyncio.wait_for(
+                        _gt_chart_candles(t.get("pair_addr", ""), int(t.get("created") or 0)), timeout=4)
+                    t["min_candles"] = _c or []
+                    t["chart_tf"] = _tf
                 except Exception:
                     t["min_candles"] = []
             return True
@@ -5035,7 +5212,7 @@ async def start(u: Update, c: ContextTypes.DEFAULT_TYPE):
             + [list(r) for r in markup.inline_keyboard]
         )
     await (u.message or u.effective_message).reply_text(
-        f"\U0001f4a0 *CIEL BRAIN v94*\n"
+        f"\U0001f4a0 *CIEL BRAIN v95*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"_Yo {name}! Your Solana alpha intelligence bot is live._\n\n"
         f"Tap any button below or type `/` to browse all commands in the menu bar."
@@ -5075,7 +5252,7 @@ async def help_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
         ],
     ])
     await u.effective_message.reply_text(
-        "\U0001f4a0 *CIEL BRAIN v94 — COMMANDS*\n"
+        "\U0001f4a0 *CIEL BRAIN v95 — COMMANDS*\n"
         "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         "Tap a category \U0001f447 to see its commands.\n"
         "Or type `/` in the chat bar to tap any command directly.",
@@ -6104,7 +6281,7 @@ async def ping_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     t   = time.time()
     msg = await u.effective_message.reply_text("🏓")
     ms  = int((time.time() - t) * 1000)
-    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v94 alive.", parse_mode="Markdown")
+    await msg.edit_text(f"🏓 *Pong!* {ms}ms — Ciel Brain v95 alive.", parse_mode="Markdown")
 
 async def price_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     """
@@ -6500,7 +6677,7 @@ async def status_cmd(u: Update, c: ContextTypes.DEFAULT_TYPE):
     def _esc(s): return _re_st.sub(r'([*_`\[\]\]()~>#+=|{}.-])', r'\\\1', str(s))
 
     status_text = (
-        f"\u2699\ufe0f *CIEL BRAIN v94 STATUS*\n"
+        f"\u2699\ufe0f *CIEL BRAIN v95 STATUS*\n"
         f"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\n"
         f"{_esc(ai_live)}\n"
         f"  Groq key: {_esc(groq_key)}\n"
@@ -10825,6 +11002,11 @@ async def bg_reminder_checker(app: Application):
 # ═══════════════════════════════════════════════════════════════
 async def post_init(app: Application):
     global _redis
+    try:
+        if await _cloud_state_pull():
+            await _load()
+    except Exception as _ce:
+        logger.warning(f"cloud state pull at startup: {_ce}")
     _redis = _make_redis()
     if _redis:
         try:
@@ -11000,7 +11182,7 @@ async def post_init(app: Application):
     except Exception as e:
         logger.warning(f"set_chat_menu_button: {e}")
     logger.info(
-        f"💠 Ciel Brain v94 ready — "
+        f"💠 Ciel Brain v95 ready — "
         f"Groq: {'✅' if GROQ_API_KEY else '❌'} | "
         f"Gemini: {'✅' if GEMINI_API_KEY else '❌'} | "
         f"Group alerts: {'✅ '+str(GROUP_CHAT_ID) if GROUP_CHAT_ID != 0 else '❌ set GROUP_CHAT_ID'}"
@@ -11596,6 +11778,7 @@ def main():
             await app.start()
             await app.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
             asyncio.create_task(bg_state_saver(app))
+            asyncio.create_task(bg_state_backup(app))
             asyncio.create_task(bg_main_scanner(app))
             asyncio.create_task(bg_followup_tracker(app))
             asyncio.create_task(bg_established_scanner(app))
